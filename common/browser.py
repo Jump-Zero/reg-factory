@@ -178,9 +178,9 @@ async def open_and_connect(name, p=None, browser_options=None):
             break
         except Exception as e:
             msg = str(e)
-            if any(k in msg.lower() for k in ["tls", "socket", "econnreset", "network", "timeout", "disconnected", "未知错误"]):
-                print(f"  open browser network error (retry {attempt+1}/{max_open}): {msg[:80]}")
-                await asyncio.sleep(6)
+            if any(k in msg.lower() for k in ["tls", "socket", "econnreset", "network", "timeout", "disconnected", "未知错误", "正在打开", "opening", "启动中", "starting", "busy"]):
+                print(f"  open browser retry (retry {attempt+1}/{max_open}): {msg[:80]}")
+                await asyncio.sleep(3)
                 continue
             raise
     if not data:

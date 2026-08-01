@@ -38,6 +38,24 @@ if sys.platform == "win32":
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ARTIFACT_DIR = os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or SCRIPT_DIR
 POOL_DIR = os.path.join(ARTIFACT_DIR, "_outlook_pool")
+EMAILS_META_FILE = os.path.join(ARTIFACT_DIR, "emails_meta.json")
+
+
+def _mark_email_source(email_lower, source):
+    """标记邮箱来源分类到 emails_meta.json。"""
+    meta = {}
+    try:
+        if os.path.isfile(EMAILS_META_FILE):
+            with open(EMAILS_META_FILE, encoding="utf-8") as f:
+                meta = json.load(f)
+    except Exception:
+        meta = {}
+    meta[email_lower] = {"source": source}
+    try:
+        with open(EMAILS_META_FILE, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 # 账号注册侧消费的池（common/emails.next_email 读取），格式 email----password----token----clientid
 EMAILS_POOL = os.path.join(ARTIFACT_DIR, "emails.txt")
 # 注册成功但 Graph refresh_token 抽取失败的号：邮箱+密码单独存这里，别丢。
@@ -540,6 +558,8 @@ def append_graph_account_to_emails_pool(email, password, graph):
             return True
         with open(EMAILS_POOL, "a", encoding="utf-8") as f:
             f.write(f"{email}----{password}----{token}----{client_id}\n")
+        # 标记为"自主注册"
+        _mark_email_source(email.lower(), "registered")
         log(f"emails.txt += {email} (token=yes)", "OK")
         return True
     except Exception as exc:

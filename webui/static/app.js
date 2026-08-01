@@ -451,9 +451,11 @@ function filteredAssetScanItems(){
   if(!assetScanData) return [];
   const platform = $('#asset-scan-platform').value;
   const status = $('#asset-scan-status').value;
+  const source = $('#asset-scan-source') ? $('#asset-scan-source').value : 'all';
   return (assetScanData.items || []).filter(item=>
     (platform === 'all' || item.platform === platform) &&
-    (status === 'all' || item.status === status)
+    (status === 'all' || item.status === status) &&
+    (source === 'all' || item.mail_source === source)
   );
 }
 
@@ -467,17 +469,49 @@ function renderAssetScanTable(){
   body.innerHTML = '';
   visible.forEach(item=>{
     const row = document.createElement('tr');
+    // 复选框列
+    const checkCell = document.createElement('td');
+    checkCell.className = 'col-check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'asset-scan-check';
+    cb.dataset.email = item.email || '';
+    cb.dataset.platform = item.platform || '';
+    checkCell.appendChild(cb);
+    row.appendChild(checkCell);
+    // 类型
     appendAssetScanCell(row, ASSET_SCAN_PLATFORM_LABELS[item.platform] || item.platform, 'asset-scan-platform');
+    // 账号
     const account = appendAssetScanCell(row, item.email || item.source, 'asset-scan-account');
     account.title = item.source || '';
+    // 分类
+    const catCell = document.createElement('td');
+    catCell.className = 'col-source';
+    if(item.mail_source === 'imported'){
+      const badge = document.createElement('span');
+      badge.className = 'mail-source-badge imported';
+      badge.textContent = '自主导入';
+      catCell.appendChild(badge);
+    } else if(item.mail_source === 'registered'){
+      const badge = document.createElement('span');
+      badge.className = 'mail-source-badge registered';
+      badge.textContent = '自主注册';
+      catCell.appendChild(badge);
+    } else {
+      catCell.textContent = '—';
+    }
+    row.appendChild(catCell);
+    // 状态
     const statusCell = document.createElement('td');
     const badge = document.createElement('span');
     badge.className = `asset-status-badge ${item.status || 'unknown'}`;
     badge.textContent = ASSET_SCAN_STATUS_LABELS[item.status] || item.status || '未知';
     statusCell.appendChild(badge);
     row.appendChild(statusCell);
+    // 检测结果
     const detail = appendAssetScanCell(row, item.detail || '尚未扫描', 'asset-scan-detail');
     detail.title = `${item.evidence || 'none'} · ${item.source || ''}`;
+    // 检测时间
     appendAssetScanCell(row, formatAssetScanTime(item.checked_at), 'asset-scan-checked');
     body.appendChild(row);
   });
@@ -486,6 +520,7 @@ function renderAssetScanTable(){
   $('#asset-scan-page').textContent = `${assetScanPage} / ${pages}`;
   $('#btn-scan-prev').disabled = assetScanPage <= 1;
   $('#btn-scan-next').disabled = assetScanPage >= pages;
+  updateScanSelectAllState();
 }
 
 function renderAssetScan(data){
@@ -503,6 +538,7 @@ function renderAssetScan(data){
   bar.value = Math.min(completed, Math.max(1, total));
   $('#btn-scan-all').disabled = !!scan.running;
   $('#btn-scan-current').disabled = !!scan.running;
+  $('#btn-scan-selected').disabled = !!scan.running || getCheckedScanEmails().length === 0;
   $('#asset-scan-concurrency').disabled = !!scan.running;
   if(scan.running){
     const current = progress.current ? ` · ${progress.current}` : '';
@@ -544,6 +580,30 @@ async function startAssetScan(all=false){
     })});
     await readAssetResponse(response);
     setAssetMessage('#asset-scan-msg', `已开始扫描 ${platforms.length === 4 ? '全部号池' : ASSET_SCAN_PLATFORM_LABELS[platforms[0]]}`, true);
+    await loadAssetScan();
+  }catch(error){
+    setAssetMessage('#asset-scan-msg', error.message || String(error), false);
+  }
+}
+
+async function startAssetScanSelected(){
+  const emails = getCheckedScanEmails();
+  if(!emails.length){
+    setAssetMessage('#asset-scan-msg', '请先勾选要扫描的邮箱', false);
+    return;
+  }
+  const platform = $('#asset-scan-platform').value;
+  const platforms = platform === 'all' ? ['outlook','chatgpt','claude','grok'] : [platform];
+  setAssetMessage('#asset-scan-msg', `正在启动选中扫描（${emails.length} 个）…`);
+  try{
+    const response = await fetch('/api/assets/scan', {method:'POST', headers:assetHeaders(true), body:JSON.stringify({
+      platforms,
+      concurrency:parseInt($('#asset-scan-concurrency').value || '4', 10),
+      timeout:15,
+      emails,
+    })});
+    await readAssetResponse(response);
+    setAssetMessage('#asset-scan-msg', `已开始扫描选中的 ${emails.length} 个账号`, true);
     await loadAssetScan();
   }catch(error){
     setAssetMessage('#asset-scan-msg', error.message || String(error), false);
@@ -636,6 +696,7 @@ $('#btn-copy-url').onclick = ()=>copyText($('#asset-request-url').textContent, $
 $('#btn-copy-curl').onclick = ()=>copyText($('#asset-curl-example').textContent, $('#btn-copy-curl'));
 $('#btn-scan-all').onclick = ()=>startAssetScan(true);
 $('#btn-scan-current').onclick = ()=>startAssetScan(false);
+$('#btn-scan-selected').onclick = ()=>startAssetScanSelected();
 $('#asset-scan-platform').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); };
 $('#asset-scan-status').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); };
 $$('[data-scan-status]').forEach(button=>button.onclick=()=>{
@@ -645,6 +706,66 @@ $$('[data-scan-status]').forEach(button=>button.onclick=()=>{
 });
 $('#btn-scan-prev').onclick = ()=>{ assetScanPage -= 1; renderAssetScanTable(); };
 $('#btn-scan-next').onclick = ()=>{ assetScanPage += 1; renderAssetScanTable(); };
+$('#asset-scan-source').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); };
+
+// 扫描表格复选框 + 批量删除
+function getCheckedScanEmails(){
+  return Array.from(document.querySelectorAll('.asset-scan-check:checked'))
+    .map(cb=>cb.dataset.email).filter(e=>e);
+}
+
+function updateScanSelectAllState(){
+  const checks = document.querySelectorAll('.asset-scan-check');
+  const checked = document.querySelectorAll('.asset-scan-check:checked');
+  const selectAll = $('#asset-scan-check-all');
+  if(selectAll) selectAll.checked = checks.length > 0 && checks.length === checked.length;
+  const delBtn = $('#btn-delete-scan-mails');
+  if(delBtn){
+    delBtn.disabled = checked.length === 0;
+    delBtn.textContent = checked.length > 0 ? `删除选中(${checked.length})` : '删除选中';
+  }
+  const scanBtn = $('#btn-scan-selected');
+  if(scanBtn){
+    const scanRunning = !!(assetScanData?.scan?.running);
+    scanBtn.disabled = scanRunning || checked.length === 0;
+    scanBtn.textContent = checked.length > 0 ? `扫描选中(${checked.length})` : '扫描选中';
+  }
+}
+
+$('#asset-scan-check-all').onchange = function(){
+  document.querySelectorAll('.asset-scan-check').forEach(cb=>cb.checked = this.checked);
+  updateScanSelectAllState();
+};
+
+document.addEventListener('change', function(e){
+  if(e.target.classList && e.target.classList.contains('asset-scan-check')){
+    updateScanSelectAllState();
+  }
+});
+
+$('#btn-delete-scan-mails').onclick = async ()=>{
+  const emails = getCheckedScanEmails();
+  if(!emails.length) return;
+  if(!confirm(`确认删除选中的 ${emails.length} 个邮箱？此操作不可撤销。`)) return;
+  const btn = $('#btn-delete-scan-mails');
+  btn.disabled = true;
+  btn.textContent = '删除中…';
+  try{
+    const r = await (await fetch('/api/mailpool/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({emails})})).json();
+    if(r.ok){
+      setAssetMessage('#asset-scan-msg', `已删除 ${r.deleted} 个邮箱，剩余 ${r.total}`, true);
+      await Promise.all([refreshAssetSummary(), loadAssetScan(), loadMailpool()]);
+    } else {
+      setAssetMessage('#asset-scan-msg', '删除失败: '+(r.msg||''), false);
+    }
+  }catch(e){
+    setAssetMessage('#asset-scan-msg', '删除请求失败: '+e, false);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = '删除选中';
+  }
+};
 
 // ---------------------------------------------------------------- Codex K12 集成通道
 function renderK12Status(status){
@@ -1129,7 +1250,9 @@ $('#btn-import-mail').onclick = async ()=>{
       msg.textContent = m;
       if(r.bad && r.bad_samples.length) msg.textContent += `（错误样例：${r.bad_samples[0]}…）`;
       $('#mailpool-total').textContent = `当前池中 ${r.total} 个邮箱`;
-      if(r.added) $('#mailpool-input').value='';
+      if(r.added){
+        $('#mailpool-input').value='';
+      }
     }else{ msg.textContent='导入失败: '+(r.msg||''); }
   }catch(e){ msg.textContent='导入请求失败: '+e; }
   finally{ btn.disabled=false; btn.textContent=o; }

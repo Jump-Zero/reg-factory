@@ -5,7 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
+<<<<<<< Updated upstream
 <link rel="stylesheet" href="/static/style.css?v=20260729-update-1">
+=======
+<link rel="stylesheet" href="/static/style.css?v=20260729-scan-check-1">
+>>>>>>> Stashed changes
 </head>
 <body>
 <header class="topbar">
@@ -206,6 +210,11 @@
               <option value="claude">Claude</option>
               <option value="grok">Grok</option>
             </select></label>
+            <label><span>分类</span><select id="asset-scan-source">
+              <option value="all">全部分类</option>
+              <option value="imported">自主导入</option>
+              <option value="registered">自主注册</option>
+            </select></label>
             <label><span>状态</span><select id="asset-scan-status">
               <option value="all">全部状态</option>
               <option value="normal">正常</option>
@@ -218,12 +227,17 @@
               <option value="error">检测异常</option>
             </select></label>
             <span id="asset-scan-result-count" class="asset-scan-result-count">0 条</span>
+            <button id="btn-scan-selected" class="btn-secondary" type="button" disabled>扫描选中</button>
+            <button id="btn-delete-scan-mails" class="btn-danger" type="button" disabled>删除选中</button>
             <span id="asset-scan-msg" class="asset-message" role="status" aria-live="polite"></span>
           </div>
 
           <div class="asset-scan-table-wrap">
             <table class="asset-scan-table">
-              <thead><tr><th>类型</th><th>账号</th><th>状态</th><th>检测结果</th><th>检测时间</th></tr></thead>
+              <thead><tr>
+                <th class="col-check"><input type="checkbox" id="asset-scan-check-all"></th>
+                <th>类型</th><th>账号</th><th>分类</th><th>状态</th><th>检测结果</th><th>检测时间</th>
+              </tr></thead>
               <tbody id="asset-scan-rows"></tbody>
             </table>
             <div id="asset-scan-empty" class="asset-scan-empty">暂无号池资产</div>
@@ -389,6 +403,10 @@
   <a href="https://t.me/TIANTIANAIPRO" target="_blank" rel="noopener">@TIANTIANAIPRO</a>
 </dialog>
 
+<<<<<<< Updated upstream
 <script src="/static/app.js?v=20260729-update-1"></script>
+=======
+<script src="/static/app.js?v=20260729-scan-check-1"></script>
+>>>>>>> Stashed changes
 </body>
 </html>

@@ -220,6 +220,8 @@ GROK_SUB_CDK = [c.strip() for c in _env("GROK_SUB_CDK", "").replace("\n", ",").r
 # OpenAI/ChatGPT 在接码平台的服务号（按平台分，跟 Claude 的不同）
 SMS_PROJECT_ID_OPENAI = _env("SMS_PROJECT_ID_OPENAI", "")  # firefox.fun 的 ChatGPT 项目 iid（待填）
 HERO_SMS_SERVICE_OPENAI = _env("HERO_SMS_SERVICE_OPENAI", "dr")  # hero-sms/sms-activate OpenAI 服务码默认 dr
+# hero-sms 价格上限(USD)，留空或0=不限(原硬编码1.0仍为兜底默认)
+HERO_SMS_MAXPRICE_OPENAI = _env("HERO_SMS_MAXPRICE_OPENAI", "1.0")
 # firefox.fun 价格上限：'0' 只取最便宜(垃圾号易被 OpenAI 拒)，给够才摸得到智利等好号
 SMS_MAXPRICE_OPENAI = _env("SMS_MAXPRICE_OPENAI", "20")
 # OpenAI add-phone 拉黑的号段(dialing code)：261 马达加斯加、63 菲律宾 等 OpenAI 常拒的

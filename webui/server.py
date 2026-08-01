@@ -713,6 +713,17 @@ def _asset_scan_payload():
         **ASSET_SCAN_STATE,
         "progress": dict(ASSET_SCAN_STATE.get("progress") or {}),
     }
+    # 合并邮箱分类(自主导入/自主注册)到 outlook 扫描项
+    meta = _load_emails_meta()
+    source_counts = {"imported": 0, "registered": 0}
+    for item in report.get("items", []):
+        if item.get("platform") == "outlook" and item.get("email"):
+            src = meta.get(item["email"].lower(), {}).get("source", "imported")
+            item["mail_source"] = src
+            source_counts[src] = source_counts.get(src, 0) + 1
+        else:
+            item["mail_source"] = ""
+    report["mail_source_counts"] = source_counts
     return report
 
 
@@ -724,7 +735,7 @@ def _set_asset_scan_progress(value):
     }
 
 
-async def _run_asset_scan(platforms, concurrency, timeout):
+async def _run_asset_scan(platforms, concurrency, timeout, emails=None):
     global ASSET_SCAN_TASK
     from common import asset_scanner
 
@@ -740,6 +751,7 @@ async def _run_asset_scan(platforms, concurrency, timeout):
             concurrency=concurrency,
             timeout=timeout,
             progress=progress,
+            emails=emails,
         )
         ASSET_SCAN_STATE["finished_at"] = report.get("finished_at", "")
         ASSET_SCAN_STATE["error"] = ""
@@ -789,8 +801,17 @@ async def api_asset_scan_start(request: Request):
     except (TypeError, ValueError):
         return JSONResponse({"error": "concurrency 和 timeout 必须是整数"}, status_code=400)
 
+    raw_emails = (data or {}).get("emails")
+    emails = None
+    if isinstance(raw_emails, list) and raw_emails:
+        emails = [str(e).strip() for e in raw_emails if str(e).strip()]
+
     current = asset_scanner.get_report()
-    total = sum(1 for item in current["items"] if item.get("platform") in set(platforms))
+    if emails:
+        email_set = {e.lower() for e in emails}
+        total = sum(1 for item in current["items"] if item.get("platform") in set(platforms) and (item.get("email") or "").lower() in email_set)
+    else:
+        total = sum(1 for item in current["items"] if item.get("platform") in set(platforms))
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     ASSET_SCAN_STATE.update({
         "running": True,
@@ -799,7 +820,7 @@ async def api_asset_scan_start(request: Request):
         "error": "",
         "progress": {"completed": 0, "total": total, "current": ""},
     })
-    ASSET_SCAN_TASK = asyncio.create_task(_run_asset_scan(platforms, concurrency, timeout))
+    ASSET_SCAN_TASK = asyncio.create_task(_run_asset_scan(platforms, concurrency, timeout, emails))
     return {"ok": True, "platforms": platforms, "scan": dict(ASSET_SCAN_STATE)}
 
 
@@ -830,8 +851,37 @@ async def api_k12_start():
 
 # ============================================================ 邮箱池批量导入
 EMAILS_FILE = os.path.join(os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or ROOT, "emails.txt")
+EMAILS_META_FILE = os.path.join(os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or ROOT, "emails_meta.json")
 import re as _re
+import json as _json
 _EMAIL_RE = _re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def _load_emails_meta():
+    """读取邮箱分类元数据。返回 {email_lower: {"source": "imported"|"registered"}}。"""
+    if not os.path.isfile(EMAILS_META_FILE):
+        return {}
+    try:
+        with open(EMAILS_META_FILE, encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_emails_meta(meta):
+    """保存邮箱分类元数据。"""
+    try:
+        with open(EMAILS_META_FILE, "w", encoding="utf-8") as f:
+            _json.dump(meta, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _mark_email_source(email, source):
+    """标记单个邮箱的来源分类。source: imported / registered。"""
+    meta = _load_emails_meta()
+    meta[email.lower()] = {"source": source}
+    _save_emails_meta(meta)
 
 
 def _parse_mail_line(line):
@@ -893,6 +943,7 @@ async def api_mailpool_import(request: Request):
     bad_samples = []
     seen = set(existing)
     out_lines = []
+    imported_emails = []
     for ln in lines:
         if not ln.strip():
             continue
@@ -908,6 +959,7 @@ async def api_mailpool_import(request: Request):
             continue
         seen.add(email)
         out_lines.append("----".join(parsed))
+        imported_emails.append(email)
         added += 1
     if out_lines:
         # 追加(确保前面有换行)
@@ -916,9 +968,84 @@ async def api_mailpool_import(request: Request):
             if need_nl:
                 f.write("\n")
             f.write("\n".join(out_lines) + "\n")
+        # 标记为"自主导入"
+        meta = _load_emails_meta()
+        for em in imported_emails:
+            meta[em] = {"source": "imported"}
+        _save_emails_meta(meta)
     total = len(_existing_emails())
     return {"ok": True, "added": added, "skipped": skipped, "bad": bad,
             "bad_samples": bad_samples, "total": total}
+
+
+@app.get("/api/mailpool/list")
+def api_mailpool_list():
+    """列出邮箱池所有邮箱，含分类信息。"""
+    meta = _load_emails_meta()
+    emails = []
+    if not os.path.isfile(EMAILS_FILE):
+        return {"total": 0, "emails": [], "counts": {"imported": 0, "registered": 0}}
+    idx = 0
+    for line in open(EMAILS_FILE, encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parsed = _parse_mail_line(line)
+        if not parsed:
+            continue
+        email = parsed[0]
+        password = parsed[1] if len(parsed) >= 2 else ""
+        token = parsed[2] if len(parsed) >= 3 else ""
+        client_id = parsed[3] if len(parsed) >= 4 else ""
+        email_lower = email.lower()
+        source = meta.get(email_lower, {}).get("source", "imported")
+        emails.append({
+            "index": idx,
+            "email": email,
+            "password": password,
+            "has_token": bool(token),
+            "has_client_id": bool(client_id),
+            "source": source,
+        })
+        idx += 1
+    counts = {
+        "imported": sum(1 for e in emails if e["source"] == "imported"),
+        "registered": sum(1 for e in emails if e["source"] == "registered"),
+    }
+    return {"total": len(emails), "emails": emails, "counts": counts}
+
+
+@app.post("/api/mailpool/delete")
+async def api_mailpool_delete(request: Request):
+    """批量删除选中邮箱。body: {"emails": ["a@x.com", "b@y.com"]}。"""
+    data = await request.json()
+    targets = set(str(e).lower() for e in (data or {}).get("emails", []))
+    if not targets:
+        return {"ok": False, "msg": "未选择邮箱"}
+    if not os.path.isfile(EMAILS_FILE):
+        return {"ok": False, "msg": "emails.txt 不存在"}
+    kept = []
+    deleted = 0
+    for line in open(EMAILS_FILE, encoding="utf-8"):
+        raw = line.rstrip("\n\r")
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        email = stripped.split("----")[0].strip().lower()
+        if email in targets:
+            deleted += 1
+        else:
+            kept.append(raw)
+    with open(EMAILS_FILE, "w", encoding="utf-8") as f:
+        if kept:
+            f.write("\n".join(kept) + "\n")
+    # 同步清理 meta
+    meta = _load_emails_meta()
+    for t in targets:
+        meta.pop(t, None)
+    _save_emails_meta(meta)
+    total = len(_existing_emails())
+    return {"ok": True, "deleted": deleted, "total": total}
 
 
 # ============================================================ sms-man 接码助手

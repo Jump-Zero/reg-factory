@@ -278,6 +278,48 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 }
 #view-mailpool code{padding:2px 5px;border-radius:4px;background:var(--surface-raised);font-size:11px;overflow-wrap:anywhere}
 
+/* 邮箱列表 */
+.mailpool-list-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin:14px 0 10px}
+.mailpool-tabs{display:flex;gap:4px;flex-wrap:wrap}
+.mailpool-tab{
+  min-height:32px;padding:5px 13px;border:1px solid var(--line);border-radius:6px;
+  background:transparent;color:var(--muted);font-size:12px;cursor:pointer;transition:all .15s
+}
+.mailpool-tab:hover{border-color:var(--accent);color:var(--text)}
+.mailpool-tab.active{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+.mailpool-tab strong{font-weight:700;margin-left:3px}
+.mailpool-list-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.mailpool-select-all{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);cursor:pointer}
+.mailpool-select-all input{cursor:pointer}
+.btn-danger{
+  min-height:32px;padding:5px 14px;border:1px solid #e5484d;border-radius:6px;
+  background:transparent;color:#ff6166;font-size:12px;white-space:nowrap;cursor:pointer;transition:all .15s
+}
+.btn-danger:hover:not(:disabled){background:rgba(229,72,77,.12);color:#ff8082}
+.btn-danger:disabled{opacity:.4;cursor:not-allowed;border-color:var(--line)}
+.mailpool-table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:6px}
+.mailpool-table{width:100%;min-width:560px;border-collapse:collapse;table-layout:fixed;font-size:11px}
+.mailpool-table th{padding:8px 10px;border-bottom:1px solid var(--line);background:var(--surface-raised);color:var(--quiet);font-weight:600;text-align:left}
+.mailpool-table td{padding:8px 10px;border-bottom:1px solid var(--line);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mailpool-table tr:last-child td{border-bottom:0}
+.mailpool-table tbody tr:hover{background:var(--surface-hover)}
+.mailpool-table .col-check{width:38px;text-align:center}
+.mailpool-table .col-check input{cursor:pointer}
+.mailpool-table .col-email{width:auto}
+.mailpool-table .col-source{width:90px}
+.mailpool-table .col-token,.mailpool-table .col-clientid{width:70px;text-align:center}
+.mailpool-source-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600}
+.mailpool-source-badge.imported{background:rgba(56,132,247,.15);color:#6fa8ff}
+.mailpool-source-badge.registered{background:rgba(46,184,92,.15);color:#5fd88a}
+.mailpool-empty{padding:30px;text-align:center;color:var(--quiet);font-size:12px}
+.mailpool-pagination{display:flex;align-items:center;justify-content:center;gap:12px;padding:10px 0}
+.mailpool-pagination .icon-button{width:30px;height:30px;font-size:16px}
+#mailpool-page{font-size:11px;color:var(--muted);min-width:50px;text-align:center}
+
+/* 邮箱管理(资产 API 页内) */
+.asset-mailpool-section .mailpool-table{min-width:520px}
+.asset-mailpool-section .mailpool-list-toolbar{margin:10px 0 8px}
+
 /* Local asset API */
 .asset-panel{max-width:1040px;margin:0 auto}
 .asset-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding-bottom:16px;border-bottom:1px solid var(--line)}
@@ -345,16 +387,22 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .asset-scan-toolbar label{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:10.5px}
 .asset-scan-result-count{margin-left:auto;color:var(--quiet);font:10.5px var(--mono);white-space:nowrap}
 .asset-scan-table-wrap{margin-top:10px;overflow-x:auto;border:1px solid var(--line);border-radius:6px}
-.asset-scan-table{width:100%;min-width:820px;border-collapse:collapse;table-layout:fixed;font-size:10.5px}
+.asset-scan-table{width:100%;min-width:920px;border-collapse:collapse;table-layout:fixed;font-size:10.5px}
 .asset-scan-table th{padding:8px 10px;border-bottom:1px solid var(--line);background:var(--surface-raised);color:var(--quiet);font-weight:600;text-align:left}
 .asset-scan-table td{padding:9px 10px;border-bottom:1px solid var(--line);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .asset-scan-table tr:last-child td{border-bottom:0}
 .asset-scan-table tbody tr:hover{background:var(--surface-hover)}
-.asset-scan-table th:nth-child(1),.asset-scan-table td:nth-child(1){width:10%}
-.asset-scan-table th:nth-child(2),.asset-scan-table td:nth-child(2){width:25%}
-.asset-scan-table th:nth-child(3),.asset-scan-table td:nth-child(3){width:12%}
-.asset-scan-table th:nth-child(4),.asset-scan-table td:nth-child(4){width:35%}
-.asset-scan-table th:nth-child(5),.asset-scan-table td:nth-child(5){width:18%}
+.asset-scan-table .col-check{width:38px;text-align:center}
+.asset-scan-table .col-check input{cursor:pointer}
+.asset-scan-table .col-source{width:80px}
+.asset-scan-table th:nth-child(2),.asset-scan-table td:nth-child(2){width:8%}
+.asset-scan-table th:nth-child(3),.asset-scan-table td:nth-child(3){width:22%}
+.asset-scan-table th:nth-child(5),.asset-scan-table td:nth-child(5){width:10%}
+.asset-scan-table th:nth-child(6),.asset-scan-table td:nth-child(6){width:30%}
+.asset-scan-table th:nth-child(7),.asset-scan-table td:nth-child(7){width:16%}
+.mail-source-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600}
+.mail-source-badge.imported{background:rgba(56,132,247,.15);color:#6fa8ff}
+.mail-source-badge.registered{background:rgba(46,184,92,.15);color:#5fd88a}
 .asset-scan-account{color:var(--text)!important;font-family:var(--mono)}
 .asset-status-badge{display:inline-flex;align-items:center;min-height:22px;padding:2px 7px;border:1px solid var(--line);border-radius:5px;font-size:9.5px;white-space:nowrap}
 .asset-status-badge.normal{border-color:rgba(65,184,120,.5);color:var(--green);background:rgba(65,184,120,.08)}
@@ -574,6 +622,9 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   .env-item .k{padding:0 0 6px}
   .env-item input,.env-item select{height:40px}
   .mailpool-input{min-height:210px}
+  .mailpool-list-toolbar{flex-direction:column;align-items:stretch}
+  .mailpool-list-actions{justify-content:flex-start}
+  .mailpool-tab{font-size:11px;padding:4px 10px}
   .asset-head{align-items:center}
   .asset-summary{grid-template-columns:repeat(2,minmax(0,1fr))}
   .asset-summary>div:nth-child(2){border-right:0}
@@ -593,6 +644,7 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   .asset-scan-toolbar label span{display:block;margin-bottom:4px}
   .asset-scan-toolbar select{width:100%;height:40px}
   .asset-scan-result-count{margin:0}
+  .asset-scan-toolbar .btn-danger{grid-column:1/-1;width:100%}
   .asset-scan-progress>div{align-items:flex-start;flex-direction:column;gap:3px}
   .asset-actions{align-items:stretch;flex-direction:column}
   .asset-actions .btn-run,.asset-actions .btn-secondary,.asset-actions select{width:100%;max-width:none;min-height:41px}

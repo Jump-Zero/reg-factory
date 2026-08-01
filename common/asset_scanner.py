@@ -593,6 +593,7 @@ def scan_pool(
     concurrency: int = 4,
     timeout: int = 15,
     progress: Callable[[dict], None] | None = None,
+    emails: list[str] | None = None,
 ) -> dict:
     requested = {str(item).strip().lower() for item in (platforms or PLATFORMS)}
     invalid = requested.difference(PLATFORMS)
@@ -603,6 +604,9 @@ def scan_pool(
     started_at = _now_iso()
     records = _inventory_records()
     selected = [record for record in records if record["platform"] in requested]
+    if emails:
+        email_set = {str(e).strip().lower() for e in emails}
+        selected = [record for record in selected if (record.get("email") or "").strip().lower() in email_set]
     previous = {
         str(item.get("id")): item
         for item in _read_cache().get("items", [])

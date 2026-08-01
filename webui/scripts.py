@@ -428,6 +428,11 @@ ENV_SCHEMA = [
         {"key": "SMSMAN_APP_ID_GMAIL", "default": "google", "help": "sms-man Gmail/Google 服务 id(google 自动解析;接码助手默认用它)"},
         {"key": "SMSMAN_COUNTRY_ID_OPENAI", "default": "0", "help": "国家 id(0=随机/按价格)"},
     ]},
+    {"group": "hero-sms 价格与服务", "items": [
+        {"key": "HERO_SMS_SERVICE_OPENAI", "default": "dr", "help": "hero-sms OpenAI 服务码(dr=sms-activate 兼容)"},
+        {"key": "HERO_SMS_MAXPRICE_OPENAI", "default": "1.0", "help": "hero-sms 价格上限(USD)；0或留空=不限"},
+        {"key": "SMS_MAXPRICE_OPENAI", "default": "20", "help": "firefox.fun 价格上限(0=只取最便宜)"},
+    ]},
     {"group": "打码平台(可选)", "items": [
         {"key": "CAPSOLVER_API_KEY", "secret": True, "help": "CapSolver 打码 key"},
         {"key": "EZCAPTCHA_API_KEY", "secret": True, "help": "EZ-Captcha 打码 key(解锁 Outlook 用)"},
