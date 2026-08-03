@@ -1571,6 +1571,9 @@ def _child_env(platform: str = ""):
             env[key] = value
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    # Child tasks can spawn other platform workers; retain this marker so Grok
+    # avoids navigating the registration browser away for an optional Device Flow.
+    env["REG_FACTORY_WEBUI_TASK"] = "1"
     try:
         from common import proxy_switch
         if not platform:

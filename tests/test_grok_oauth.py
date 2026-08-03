@@ -2,8 +2,10 @@ import base64
 import json
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from common import grok_oauth
+from xconsole_client.xai_oauth import build_authorization_url
 
 
 def _jwt(payload):
@@ -67,6 +69,48 @@ class _DeviceFlowSession:
 
 
 class GrokOAuthTests(unittest.TestCase):
+    def test_browser_device_url_uses_live_grok_route(self):
+        self.assertEqual(
+            grok_oauth._browser_device_verification_url(
+                "https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH"
+            ),
+            "https://grok.com/oauth2/device?user_code=ABCD-EFGH",
+        )
+
+    def test_authorization_url_uses_current_grok_referrer(self):
+        url = build_authorization_url(
+            client_id=grok_oauth.XAI_CLIENT_ID,
+            redirect_uri="http://127.0.0.1:56121/callback",
+            state="state",
+            nonce="nonce",
+            code_challenge="challenge",
+            scopes=grok_oauth.XAI_SCOPE.split(),
+        )
+        query = parse_qs(urlparse(url).query)
+
+        self.assertEqual(query["plan"], ["generic"])
+        self.assertEqual(query["referrer"], ["grok-build"])
+
+    def test_parses_registration_risk_denial_from_escaped_rsc(self):
+        state = grok_oauth._parse_grok_account_state(
+            r'{\"botFlagSource\":1,\"botFlagDetails\":'
+            r'\"policy=deny,risk=1.00,event=$registration\"}'
+        )
+
+        self.assertTrue(state["found"])
+        self.assertTrue(state["denied"])
+        self.assertEqual(state["bot_flag_source"], 1)
+        self.assertEqual(state["risk"], 1.0)
+
+    def test_non_registration_denial_does_not_block_oauth(self):
+        state = grok_oauth._parse_grok_account_state(
+            '"botFlagSource":2,"botFlagDetails":'
+            '"policy=deny,risk=0.50,event=$login"'
+        )
+
+        self.assertTrue(state["found"])
+        self.assertFalse(state["denied"])
+
     def test_scope_matches_supported_grok_cli_scope(self):
         self.assertEqual(
             grok_oauth.XAI_SCOPE,

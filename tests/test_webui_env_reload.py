@@ -35,6 +35,7 @@ class WebUIEnvReloadTests(unittest.TestCase):
                 with patch.dict(os.environ, {"DYNAMIC_TEST_KEY": "stale-value"}):
                     child = server._child_env()
         self.assertEqual(child["DYNAMIC_TEST_KEY"], "new-value")
+        self.assertEqual(child["REG_FACTORY_WEBUI_TASK"], "1")
 
     def test_global_config_honors_explicit_env_file(self):
         path = self._env_file("portable-value")

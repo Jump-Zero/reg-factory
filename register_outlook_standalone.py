@@ -618,8 +618,7 @@ async def _click_microsoft_action(
     preferred_ids=(),
 ):
     """Click a visible Microsoft action using IDs first and localized text second."""
-    try:
-        return await page.evaluate(r"""({labels, negativeLabels, preferredIds}) => {
+    script = r"""({labels, negativeLabels, preferredIds}) => {
             const normalize = value => String(value || '')
                 .replace(/\s+/g, ' ').trim().toLocaleLowerCase();
             const visible = el => {
@@ -677,13 +676,28 @@ async def _click_microsoft_action(
                 }
             }
             return '';
-        }""", {
-            "labels": [label.lower() for label in labels],
-            "negativeLabels": [label.lower() for label in negative_labels],
-            "preferredIds": list(preferred_ids),
-        })
+        }"""
+    payload = {
+        "labels": [label.lower() for label in labels],
+        "negativeLabels": [label.lower() for label in negative_labels],
+        "preferredIds": list(preferred_ids),
+    }
+    # KMSI and consent controls may be rendered inside an auth iframe. The
+    # page body still exposes the prompt text, so checking only the top-level
+    # document can report "detected" forever without finding its button.
+    targets = [page]
+    try:
+        targets.extend(frame for frame in page.frames if frame is not page)
     except Exception:
-        return ""
+        pass
+    for target in targets:
+        try:
+            clicked = await target.evaluate(script, payload)
+            if clicked:
+                return clicked
+        except Exception:
+            continue
+    return ""
 
 
 def _birthdate_field_kind(metadata):

@@ -238,6 +238,32 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("いいえ", payload["negativeLabels"])
         self.assertIn("idSIButton9", payload["preferredIds"])
 
+    async def test_japanese_stay_signed_in_prompt_clicks_yes_inside_iframe(self):
+        page = MagicMock()
+        page.url = "https://login.live.com/kmsi"
+        body = MagicMock()
+        body.inner_text = AsyncMock(
+            return_value=(
+                "サインインの状態を維持しますか? "
+                "毎回サインインする必要がないようにします。 はい いいえ"
+            )
+        )
+        page.locator.return_value = body
+        page.evaluate = AsyncMock(return_value="")
+        frame = MagicMock()
+        frame.evaluate = AsyncMock(return_value="はい")
+        page.frames = [frame]
+
+        with patch.object(register_outlook_standalone.asyncio, "sleep", AsyncMock()):
+            detected, continued = await (
+                register_outlook_standalone._handle_microsoft_kmsi(page, 12)
+            )
+
+        self.assertTrue(detected)
+        self.assertTrue(continued)
+        page.evaluate.assert_awaited_once()
+        frame.evaluate.assert_awaited_once()
+
     async def test_german_recovery_email_is_skipped(self):
         page = MagicMock()
         page.url = "https://account.live.com/proofs/Add"

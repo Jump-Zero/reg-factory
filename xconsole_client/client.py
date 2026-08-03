@@ -336,6 +336,35 @@ class XConsoleAuthClient:
     # We must NOT prepend anything — the 42-char string from the JS chunk IS
     # the complete action ID.
 
+    @staticmethod
+    def _extract_chunk_urls(html: str) -> List[str]:
+        """Return Next.js chunk URLs, including URLs carrying a ``?dpl=`` suffix."""
+        text = str(html or "").replace("\\/", "/")
+        pattern = re.compile(
+            r'(?:https://accounts\.x\.ai)?'
+            r'(/_next/static/chunks/[A-Za-z0-9._~!$&()*+,;=:@%/\-]+\.js'
+            r'(?:\?[^"\'\\\s<>]*)?)',
+            re.I,
+        )
+        return list(dict.fromkeys(match.group(1) for match in pattern.finditer(text)))
+
+    @staticmethod
+    def _extract_action_ids(javascript: str) -> List[str]:
+        """Extract server action IDs without assuming a single hash length."""
+        text = str(javascript or "")
+        patterns = (
+            r'createServerReference\)?\(["\']([0-9a-f]{40,44})["\']',
+            r'["\']([0-9a-f]{40,44})["\']\s*,\s*(?:callServer|findSourceMapURL)',
+            r'["\']([0-9a-f]{42})["\']',
+        )
+        found: List[str] = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.I):
+                value = match.group(1).lower()
+                if value not in found:
+                    found.append(value)
+        return found
+
     def _scrape_action_id(self, html: str) -> str:
         """Find the Next.js server action ID from the live page's JS chunks.
 
@@ -351,7 +380,7 @@ class XConsoleAuthClient:
              distinctive).
         """
         # 1. collect all JS chunk URLs from the page
-        js_urls = list(set(re.findall(r'src="(/_next/static/chunks/[^"]+\.js)"', html)))
+        js_urls = self._extract_chunk_urls(html)
         if self.debug:
             print(f"  [scrape] searching {len(js_urls)} JS chunks...")
 
@@ -381,7 +410,7 @@ class XConsoleAuthClient:
                 full = f"https://accounts.x.ai{path}"
                 _s, _h, _sc, raw = self._request("GET", full, headers=self._base_headers())
                 text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
-                hashes = set(re.findall(r'"([a-f0-9]{42})"', text))
+                hashes = self._extract_action_ids(text)
                 if not hashes:
                     return (None, False)
                 is_signup = any(
@@ -392,7 +421,7 @@ class XConsoleAuthClient:
                 # Return the first hash (all 42-char hexes in a chunk are
                 # candidate action hashes; the sign-up chunk's hash is the
                 # correct one).
-                return (next(iter(hashes)), is_signup)
+                return (hashes[0], is_signup)
             except Exception:
                 return (None, False)
 

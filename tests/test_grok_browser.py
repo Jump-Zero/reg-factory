@@ -1,6 +1,6 @@
 import unittest
 import inspect
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import register_grok
 import register_grok_http
@@ -18,6 +18,18 @@ class GrokBrowserTests(unittest.TestCase):
             register_grok.GROK_SIGNUP_URL,
             "https://accounts.x.ai/sign-up?redirect=grok-com&return_to=%2F",
         )
+
+    def test_polish_signup_and_cookie_labels_are_supported(self):
+        self.assertIn(
+            "Zarejestruj się za pomocą e-maila", register_grok.EMAIL_SIGNUP_BTN
+        )
+        self.assertIn("Odrzucenie wszystkich", register_grok.COOKIE_DISMISS)
+
+    def test_spanish_signup_and_cookie_labels_are_supported(self):
+        self.assertIn(
+            "Regístrate con correo electrónico", register_grok.EMAIL_SIGNUP_BTN
+        )
+        self.assertIn("Rechazarlas todas", register_grok.COOKIE_DISMISS)
 
     def test_browser_uses_modern_native_fingerprint(self):
         fingerprint = register_grok.grok_browser_fingerprint()
@@ -53,6 +65,72 @@ class GrokBrowserTests(unittest.TestCase):
 
         self.assertEqual(re.search(register_grok.GROK_CODE_REGEX, "Code Q5137N").group(1), "Q5137N")
         self.assertEqual(re.search(register_grok.GROK_CODE_REGEX, "Code WIF-W23").group(1), "WIF-W23")
+
+
+class GrokBrowserOAuthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_webui_task_skips_browser_device_flow(self):
+        with patch.object(register_grok, "IMPORT_SUB2API", True), patch.dict(
+            register_grok.os.environ, {"REG_FACTORY_WEBUI_TASK": "1"}, clear=False
+        ), patch("common.grok_oauth.start_grok_device_flow") as start:
+            result = await register_grok.acquire_browser_grok_oauth(
+                MagicMock(), "sso-token", "webui@example.com"
+            )
+
+        self.assertIsNone(result)
+        start.assert_not_called()
+
+    async def test_risk_denied_account_does_not_start_device_flow(self):
+        state = {
+            "denied": True,
+            "bot_flag_details": "policy=deny,risk=1.00,event=$registration",
+        }
+        with patch.object(register_grok, "IMPORT_SUB2API", True), patch(
+            "common.grok_oauth.inspect_grok_account_state", return_value=state
+        ), patch("common.grok_oauth.start_grok_device_flow") as start:
+            result = await register_grok.acquire_browser_grok_oauth(
+                MagicMock(), "sso-token", "denied@example.com"
+            )
+
+        self.assertIsNone(result)
+        start.assert_not_called()
+
+    async def test_device_flow_returns_refreshable_credentials(self):
+        page = MagicMock()
+        page.url = "https://accounts.x.ai/oauth2/device"
+        page.goto = AsyncMock()
+        credentials = {
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "email": "new@example.com",
+        }
+        device = {
+            "verification_url": "https://accounts.x.ai/oauth2/device?user_code=ABCD",
+            "device_code": "device-code",
+            "interval": 2,
+        }
+        with patch.object(register_grok, "IMPORT_SUB2API", True), patch.object(
+            register_grok.proxy_switch,
+            "effective_proxy_url",
+            return_value="http://127.0.0.1:7897",
+        ), patch(
+            "common.grok_oauth.inspect_grok_account_state",
+            return_value={"denied": False},
+        ), patch(
+            "common.grok_oauth.start_grok_device_flow", return_value=device
+        ), patch(
+            "common.grok_oauth.finish_grok_device_flow",
+            return_value=(credentials, "new@example.com"),
+        ), patch.object(
+            register_grok, "click_any", new=AsyncMock(return_value="Allow")
+        ):
+            result = await register_grok.acquire_browser_grok_oauth(
+                page, "sso-token", "new@example.com"
+            )
+
+        self.assertEqual(result, credentials)
+        page.goto.assert_awaited_once_with(
+            device["verification_url"], timeout=45000, wait_until="domcontentloaded"
+        )
 
 
 if __name__ == "__main__":

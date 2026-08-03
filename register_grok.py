@@ -99,9 +99,19 @@ BROWSER_MAILBOX_ATTEMPTS = 6
 
 # 注册方式按钮（中文+日文+英文，不同节点地区界面语言不同）
 SIGNUP_BTN = ["新規登録", "注册", "註冊", "Sign up", "サインアップ", "注册账号"]
-EMAIL_SIGNUP_BTN = ["メールで登録", "用邮箱注册", "使用邮箱注册", "邮箱注册", "用電子郵件註冊", "Sign up with email", "Continue with email", "メールアドレスで登録", "使用电子邮件"]
+EMAIL_SIGNUP_BTN = [
+    "メールで登録", "用邮箱注册", "使用邮箱注册", "邮箱注册", "用電子郵件註冊",
+    "Sign up with email", "Continue with email", "メールアドレスで登録", "使用电子邮件",
+    "Zarejestruj się za pomocą e-maila",
+    "Regístrate con correo electrónico", "Registrarse con correo electrónico",
+]
 CONTINUE_BTN = ["続行", "继续", "繼續", "Continue", "次へ", "下一步", "Next", "Sign up", "登録", "注册", "Verify", "確認", "确认", "验证"]
-COOKIE_DISMISS = ["すべて拒否する", "全部拒絕", "全部拒绝", "拒绝所有", "Reject all", "接受所有 Cookie", "Accept all", "すべて許可する", "全部允許", "拒否", "同意"]
+COOKIE_DISMISS = [
+    "すべて拒否する", "全部拒絕", "全部拒绝", "拒绝所有", "Reject all",
+    "Odrzucenie wszystkich", "Odrzuć wszystkie", "接受所有 Cookie", "Accept all",
+    "Akceptuj wszystkie pliki cookie", "すべて許可する", "全部允許", "拒否", "同意",
+    "Rechazarlas todas", "Rechazar todas", "Aceptar todas las cookies",
+]
 # 提交验证码按钮
 VERIFY_BTN = ["メールを確認", "確認", "确认", "验证邮件", "验证", "驗證", "Verify", "Verify email",
               "Confirm email", "Confirm Email", "続行", "继续", "Continue", "Submit"]
@@ -530,7 +540,7 @@ def register_via_protocol_rt(email, refresh_token, client_id, password, attempts
     return None
 
 
-def save_and_import_grok(sso, email, password, mark_pool=True):
+def save_and_import_grok(sso, email, password, mark_pool=True, oauth_credentials=None):
     from common.session_export import save_grok_token
 
     save_grok_token(sso, email)
@@ -547,6 +557,7 @@ def save_and_import_grok(sso, email, password, mark_pool=True):
             account_email=email,
             proxy_id=SUB2API_GROK_PROXY_ID,
             local_proxy=proxy_switch.effective_proxy_url(),
+            oauth_credentials=oauth_credentials,
         )
         print(f"  [{'OK' if ok else 'FAIL'}] {msg}")
         if not ok:
@@ -584,6 +595,97 @@ async def click_any(page, labels, timeout=5000):
         except Exception:
             pass
     return None
+
+
+async def click_email_signup(page, timeout=5000):
+    """Click the email registration method across localized xAI pages."""
+    clicked = await click_any(page, EMAIL_SIGNUP_BTN, timeout=timeout)
+    if clicked:
+        return clicked
+    choices = page.locator("button, a, [role=button]")
+    for index in range(await choices.count()):
+        choice = choices.nth(index)
+        try:
+            if not await choice.is_visible():
+                continue
+            label = str(await choice.inner_text() or "").strip()
+            normalized = label.lower().replace("-", "")
+            if "email" not in normalized and "correo electrónico" not in normalized:
+                continue
+            await choice.click(timeout=timeout)
+            return label
+        except Exception:
+            continue
+    return None
+
+
+async def acquire_browser_grok_oauth(page, sso, email):
+    """Approve Device Flow in the authenticated registration browser."""
+    if not IMPORT_SUB2API:
+        return None
+    if os.environ.get("REG_FACTORY_WEBUI_TASK", "").strip() == "1":
+        print("  [oauth] WebUI 任务跳过浏览器 Device Flow，直接使用本机 OAuth 导入")
+        return None
+
+    from common.grok_oauth import (
+        finish_grok_device_flow,
+        inspect_grok_account_state,
+        start_grok_device_flow,
+    )
+
+    proxy = proxy_switch.effective_proxy_url()
+    state = await asyncio.to_thread(inspect_grok_account_state, sso, proxy)
+    if state.get("denied"):
+        details = state.get("bot_flag_details") or "policy=deny,event=$registration"
+        print(f"  [oauth] xAI 注册风控拒绝，跳过 Device Flow: {details}")
+        return None
+
+    try:
+        device = await asyncio.to_thread(start_grok_device_flow, proxy)
+        await page.goto(
+            device["verification_url"], timeout=45000, wait_until="domcontentloaded"
+        )
+        allow_labels = [
+            "Allow", "Authorize", "Approve", "Accept", "允许", "授权", "同意",
+            "許可", "承認",
+        ]
+        continue_labels = [
+            "Continue", "Next", "Confirm", "继续", "下一步", "确认",
+            "続ける", "次へ", "確認",
+        ]
+        approved = False
+        for _ in range(15):
+            if "/oauth2/device/done" in str(page.url or "").lower():
+                approved = True
+                break
+            clicked = await click_any(page, allow_labels, timeout=1500)
+            if clicked:
+                approved = True
+                await asyncio.sleep(1)
+                continue
+            clicked = await click_any(page, continue_labels, timeout=1500)
+            if clicked:
+                await asyncio.sleep(1)
+                continue
+            await asyncio.sleep(1)
+        if not approved:
+            raise RuntimeError(f"Device Flow 页面未出现授权按钮: {page.url}")
+
+        credentials, oauth_email = await asyncio.to_thread(
+            finish_grok_device_flow,
+            proxy,
+            device["device_code"],
+            device.get("interval") or 2,
+            90,
+            email,
+        )
+        if oauth_email and not credentials.get("email"):
+            credentials["email"] = oauth_email
+        print("  [oauth] 浏览器 Device Flow 已取得 refresh token")
+        return credentials
+    except Exception as exc:
+        print(f"  [oauth] 浏览器 Device Flow 失败，将回退现有导入路径: {str(exc)[:180]}")
+        return None
 
 
 async def _human_click_turnstile(page):
@@ -1015,7 +1117,7 @@ async def register_one(index, total, p, node):
 
         # Step 3: 选 メールで登録 (email signup)
         print("  [3] choose email signup")
-        clicked = await click_any(page, EMAIL_SIGNUP_BTN, timeout=6000)
+        clicked = await click_email_signup(page, timeout=6000)
         if clicked:
             print(f"  clicked: {clicked}")
 
@@ -1047,7 +1149,7 @@ async def register_one(index, total, p, node):
                 break
             await asyncio.sleep(3)
             if i in (4, 9):  # 横幅关掉后补点邮箱注册（首次点击可能被横幅吃掉）
-                again = await click_any(page, EMAIL_SIGNUP_BTN, timeout=4000)
+                again = await click_email_signup(page, timeout=4000)
                 if again:
                     print(f"  re-clicked: {again}")
         await dump_state(page, "email-method")
@@ -1340,8 +1442,15 @@ async def register_one(index, total, p, node):
         )
         if key_val:
             try:
+                oauth_credentials = await acquire_browser_grok_oauth(
+                    page, key_val, email
+                )
                 if not save_and_import_grok(
-                    key_val, email, password, mark_pool=temp_mb is None
+                    key_val,
+                    email,
+                    password,
+                    mark_pool=temp_mb is None,
+                    oauth_credentials=oauth_credentials,
                 ):
                     return None
             except Exception as e:

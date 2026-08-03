@@ -1,5 +1,44 @@
 ﻿# 更新日志
 
+## 2026-08-02 - 1.2.15
+
+**WebUI Grok OAuth 路径修复**
+- WebUI 子任务不再让已完成注册的 Grok 浏览器跳转到可选的 Device Flow 同意页；该页面当前可能不渲染授权按钮，造成网页任务看似卡住。
+- WebUI 直接使用已验证的本机 OAuth 导入回退，三平台注册等二次派生的 Grok 子进程同样生效。
+- 直接命令行运行保持原来的浏览器 Device Flow 行为，不改变已跑通的 1.2.13 Grok 流程。
+
+---
+
+## 2026-08-02 - 1.2.14
+
+**Grok Device Flow 页面路由修复**
+- 修复 xAI 返回的 `accounts.x.ai/oauth2/device` 浏览器地址当前实际渲染 404，导致 Grok 页面无按钮并卡住的问题。
+- 浏览器授权自动改用当前可用的 `grok.com/oauth2/device` 页面；token 交换仍使用 `auth.x.ai` 协议端点。
+- 增加线上设备授权地址转换测试，保留本机 OAuth 回退，避免授权页面异常时影响 SUB2API 导入。
+
+---
+
+## 2026-08-02 - 1.2.13
+
+**Outlook Graph 日文保持登录页修复**
+- 修复 Microsoft Graph Device Flow 的“サインインの状態を維持しますか?”提示位于 iframe 时，页面文字可见但“はい”按钮无法点击的问题。
+- Graph 授权动作现在同时扫描顶层页面和所有 iframe，避免网页任务持续等待并最终超时。
+- 增加日文 iframe 场景回归测试；`check_outlook_status unavailable` 仍仅表示可选的注册后校验模块未安装，不影响 Graph 授权。
+
+---
+
+## 2026-08-02 - 1.2.12
+
+**Grok OAuth 与 SUB2API 导入修复**
+- 修复 xAI 注册页 Next.js chunk URL 带 `?dpl=` 参数时无法发现动态 Server Action 的问题，并兼容 40-44 位 action ID。
+- OAuth 授权与 consent 统一使用 `plan=generic`、`referrer=grok-build`，对齐当前 xAI 授权参数。
+- 注册浏览器保持登录态完成 Device Flow，取得 refresh token 后直接创建或修复 SUB2API Grok OAuth 账号。
+- 导入前解析 Grok 注册风控状态；`policy=deny,event=$registration` 的账号明确早停，不再触发无效远端转换或创建脏账号。
+- 补齐波兰语、西班牙语邮箱注册入口和 Cookie 横幅文案，并增加通用邮箱入口兜底。
+- 真实流程验证：Outlook 邮箱完成注册、OAuth 和 SUB2API 导入；临时邮箱注册成功后被 xAI 注册风控拒绝并正确跳过导入。
+
+---
+
 ## 2026-07-31 - 1.2.11
 
 **Outlook 日文注册与 WebUI 网络配置修复**

@@ -259,17 +259,49 @@ def _create_sub2api_grok_oauth(origin, token, group_id, credentials, account_ema
 
 def upload_sub2api_grok(base_url, email, password, group, sso, account_email="",
                         concurrency=DEFAULT_CONCURRENCY, priority=DEFAULT_PRIORITY,
-                        proxy_id=None, local_proxy="", timeout=GROK_IMPORT_TIMEOUT):
+                        proxy_id=None, local_proxy="", timeout=GROK_IMPORT_TIMEOUT,
+                        oauth_credentials=None):
     """把 Grok Web SSO 转为 SUB2API Grok OAuth 账号并绑定 Grok 分组。"""
     try:
         origin = _origin(base_url)
         sso = str(sso or "").strip()
         if not sso:
             return False, "缺少 grok sso"
+
+        has_browser_oauth = (
+            isinstance(oauth_credentials, dict)
+            and bool(oauth_credentials.get("refresh_token"))
+        )
+        if local_proxy and not has_browser_oauth:
+            from common.grok_oauth import inspect_grok_account_state
+
+            state = inspect_grok_account_state(sso, local_proxy)
+            if state.get("denied"):
+                details = state.get("bot_flag_details") or "policy=deny,event=$registration"
+                return False, (
+                    "Grok OAuth 已跳过: xAI 注册风控拒绝 "
+                    f"(botFlagSource={state.get('bot_flag_source')}, {details})"
+                )
+
         token = _sub2api_login(origin, email, password, timeout=timeout)
         group_id = _sub2api_group_id(
             origin, token, group or "grok", "grok", timeout=timeout
         )
+
+        # Credentials approved in the still-live registration browser avoid a
+        # second HTTP-only consent attempt that xAI may reject for a new SSO.
+        if has_browser_oauth:
+            return _create_sub2api_grok_oauth(
+                origin,
+                token,
+                group_id,
+                oauth_credentials,
+                oauth_credentials.get("email") or account_email,
+                concurrency,
+                priority,
+                timeout,
+                proxy_id=proxy_id,
+            )
 
         # sub2api 的 SSO 转换实现随版本变化。优先在注册所用出口本地换取
         # refreshable OAuth，避免旧版服务端虽然建号成功、实际调用却持续 401。

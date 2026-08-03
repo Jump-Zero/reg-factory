@@ -3,6 +3,7 @@
 
 import base64
 import json
+import re
 import time
 from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
@@ -14,6 +15,7 @@ XAI_SCOPE = "openid profile email offline_access grok-cli:access api:access"
 XAI_OAUTH_ISSUER = "https://auth.x.ai"
 XAI_TOKEN_ENDPOINT = f"{XAI_OAUTH_ISSUER}/oauth2/token"
 XAI_CLI_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
+GROK_HOME_URL = "https://grok.com/"
 XAI_CLI_VERSION = "0.2.93"
 XAI_TOKEN_USER_AGENT = (
     f"grok-pager/{XAI_CLI_VERSION} grok-shell/{XAI_CLI_VERSION} "
@@ -65,7 +67,21 @@ def _trusted_xai_url(raw):
     except Exception:
         return False
     host = str(parsed.hostname or "").lower()
-    return parsed.scheme == "https" and (host == "x.ai" or host.endswith(".x.ai"))
+    return parsed.scheme == "https" and (
+        host == "x.ai"
+        or host.endswith(".x.ai")
+        or host == "grok.com"
+        or host.endswith(".grok.com")
+    )
+
+
+def _browser_device_verification_url(url):
+    """Use Grok's live UI route; accounts.x.ai's legacy route now renders 404."""
+    raw = str(url or "").strip()
+    prefix = "https://accounts.x.ai/oauth2/device"
+    if raw.lower().startswith(prefix):
+        return "https://grok.com/oauth2/device" + raw[len(prefix):]
+    return raw
 
 
 def _device_authorized(url="", body=""):
@@ -109,7 +125,8 @@ def _request(session, method, url, **kwargs):
 
 def _new_sso_session(sso, proxy):
     session = curl_requests.Session(impersonate="chrome131", http_version="v2")
-    session.proxies = {"http": proxy, "https": proxy}
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
     session.headers.update({
         "User-Agent": XAI_BROWSER_USER_AGENT,
         "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
@@ -119,6 +136,149 @@ def _new_sso_session(sso, proxy):
         session.cookies.set("sso", sso, domain=domain, path="/")
         session.cookies.set("sso-rw", sso, domain=domain, path="/")
     return session
+
+
+def _parse_grok_account_state(page_html):
+    """Parse the registration risk decision embedded in grok.com's RSC data."""
+    normalized = str(page_html or "").replace('\\"', '"')
+    source_match = re.search(r'botFlagSource"\s*:\s*(null|-?\d+)', normalized)
+    details_match = re.search(
+        r'botFlagDetails"\s*:\s*(?:null|"([^"]*)")', normalized
+    )
+
+    source = None
+    if source_match and source_match.group(1) != "null":
+        try:
+            source = int(source_match.group(1))
+        except (TypeError, ValueError):
+            pass
+    details = details_match.group(1) if details_match and details_match.group(1) else ""
+    fields = {}
+    for item in details.split(","):
+        key, separator, value = item.partition("=")
+        if separator and key.strip():
+            fields[key.strip().lower()] = value.strip()
+    try:
+        risk = float(fields["risk"]) if fields.get("risk") else None
+    except (TypeError, ValueError):
+        risk = None
+    policy = fields.get("policy", "").lower()
+    event = fields.get("event", "")
+    return {
+        "found": bool(source_match or details_match),
+        "bot_flag_source": source,
+        "bot_flag_details": details,
+        "policy": policy,
+        "risk": risk,
+        "event": event,
+        "denied": policy == "deny" and event == "$registration",
+    }
+
+
+def inspect_grok_account_state(sso, proxy="", timeout=20):
+    """Read the current Grok risk state; diagnostics failures do not block OAuth."""
+    result = _parse_grok_account_state("")
+    result.update({"status_code": 0, "url": "", "error": ""})
+    sso = str(sso or "").strip()
+    if not sso:
+        result["error"] = "sso 为空"
+        return result
+
+    session = None
+    try:
+        session = _new_sso_session(sso, proxy)
+        response = session.get(
+            GROK_HOME_URL,
+            headers={
+                "User-Agent": XAI_BROWSER_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            timeout=timeout,
+            allow_redirects=True,
+        )
+        result["status_code"] = int(getattr(response, "status_code", 0) or 0)
+        result["url"] = str(getattr(response, "url", "") or "")
+        if result["status_code"] != 200:
+            result["error"] = f"grok.com HTTP {result['status_code']}"
+            return result
+        result.update(_parse_grok_account_state(getattr(response, "text", "") or ""))
+        if not result["found"]:
+            result["error"] = "grok.com 未发现 botFlag 字段"
+        return result
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+    finally:
+        if session is not None:
+            session.close()
+
+
+def _new_device_session(proxy):
+    """Create a browser-like session for the unauthenticated Device Code request."""
+    session = curl_requests.Session(impersonate="chrome131", http_version="v2")
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
+    session.headers.update({
+        "User-Agent": XAI_BROWSER_USER_AGENT,
+        "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
+    })
+    return session
+
+
+def start_grok_device_flow(proxy):
+    """Request a Device Code without binding the request to an SSO cookie."""
+    session = _new_device_session(proxy)
+    try:
+        response = _request(
+            session,
+            "POST",
+            f"{XAI_OAUTH_ISSUER}/oauth2/device/code",
+            data={"client_id": XAI_CLIENT_ID, "scope": XAI_SCOPE},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "User-Agent": XAI_BROWSER_USER_AGENT,
+            },
+        )
+        payload = response.json()
+        payload = payload if isinstance(payload, dict) else {}
+        device_code = str(payload.get("device_code") or "").strip()
+        user_code = str(payload.get("user_code") or "").strip()
+        verification_url = str(
+            payload.get("verification_uri_complete")
+            or payload.get("verification_url_complete")
+            or ""
+        ).strip()
+        if not verification_url:
+            verification_uri = str(
+                payload.get("verification_uri") or payload.get("verification_url") or ""
+            ).strip()
+            if verification_uri:
+                separator = "&" if "?" in verification_uri else "?"
+                verification_url = f"{verification_uri}{separator}user_code={quote(user_code)}"
+        verification_url = _browser_device_verification_url(verification_url)
+        if not device_code or not user_code or not _trusted_xai_url(verification_url):
+            raise RuntimeError("xAI Device Flow returned incomplete data")
+        return {
+            "device_code": device_code,
+            "user_code": user_code,
+            "verification_url": verification_url,
+            "interval": payload.get("interval") or 2,
+        }
+    finally:
+        session.close()
+
+
+def finish_grok_device_flow(proxy, device_code, interval=2, timeout=90, account_email=""):
+    """Poll a browser-approved Device Code and return refreshable credentials."""
+    session = _new_device_session(proxy)
+    try:
+        token = _poll_device_token(session, device_code, interval, timeout)
+        if not token.get("refresh_token"):
+            raise RuntimeError("xAI OAuth did not return a refresh token")
+        return _build_credentials(token, account_email=account_email)
+    finally:
+        session.close()
 
 
 def _poll_device_token(session, device_code, interval, timeout):

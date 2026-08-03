@@ -602,6 +602,8 @@ class ProtocolOAuthClient:
                     "code_challenge": challenge,
                     "code_challenge_method": "S256",
                     "nonce": nonce,
+                    "plan": "generic",
+                    "referrer": "grok-build",
                 }
             )
         )
@@ -662,7 +664,7 @@ class ProtocolOAuthClient:
                 "nonce": nonce,
                 "principalType": "User",
                 "principalId": "",
-                "referrer": "",
+                "referrer": "grok-build",
             }]
             body = _json.dumps(payload, separators=(",", ":")).encode("utf-8")
             headers = {

@@ -174,7 +174,7 @@ def build_authorization_url(
     code_challenge: str,
     scopes: list[str],
     plan: str = "generic",
-    referrer: str = "cli-proxy-api",
+    referrer: str = "grok-build",
 ) -> str:
     params = {
         "client_id": client_id,

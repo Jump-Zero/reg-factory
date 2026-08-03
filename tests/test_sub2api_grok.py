@@ -5,6 +5,29 @@ from common import uploaders
 
 
 class Sub2ApiGrokTests(unittest.TestCase):
+    def test_registration_risk_denial_stops_before_sub2api_login(self):
+        state = {
+            "denied": True,
+            "bot_flag_source": 1,
+            "bot_flag_details": "policy=deny,risk=1.00,event=$registration",
+        }
+        with patch(
+            "common.grok_oauth.inspect_grok_account_state", return_value=state
+        ), patch.object(uploaders, "_sub2api_request") as request:
+            ok, message = uploaders.upload_sub2api_grok(
+                "https://sub.example.com",
+                "admin@example.com",
+                "secret",
+                "grok",
+                "sso-token",
+                account_email="denied@example.com",
+                local_proxy="http://127.0.0.1:7897",
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("注册风控拒绝", message)
+        request.assert_not_called()
+
     def test_imports_sso_into_grok_group(self):
         responses = [
             {"access_token": "admin-token"},
@@ -87,7 +110,10 @@ class Sub2ApiGrokTests(unittest.TestCase):
             with patch(
                 "common.grok_oauth.convert_grok_sso_local",
                 return_value=(credentials, "new@example.com"),
-            ) as convert:
+            ) as convert, patch(
+                "common.grok_oauth.inspect_grok_account_state",
+                return_value={"denied": False},
+            ):
                 ok, message = uploaders.upload_sub2api_grok(
                     "https://sub.example.com",
                     "admin@example.com",
@@ -126,6 +152,9 @@ class Sub2ApiGrokTests(unittest.TestCase):
             with patch(
                 "common.grok_oauth.convert_grok_sso_local",
                 return_value=(credentials, "new@example.com"),
+            ), patch(
+                "common.grok_oauth.inspect_grok_account_state",
+                return_value={"denied": False},
             ):
                 ok, message = uploaders.upload_sub2api_grok(
                     "https://sub.example.com",
@@ -156,7 +185,10 @@ class Sub2ApiGrokTests(unittest.TestCase):
             with patch(
                 "common.grok_oauth.convert_grok_sso_local",
                 side_effect=RuntimeError("local denied"),
-            ) as convert, patch.object(uploaders.time, "sleep"):
+            ) as convert, patch(
+                "common.grok_oauth.inspect_grok_account_state",
+                return_value={"denied": False},
+            ), patch.object(uploaders.time, "sleep"):
                 ok, message = uploaders.upload_sub2api_grok(
                     "https://sub.example.com",
                     "admin@example.com",
