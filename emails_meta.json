@@ -1,0 +1,38 @@
+{
+  "pwymvqdrai+l4xe1m@outlook.com": {
+    "source": "imported",
+    "parent_email": "pwymvqdrai@outlook.com"
+  },
+  "pwymvqdrai@outlook.com": {
+    "source": "imported",
+    "is_parent": true,
+    "child_emails": [
+      "pwymvqdrai+l4xe1m@outlook.com",
+      "pwymvqdrai+lj4y5y@outlook.com",
+      "pwymvqdrai+xzjdlp@outlook.com",
+      "pwymvqdrai+jff4ja@outlook.com",
+      "pwymvqdrai+qfxjgc@outlook.com",
+      "pwymvqdrai+lq0mu1@outlook.com"
+    ]
+  },
+  "pwymvqdrai+lj4y5y@outlook.com": {
+    "source": "imported",
+    "parent_email": "pwymvqdrai@outlook.com"
+  },
+  "pwymvqdrai+xzjdlp@outlook.com": {
+    "source": "imported",
+    "parent_email": "pwymvqdrai@outlook.com"
+  },
+  "pwymvqdrai+jff4ja@outlook.com": {
+    "source": "imported",
+    "parent_email": "pwymvqdrai@outlook.com"
+  },
+  "pwymvqdrai+qfxjgc@outlook.com": {
+    "source": "imported",
+    "parent_email": "pwymvqdrai@outlook.com"
+  },
+  "pwymvqdrai+lq0mu1@outlook.com": {
+    "source": "imported",
+    "parent_email": "pwymvqdrai@outlook.com"
+  }
+}

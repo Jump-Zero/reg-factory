@@ -467,8 +467,29 @@ function renderAssetScanTable(){
   const visible = items.slice(start, start + ASSET_SCAN_PAGE_SIZE);
   const body = $('#asset-scan-rows');
   body.innerHTML = '';
-  visible.forEach(item=>{
+  // 从完整 items 中构建子邮箱索引（不限于当前页），用于母邮箱展开时查找子邮箱数据
+  const allChildMap = {};
+  (assetScanData?.items || []).forEach(item=>{
+    if(item.parent_email){
+      const key = item.parent_email.toLowerCase();
+      if(!allChildMap[key]) allChildMap[key] = [];
+      allChildMap[key].push(item);
+    }
+  });
+  // 辅助函数：创建一行（复用渲染逻辑）
+  function createScanRow(item, isChild){
     const row = document.createElement('tr');
+    const isParentWithKids = !isChild && item.is_parent && (item.child_emails || []).length > 0;
+    if(isParentWithKids){
+      row.className = 'asset-scan-row-parent';
+      row.dataset.parentEmail = (item.email || '').toLowerCase();
+      row.style.cursor = 'pointer';
+    }
+    if(isChild){
+      row.className = 'asset-scan-row-child';
+      row.dataset.parentEmail = item.parent_email.toLowerCase();
+      row.style.display = 'none';
+    }
     // 复选框列
     const checkCell = document.createElement('td');
     checkCell.className = 'col-check';
@@ -477,6 +498,7 @@ function renderAssetScanTable(){
     cb.className = 'asset-scan-check';
     cb.dataset.email = item.email || '';
     cb.dataset.platform = item.platform || '';
+    cb.addEventListener('click', e=>e.stopPropagation());
     checkCell.appendChild(cb);
     row.appendChild(checkCell);
     // 类型
@@ -484,6 +506,27 @@ function renderAssetScanTable(){
     // 账号
     const account = appendAssetScanCell(row, item.email || item.source, 'asset-scan-account');
     account.title = item.source || '';
+    // 母/子邮箱标记
+    if(item.platform === 'outlook'){
+      if(isParentWithKids){
+        const pBadge = document.createElement('span');
+        pBadge.className = 'mail-split-badge parent';
+        pBadge.textContent = `母(${item.child_count || 0})`;
+        pBadge.title = `点击展开/折叠子邮箱`;
+        account.appendChild(pBadge);
+        const arrow = document.createElement('span');
+        arrow.className = 'mail-split-arrow';
+        arrow.textContent = '▶';
+        account.insertBefore(arrow, account.firstChild);
+        row._arrow = arrow;
+      } else if(isChild || item.parent_email){
+        const cBadge = document.createElement('span');
+        cBadge.className = 'mail-split-badge child';
+        cBadge.textContent = `子`;
+        cBadge.title = `子邮箱，母邮箱: ${item.parent_email}`;
+        account.appendChild(cBadge);
+      }
+    }
     // 分类
     const catCell = document.createElement('td');
     catCell.className = 'col-source';
@@ -513,7 +556,31 @@ function renderAssetScanTable(){
     detail.title = `${item.evidence || 'none'} · ${item.source || ''}`;
     // 检测时间
     appendAssetScanCell(row, formatAssetScanTime(item.checked_at), 'asset-scan-checked');
+    return row;
+  }
+
+  visible.forEach(item=>{
+    const isParentWithKids = item.is_parent && (item.child_emails || []).length > 0;
+    const row = createScanRow(item, false);
     body.appendChild(row);
+    // 母邮箱行：紧接着插入子邮箱行（从完整数据中查找），并绑定展开/折叠
+    if(isParentWithKids){
+      const parentKey = (item.email || '').toLowerCase();
+      const children = allChildMap[parentKey] || [];
+      children.forEach(childItem=>{
+        const childRow = createScanRow(childItem, true);
+        body.appendChild(childRow);
+      });
+      row.addEventListener('click', ()=>{
+        const expanded = row.classList.toggle('expanded');
+        if(row._arrow) row._arrow.textContent = expanded ? '▼' : '▶';
+        body.querySelectorAll('tr.asset-scan-row-child').forEach(childRow=>{
+          if(childRow.dataset.parentEmail === parentKey){
+            childRow.style.display = expanded ? '' : 'none';
+          }
+        });
+      });
+    }
   });
   $('#asset-scan-empty').style.display = visible.length ? 'none' : 'block';
   $('#asset-scan-result-count').textContent = `${items.length} 条`;
@@ -730,6 +797,11 @@ function updateScanSelectAllState(){
     scanBtn.disabled = scanRunning || checked.length === 0;
     scanBtn.textContent = checked.length > 0 ? `扫描选中(${checked.length})` : '扫描选中';
   }
+  const splitBtn = $('#btn-split-selected');
+  if(splitBtn){
+    splitBtn.disabled = checked.length === 0;
+    splitBtn.textContent = checked.length > 0 ? `分裂选中(${checked.length})` : '分裂选中';
+  }
 }
 
 $('#asset-scan-check-all').onchange = function(){
@@ -746,15 +818,28 @@ document.addEventListener('change', function(e){
 $('#btn-delete-scan-mails').onclick = async ()=>{
   const emails = getCheckedScanEmails();
   if(!emails.length) return;
-  if(!confirm(`确认删除选中的 ${emails.length} 个邮箱？此操作不可撤销。`)) return;
+  const platform = $('#asset-scan-platform').value;
+  const platformLabels = {outlook:'Outlook',chatgpt:'ChatGPT',claude:'Claude',grok:'Grok'};
+  const plabel = platformLabels[platform] || platform;
+  let confirmMsg;
+  if(platform === 'outlook'){
+    confirmMsg = `确认完全删除选中的 ${emails.length} 个邮箱？\n（将从邮箱池永久删除，不可撤销）`;
+  } else {
+    confirmMsg = `确认删除选中的 ${emails.length} 个邮箱在 ${plabel} 的凭据记录？\n（仅删除平台 cookie/token，邮箱本身不受影响）`;
+  }
+  if(!confirm(confirmMsg)) return;
   const btn = $('#btn-delete-scan-mails');
   btn.disabled = true;
   btn.textContent = '删除中…';
   try{
     const r = await (await fetch('/api/mailpool/delete',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({emails})})).json();
+      body:JSON.stringify({emails, platform})})).json();
     if(r.ok){
-      setAssetMessage('#asset-scan-msg', `已删除 ${r.deleted} 个邮箱，剩余 ${r.total}`, true);
+      if(r.mode === 'full'){
+        setAssetMessage('#asset-scan-msg', `已删除 ${r.deleted} 个邮箱，剩余 ${r.total}`, true);
+      } else {
+        setAssetMessage('#asset-scan-msg', `已清理 ${plabel} 凭据：删除 ${r.deleted_files} 个文件，清理 ${r.cleaned_accounts} 条账号记录`, true);
+      }
       await Promise.all([refreshAssetSummary(), loadAssetScan(), loadMailpool()]);
     } else {
       setAssetMessage('#asset-scan-msg', '删除失败: '+(r.msg||''), false);
@@ -765,6 +850,42 @@ $('#btn-delete-scan-mails').onclick = async ()=>{
     btn.disabled = false;
     btn.textContent = '删除选中';
   }
+};
+
+// ---------------------------------------------------------------- 邮箱分裂（选中邮箱 → 每个母邮箱生成 N 个子邮箱）
+$('#btn-split-selected').onclick = async ()=>{
+  const emails = getCheckedScanEmails();
+  if(!emails.length) return;
+  const count = parseInt($('#asset-split-count').value, 10) || 1;
+  if(!confirm(`确认为选中的 ${emails.length} 个邮箱各分裂出 ${count} 个子邮箱？\n（使用 Outlook Plus Addressing，继承母邮箱密码/token）`)) return;
+  const btn = $('#btn-split-selected');
+  btn.disabled = true;
+  btn.textContent = '分裂中…';
+  let totalGenerated = 0;
+  let errors = [];
+  for(const email of emails){
+    try{
+      const r = await (await fetch('/api/mailpool/split',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({parent_email: email, count})})).json();
+      if(r.ok){
+        totalGenerated += r.count;
+      } else {
+        errors.push(`${email}: ${r.msg||'未知错误'}`);
+      }
+    }catch(e){
+      errors.push(`${email}: ${e}`);
+    }
+  }
+  if(totalGenerated > 0){
+    let msg = `成功生成 ${totalGenerated} 个子邮箱`;
+    if(errors.length) msg += `；${errors.length} 个失败: ${errors.join('; ')}`;
+    setAssetMessage('#asset-scan-msg', msg, errors.length === 0);
+  } else {
+    setAssetMessage('#asset-scan-msg', `分裂全部失败: ${errors.join('; ')}`, false);
+  }
+  btn.disabled = false;
+  btn.textContent = '分裂选中';
+  await Promise.all([refreshAssetSummary(), loadAssetScan(), loadMailpool()]);
 };
 
 // ---------------------------------------------------------------- Codex K12 集成通道

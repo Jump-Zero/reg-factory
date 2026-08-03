@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
-<link rel="stylesheet" href="/static/style.css?v=20260801-fix-1">
+<link rel="stylesheet" href="/static/style.css?v=20260803-split-2">
 </head>
 <body>
 <header class="topbar">
@@ -137,10 +137,11 @@
           <span id="mailpool-total" class="env-msg"></span>
         </div>
         <p class="hint">外部邮箱直接入池，三平台注册可直接用，无需自己注册。每行一个，至少 <b>邮箱+密码</b>。<br>
-          格式：<code>邮箱@outlook.com----密码----refresh_token----client_id</code>
-          （token/client_id 可省；分隔符兼容多横线 / 逗号 / 制表符 / 竖线）。已在池中的邮箱自动跳过。</p>
+          格式A：<code>邮箱@outlook.com----密码----refresh_token----client_id</code><br>
+          格式B：<code>邮箱@outlook.com----密码----client_id----refresh_token</code><br>
+          （系统自动识别字段顺序；token/client_id 可省；分隔符兼容多横线 / 逗号 / 制表符 / 竖线）。已在池中的邮箱自动跳过。</p>
         <textarea id="mailpool-input" class="mailpool-input" spellcheck="false"
-          placeholder="aaa@outlook.com----Pass123----M.C5xx...----9e5f94bc-...&#10;bbb@outlook.com----Pass456"></textarea>
+          placeholder="aaa@outlook.com----Pass123----M.C5xx...----9e5f94bc-...&#10;bbb@outlook.com----Pass456----9e5f94bc-...----M.C5xx..."></textarea>
         <div>
           <button id="btn-import-mail" class="btn-run">导入到邮箱池</button>
           <span id="mailpool-msg" class="env-msg"></span>
@@ -224,6 +225,16 @@
             </select></label>
             <span id="asset-scan-result-count" class="asset-scan-result-count">0 条</span>
             <button id="btn-scan-selected" class="btn-secondary" type="button" disabled>扫描选中</button>
+            <label class="asset-scan-split"><span>分裂</span>
+              <select id="asset-split-count">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3" selected>3</option>
+                <option value="5">5</option>
+                <option value="10">10</option>
+              </select>
+            </label>
+            <button id="btn-split-selected" class="btn-secondary" type="button" disabled>分裂选中</button>
             <button id="btn-delete-scan-mails" class="btn-danger" type="button" disabled>删除选中</button>
             <span id="asset-scan-msg" class="asset-message" role="status" aria-live="polite"></span>
           </div>
@@ -399,5 +410,5 @@
   <a href="https://t.me/TIANTIANAIPRO" target="_blank" rel="noopener">@TIANTIANAIPRO</a>
 </dialog>
 
-<script src="/static/app.js?v=20260801-fix-1"></script></body>
+<script src="/static/app.js?v=20260803-split-4"></script></body>
 </html>

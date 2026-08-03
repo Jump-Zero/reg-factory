@@ -713,16 +713,24 @@ def _asset_scan_payload():
         **ASSET_SCAN_STATE,
         "progress": dict(ASSET_SCAN_STATE.get("progress") or {}),
     }
-    # 合并邮箱分类(自主导入/自主注册)到 outlook 扫描项
+    # 合并邮箱分类(自主导入/自主注册)和母/子邮箱关系到 outlook 扫描项
     meta = _load_emails_meta()
     source_counts = {"imported": 0, "registered": 0}
     for item in report.get("items", []):
         if item.get("platform") == "outlook" and item.get("email"):
-            src = meta.get(item["email"].lower(), {}).get("source", "imported")
+            m = meta.get(item["email"].lower(), {})
+            src = m.get("source", "imported")
             item["mail_source"] = src
+            item["parent_email"] = m.get("parent_email", "")
+            item["is_parent"] = m.get("is_parent", False)
+            item["child_count"] = len(m.get("child_emails", []))
+            item["child_emails"] = m.get("child_emails", [])
             source_counts[src] = source_counts.get(src, 0) + 1
         else:
             item["mail_source"] = ""
+            item["parent_email"] = ""
+            item["is_parent"] = False
+            item["child_count"] = 0
     report["mail_source_counts"] = source_counts
     return report
 
@@ -855,6 +863,8 @@ EMAILS_META_FILE = os.path.join(os.environ.get("REG_FACTORY_DATA_DIR", "").strip
 import re as _re
 import json as _json
 _EMAIL_RE = _re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+# UUID 格式（Microsoft client_id 标准格式）
+_UUID_RE = _re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", _re.I)
 
 
 def _load_emails_meta():
@@ -905,6 +915,19 @@ def _parse_mail_line(line):
         return None
     token = parts[2] if len(parts) >= 3 else ""
     client_id = parts[3] if len(parts) >= 4 else ""
+    # 自动检测字段顺序：支持两种导入格式
+    #   格式A: email----password----refresh_token----client_id（现有）
+    #   格式B: email----password----client_id----refresh_token（新）
+    # 规则：client_id 匹配 UUID 格式，refresh_token 不匹配
+    if token and client_id:
+        if _UUID_RE.match(token) and not _UUID_RE.match(client_id):
+            # 第3字段是UUID(client_id)，第4字段不是 → 顺序反了，交换
+            token, client_id = client_id, token
+    elif token and not client_id:
+        # 只有3个字段，检测是 refresh_token 还是 client_id
+        if _UUID_RE.match(token):
+            client_id = token
+            token = ""
     # 去掉尾部空字段，避免写出 "email----pass--------"(多余空列)
     fields = [email, password, token, client_id]
     while len(fields) > 2 and fields[-1] == "":
@@ -980,7 +1003,7 @@ async def api_mailpool_import(request: Request):
 
 @app.get("/api/mailpool/list")
 def api_mailpool_list():
-    """列出邮箱池所有邮箱，含分类信息。"""
+    """列出邮箱池所有邮箱，含分类信息和母/子邮箱关系。"""
     meta = _load_emails_meta()
     emails = []
     if not os.path.isfile(EMAILS_FILE):
@@ -998,7 +1021,8 @@ def api_mailpool_list():
         token = parsed[2] if len(parsed) >= 3 else ""
         client_id = parsed[3] if len(parsed) >= 4 else ""
         email_lower = email.lower()
-        source = meta.get(email_lower, {}).get("source", "imported")
+        m = meta.get(email_lower, {})
+        source = m.get("source", "imported")
         emails.append({
             "index": idx,
             "email": email,
@@ -1006,6 +1030,9 @@ def api_mailpool_list():
             "has_token": bool(token),
             "has_client_id": bool(client_id),
             "source": source,
+            "parent_email": m.get("parent_email", ""),
+            "child_emails": m.get("child_emails", []),
+            "is_parent": m.get("is_parent", False),
         })
         idx += 1
     counts = {
@@ -1015,37 +1042,284 @@ def api_mailpool_list():
     return {"total": len(emails), "emails": emails, "counts": counts}
 
 
-@app.post("/api/mailpool/delete")
-async def api_mailpool_delete(request: Request):
-    """批量删除选中邮箱。body: {"emails": ["a@x.com", "b@y.com"]}。"""
+@app.post("/api/mailpool/split")
+async def api_mailpool_split(request: Request):
+    """分裂 Outlook 邮箱（plus addressing 别名）。
+    body: {"parent_email": "user@outlook.com", "count": 3}
+    生成 user+xxx1@outlook.com 等子邮箱，继承母邮箱的密码/token/client_id。
+    """
+    import random
+    import string
     data = await request.json()
-    targets = set(str(e).lower() for e in (data or {}).get("emails", []))
-    if not targets:
-        return {"ok": False, "msg": "未选择邮箱"}
-    if not os.path.isfile(EMAILS_FILE):
-        return {"ok": False, "msg": "emails.txt 不存在"}
-    kept = []
-    deleted = 0
-    for line in open(EMAILS_FILE, encoding="utf-8"):
-        raw = line.rstrip("\n\r")
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        email = stripped.split("----")[0].strip().lower()
-        if email in targets:
-            deleted += 1
-        else:
-            kept.append(raw)
-    with open(EMAILS_FILE, "w", encoding="utf-8") as f:
-        if kept:
-            f.write("\n".join(kept) + "\n")
-    # 同步清理 meta
+    parent_email = str((data or {}).get("parent_email", "")).strip()
+    count = int((data or {}).get("count", 1))
+    if not parent_email or not _EMAIL_RE.match(parent_email):
+        return {"ok": False, "msg": "母邮箱地址无效"}
+    if count < 1 or count > 20:
+        return {"ok": False, "msg": "分裂数量须在 1-20 之间"}
+
+    # 从 emails.txt 找到母邮箱的完整记录
+    parent_record = None
+    if os.path.isfile(EMAILS_FILE):
+        for line in open(EMAILS_FILE, encoding="utf-8"):
+            parsed = _parse_mail_line(line)
+            if parsed and parsed[0].lower() == parent_email.lower():
+                parent_record = parsed
+                break
+    if not parent_record:
+        return {"ok": False, "msg": f"母邮箱 {parent_email} 不在邮箱池中"}
+
+    # 解析母邮箱 local_part 和 domain
+    local, _, domain = parent_email.partition("@")
+    if "+" in local:
+        # 如果母邮箱本身已是子邮箱，取其基础部分作为母
+        local = local.split("+")[0]
+
+    existing = _existing_emails()
     meta = _load_emails_meta()
-    for t in targets:
-        meta.pop(t, None)
+    generated = []
+    for _ in range(count):
+        # 生成随机 tag（6 位字母数字）
+        for _try in range(50):
+            tag = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+            child_email = f"{local}+{tag}@{domain}"
+            if child_email.lower() not in existing and child_email.lower() not in {e.lower() for e in generated}:
+                break
+        else:
+            continue
+        # 子邮箱继承母邮箱的密码/token/client_id
+        child_fields = [child_email] + parent_record[1:]
+        # 写入 emails.txt
+        need_nl = os.path.isfile(EMAILS_FILE) and os.path.getsize(EMAILS_FILE) > 0
+        with open(EMAILS_FILE, "a", encoding="utf-8") as f:
+            if need_nl:
+                f.write("\n")
+            f.write("----".join(child_fields) + "\n")
+        existing.add(child_email.lower())
+        generated.append(child_email)
+
+        # 更新 meta：子邮箱记录 parent_email，母邮箱记录 child_emails
+        child_key = child_email.lower()
+        parent_key = parent_email.lower()
+        meta[child_key] = {
+            "source": meta.get(parent_key, {}).get("source", "imported"),
+            "parent_email": parent_email,
+        }
+        parent_meta = meta.get(parent_key, {"source": meta.get(parent_key, {}).get("source", "imported")})
+        parent_meta["is_parent"] = True
+        children = parent_meta.get("child_emails", [])
+        if child_email not in children:
+            children.append(child_email)
+        parent_meta["child_emails"] = children
+        meta[parent_key] = parent_meta
+
     _save_emails_meta(meta)
     total = len(_existing_emails())
-    return {"ok": True, "deleted": deleted, "total": total}
+    return {
+        "ok": True,
+        "parent_email": parent_email,
+        "generated": generated,
+        "count": len(generated),
+        "total": total,
+    }
+
+
+@app.post("/api/mailpool/unsplit")
+async def api_mailpool_unsplit(request: Request):
+    """解除子邮箱的分裂关系（将子邮箱变回独立邮箱，从母邮箱的 child_emails 中移除）。
+    body: {"email": "user+abc123@outlook.com"}
+    """
+    data = await request.json()
+    email = str((data or {}).get("email", "")).strip()
+    if not email:
+        return {"ok": False, "msg": "未指定邮箱"}
+    meta = _load_emails_meta()
+    key = email.lower()
+    entry = meta.get(key, {})
+    parent_email = entry.get("parent_email", "")
+    if not parent_email:
+        return {"ok": False, "msg": "该邮箱不是子邮箱"}
+    # 从母邮箱的 child_emails 中移除
+    parent_key = parent_email.lower()
+    parent_meta = meta.get(parent_key, {})
+    children = [c for c in parent_meta.get("child_emails", []) if c.lower() != key]
+    parent_meta["child_emails"] = children
+    if not children:
+        parent_meta.pop("is_parent", None)
+    meta[parent_key] = parent_meta
+    # 清除子邮箱的 parent_email
+    entry.pop("parent_email", None)
+    meta[key] = entry
+    _save_emails_meta(meta)
+    return {"ok": True, "email": email, "parent_email": parent_email}
+
+
+def _delete_platform_credentials(platform, targets):
+    """删除指定平台下的凭据文件（cookie/token/accounts.txt），不影响 emails.txt。
+    返回 {"deleted_files": N, "cleaned_accounts": N, "cleaned_uploads": N}。"""
+    from pathlib import Path
+    data_root = Path(os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or ROOT)
+    deleted_files = 0
+    cleaned_accounts = 0
+    cleaned_uploads = 0
+
+    # ---- 1. 清理 cookies/{platform}/accounts.txt 和 full_*.json ----
+    cookie_dirs = [data_root / "cookies" / platform]
+    if platform == "claude":
+        cookie_dirs.append(data_root / "cookies")  # claude cookie 也存根目录
+    for cdir in cookie_dirs:
+        if not cdir.is_dir():
+            continue
+        # 读取 accounts.txt，找出 target 邮箱对应的 cookie_value
+        acct_path = cdir / "accounts.txt"
+        cookie_values_to_delete = set()
+        if acct_path.is_file():
+            kept_lines = []
+            for raw in acct_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = raw.strip().split("|")
+                if len(parts) >= 3 and parts[0].strip().lower() in targets:
+                    cookie_values_to_delete.add(parts[2].strip())
+                    cleaned_accounts += 1
+                else:
+                    kept_lines.append(raw)
+            if cookie_values_to_delete:
+                acct_path.write_text(
+                    "\n".join(kept_lines) + ("\n" if kept_lines else ""),
+                    encoding="utf-8",
+                )
+        # 删除包含目标 cookie_value 的 full_*.json
+        for fpath in cdir.glob("full_*.json"):
+            try:
+                raw_cookies = _json.loads(fpath.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue
+            if not isinstance(raw_cookies, list):
+                continue
+            for item in raw_cookies:
+                if isinstance(item, dict) and item.get("value") in cookie_values_to_delete:
+                    try:
+                        fpath.unlink()
+                        deleted_files += 1
+                    except Exception:
+                        pass
+                    break
+
+    # ---- 2. 清理 tokens/{platform}/ 下的文件 ----
+    token_dir = data_root / "tokens" / platform
+    if token_dir.is_dir():
+        for target_email in targets:
+            # 删除 {email}.session.json / {email}.sso.json / {email}.account.json
+            for pattern in [f"{target_email}*.json"]:
+                for fpath in token_dir.glob(pattern):
+                    try:
+                        fpath.unlink()
+                        deleted_files += 1
+                    except Exception:
+                        pass
+            # ChatGPT 额外清理 c2a-{email}.json 和 codex-{email}-free.json
+            if platform == "chatgpt":
+                for extra in [f"c2a-{target_email}.json", f"codex-{target_email}-free.json"]:
+                    fpath = token_dir / extra
+                    if fpath.is_file():
+                        try:
+                            fpath.unlink()
+                            deleted_files += 1
+                        except Exception:
+                            pass
+        # 清理 uploaded_sub2api.txt
+        upload_path = token_dir / "uploaded_sub2api.txt"
+        if upload_path.is_file():
+            kept = []
+            for raw in upload_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if raw.strip().lower() in targets:
+                    cleaned_uploads += 1
+                else:
+                    kept.append(raw)
+            if cleaned_uploads:
+                upload_path.write_text(
+                    "\n".join(kept) + ("\n" if kept else ""),
+                    encoding="utf-8",
+                )
+
+    # ---- 3. 清理 asset_scanner 缓存中该平台的记录 ----
+    try:
+        cache_path = data_root / "runtime" / "state" / "asset_scan_cache.json"
+        if cache_path.is_file():
+            cache = _json.loads(cache_path.read_text(encoding="utf-8", errors="replace"))
+            items = cache.get("items", [])
+            new_items = [
+                item for item in items
+                if not (
+                    isinstance(item, dict)
+                    and item.get("platform") == platform
+                    and str(item.get("email", "")).lower() in targets
+                )
+            ]
+            if len(new_items) != len(items):
+                cache["items"] = new_items
+                cache_path.write_text(_json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    return {
+        "deleted_files": deleted_files,
+        "cleaned_accounts": cleaned_accounts,
+        "cleaned_uploads": cleaned_uploads,
+    }
+
+
+@app.post("/api/mailpool/delete")
+async def api_mailpool_delete(request: Request):
+    """批量删除选中邮箱。
+    body: {"emails": [...], "platform": "outlook"|"chatgpt"|"claude"|"grok"}
+    - outlook（默认）：完全删除 emails.txt + meta
+    - chatgpt/claude/grok：仅删除该平台凭据文件，不影响邮箱本身
+    """
+    data = await request.json()
+    targets = set(str(e).lower() for e in (data or {}).get("emails", []))
+    platform = str((data or {}).get("platform", "outlook")).strip().lower()
+    if not targets:
+        return {"ok": False, "msg": "未选择邮箱"}
+    if platform not in {"outlook", "chatgpt", "claude", "grok"}:
+        platform = "outlook"
+
+    if platform == "outlook":
+        # 完全删除：emails.txt + meta
+        if not os.path.isfile(EMAILS_FILE):
+            return {"ok": False, "msg": "emails.txt 不存在"}
+        kept = []
+        deleted = 0
+        for line in open(EMAILS_FILE, encoding="utf-8"):
+            raw = line.rstrip("\n\r")
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            email = stripped.split("----")[0].strip().lower()
+            if email in targets:
+                deleted += 1
+            else:
+                kept.append(raw)
+        with open(EMAILS_FILE, "w", encoding="utf-8") as f:
+            if kept:
+                f.write("\n".join(kept) + "\n")
+        # 同步清理 meta
+        meta = _load_emails_meta()
+        for t in targets:
+            meta.pop(t, None)
+        _save_emails_meta(meta)
+        total = len(_existing_emails())
+        return {"ok": True, "deleted": deleted, "total": total, "mode": "full"}
+    else:
+        # 平台级删除：仅删凭据文件
+        result = _delete_platform_credentials(platform, targets)
+        return {
+            "ok": True,
+            "platform": platform,
+            "mode": "platform_only",
+            "deleted_files": result["deleted_files"],
+            "cleaned_accounts": result["cleaned_accounts"],
+            "cleaned_uploads": result["cleaned_uploads"],
+        }
 
 
 # ============================================================ sms-man 接码助手

@@ -403,6 +403,14 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .mail-source-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600}
 .mail-source-badge.imported{background:rgba(56,132,247,.15);color:#6fa8ff}
 .mail-source-badge.registered{background:rgba(46,184,92,.15);color:#5fd88a}
+.mail-split-badge{display:inline-block;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;margin-left:4px;white-space:nowrap}
+.mail-split-badge.parent{background:rgba(155,89,182,.18);color:#c39bd3}
+.mail-split-badge.child{background:rgba(243,156,18,.15);color:#f5b041}
+.mail-split-arrow{display:inline-block;width:12px;font-size:10px;color:var(--muted);transition:transform .15s;user-select:none}
+.asset-scan-row-parent:hover{background:var(--surface-hover)}
+.asset-scan-row-parent.expanded{background:rgba(155,89,182,.06)}
+.asset-scan-row-child td{background:rgba(155,89,182,.04)}
+.asset-scan-row-child .asset-scan-account{padding-left:24px;opacity:.85}
 .asset-scan-account{color:var(--text)!important;font-family:var(--mono)}
 .asset-status-badge{display:inline-flex;align-items:center;min-height:22px;padding:2px 7px;border:1px solid var(--line);border-radius:5px;font-size:9.5px;white-space:nowrap}
 .asset-status-badge.normal{border-color:rgba(65,184,120,.5);color:var(--green);background:rgba(65,184,120,.08)}
@@ -644,7 +652,7 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   .asset-scan-toolbar label span{display:block;margin-bottom:4px}
   .asset-scan-toolbar select{width:100%;height:40px}
   .asset-scan-result-count{margin:0}
-  .asset-scan-toolbar .btn-danger{grid-column:1/-1;width:100%}
+  .asset-scan-toolbar .btn-danger,.asset-scan-toolbar .btn-secondary{grid-column:1/-1;width:100%}
   .asset-scan-progress>div{align-items:flex-start;flex-direction:column;gap:3px}
   .asset-actions{align-items:stretch;flex-direction:column}
   .asset-actions .btn-run,.asset-actions .btn-secondary,.asset-actions select{width:100%;max-width:none;min-height:41px}
