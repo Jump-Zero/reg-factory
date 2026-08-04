@@ -75,11 +75,16 @@ class ProxySwitchTests(unittest.TestCase):
 
     def test_outlook_loop_writes_residential_proxy_to_bitbrowser_profile(self):
         response = {"success": True, "data": {"id": "profile-1"}}
-        with patch.object(outlook_reg_loop, "_bb_call", return_value=response) as request:
-            profile_id = outlook_reg_loop.bb_create_for_outlook_reg(
-                "outlook-test",
-                "http://resident:secret@home.test:9000",
-            )
+        with patch.dict(
+            outlook_reg_loop.os.environ,
+            {"FINGERPRINT_BROWSER": "bitbrowser"},
+            clear=False,
+        ):
+            with patch.object(outlook_reg_loop, "_bb_call", return_value=response) as request:
+                profile_id = outlook_reg_loop.bb_create_for_outlook_reg(
+                    "outlook-test",
+                    "http://resident:secret@home.test:9000",
+                )
 
         self.assertEqual(profile_id, "profile-1")
         payload = request.call_args.args[1]

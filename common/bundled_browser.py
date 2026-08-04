@@ -107,6 +107,12 @@ class BundledBrowser:
         values = list(self._load().values())[:page_size]
         return {"success": True, "data": {"list": values, "total": len(values)}}
 
+    def update_browser_fingerprint(self, profile_id, **fingerprint):
+        return self._post(
+            "/browser/update/partial",
+            {"ids": [profile_id], "browserFingerPrint": fingerprint},
+        )
+
     def _profile(self, profile_id: str) -> dict:
         profile = self._load().get(str(profile_id))
         if not profile:
@@ -208,6 +214,17 @@ class BundledBrowser:
             profiles[profile_id] = profile
             self._save(profiles)
             return {"success": True, "data": profile}
+        if path == "/browser/update/partial":
+            fingerprint = dict(payload.get("browserFingerPrint") or {})
+            for profile_id in payload.get("ids") or []:
+                profile = self._profile(str(profile_id))
+                current = dict(profile.get("browserFingerPrint") or {})
+                current.update(fingerprint)
+                profile["browserFingerPrint"] = current
+                profiles = self._load()
+                profiles[str(profile_id)] = profile
+                self._save(profiles)
+            return {"success": True}
         if path == "/browser/list":
             return self.list_browsers(
                 page=int(payload.get("page") or 0),

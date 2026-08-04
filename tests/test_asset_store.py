@@ -102,6 +102,31 @@ class AssetStoreTests(unittest.TestCase):
         self.assertEqual(cpa["data"]["access_token"], "access-token")
         self.assertEqual(chatgpt2api["data"]["source_type"], "web")
 
+    def test_verified_only_returns_normal_assets_and_blocks_unhealthy_pool(self):
+        self._write_chatgpt_assets()
+        from common import asset_scanner
+
+        normal = {
+            "items": [{
+                "platform": "chatgpt",
+                "email": "user@example.com",
+                "source": "full_profile_20260101_000000.json",
+                "status": "normal",
+                "checked_at": "2026-08-04T10:00:00Z",
+                "evidence": "chatgpt_session:200",
+            }],
+        }
+        with patch.object(asset_scanner, "get_report", return_value=normal):
+            result = asset_store.get_platform_asset("chatgpt", "raw", index=0, verified_only=True)
+
+        self.assertEqual(result["email"], "user@example.com")
+        self.assertEqual(result["verification"]["status"], "normal")
+        self.assertEqual(result["verification"]["evidence"], "chatgpt_session:200")
+
+        with patch.object(asset_scanner, "get_report", return_value={"items": []}):
+            with self.assertRaises(asset_store.AssetUnverified):
+                asset_store.get_platform_asset("chatgpt", "raw", index=0, verified_only=True)
+
     def test_grok_sub2api_and_summary(self):
         token_dir = self.root / "tokens" / "grok"
         token_dir.mkdir(parents=True)

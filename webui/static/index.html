@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
-<link rel="stylesheet" href="/static/style.css?v=20260803-split-2">
+<link rel="stylesheet" href="/static/style.css?v=20260804-merge-1">
 </head>
 <body>
 <header class="topbar">
@@ -14,6 +14,9 @@
     <div class="brand"><span class="brand-mark" aria-hidden="true">RF</span><span>reg-factory</span></div>
   </div>
   <div class="top-actions">
+    <button id="btn-guide" class="guide-button" type="button" title="打开新手指南">
+      <span class="guide-long">新手指南</span><span class="guide-short">指南</span>
+    </button>
     <button id="btn-update" class="update-button" type="button" title="检查并安装最新版本" disabled>
       <span aria-hidden="true">↻</span><span id="update-label">更新</span>
     </button>
@@ -28,7 +31,7 @@
 
 <div class="layout">
   <button id="nav-backdrop" class="nav-backdrop" type="button" aria-label="关闭任务菜单"></button>
-  <nav class="sidebar">
+  <nav class="sidebar" data-guide="task-library">
     <div class="sidebar-title">
       <span>任务库</span>
       <span id="task-count" class="task-count">--</span>
@@ -38,8 +41,8 @@
       <div class="sidebar-label">工具</div>
       <button class="navbtn" data-view="mailpool"><span class="nav-icon" aria-hidden="true">@</span><span>邮箱池</span></button>
       <button class="navbtn" data-view="assets"><span class="nav-icon" aria-hidden="true">API</span><span>资产 API</span></button>
-      <button class="navbtn" data-view="network"><span class="nav-icon" aria-hidden="true">IP</span><span>网络出口</span></button>
-      <button class="navbtn" data-view="env"><span class="nav-icon" aria-hidden="true">⚙</span><span>环境配置</span></button>
+      <button class="navbtn" data-view="network" data-guide="network-entry"><span class="nav-icon" aria-hidden="true">IP</span><span>网络出口</span></button>
+      <button class="navbtn" data-view="env" data-guide="env-entry"><span class="nav-icon" aria-hidden="true">CFG</span><span>环境配置</span></button>
       <button class="navbtn navbtn-k12" data-view="k12"><span class="nav-icon" aria-hidden="true">K</span><span>Codex K12</span><span id="k12-nav-state" class="nav-state">检测中</span></button>
     </div>
     <div class="sidebar-footer">
@@ -168,11 +171,11 @@
           <div><span>Kiro</span><strong id="asset-count-kiro">--</strong></div>
         </div>
 
-        <section class="asset-section asset-pool" aria-labelledby="asset-pool-title">
+        <section class="asset-section asset-pool" aria-labelledby="asset-pool-title" data-guide="asset-scan">
           <div class="asset-section-head asset-pool-head">
             <div>
               <h3 id="asset-pool-title">号池状态</h3>
-              <p>在线校验邮箱与平台登录凭据；检测异常和出口风控单独显示，不计作封禁。</p>
+              <p>在线校验邮箱与平台登录凭据；API 输出前会再次校验，只返回本次检测正常的资产。</p>
             </div>
             <div class="asset-scan-actions">
               <label class="asset-scan-concurrency"><span>并发</span>
@@ -206,6 +209,7 @@
               <option value="chatgpt">ChatGPT</option>
               <option value="claude">Claude</option>
               <option value="grok">Grok</option>
+              <option value="kiro">Kiro</option>
             </select></label>
             <label><span>分类</span><select id="asset-scan-source">
               <option value="all">全部分类</option>
@@ -268,9 +272,9 @@
           <button id="btn-save-asset-key" class="btn-secondary" type="button">保存 API Key</button>
         </section>
 
-        <section class="asset-section" aria-labelledby="asset-call-title">
+        <section class="asset-section" aria-labelledby="asset-call-title" data-guide="asset-call">
           <div class="asset-section-head">
-            <div><h3 id="asset-call-title">调用与输出</h3><p>默认顺序取下一条；指定 index 时不会推进游标，下标从 0 开始。</p></div>
+            <div><h3 id="asset-call-title">调用与输出</h3><p>每次输出前会在线校验，只返回正常资产；默认顺序取下一条，指定 index 不推进游标。</p></div>
           </div>
           <div class="asset-builder-grid">
             <label class="asset-field"><span>资产</span>
@@ -302,7 +306,7 @@
           </div>
 
           <div class="asset-actions">
-            <button id="btn-call-asset" class="btn-run" type="button">调用 API</button>
+            <button id="btn-call-asset" class="btn-run" type="button">在线校验并调用 API</button>
             <select id="asset-reset-scope" aria-label="游标重置范围"><option value="current">重置当前游标</option><option value="all">重置全部游标</option></select>
             <button id="btn-reset-asset" class="btn-secondary" type="button">重置</button>
             <span id="asset-call-msg" class="asset-message" role="status" aria-live="polite"></span>
@@ -343,7 +347,7 @@
           <button type="button" data-proxy-mode="residential">动态住宅 IP</button>
         </div>
 
-        <div id="network-clash-fields" class="network-fields">
+        <div id="network-clash-fields" class="network-fields" data-guide="clash-config">
           <div class="network-section-title">Clash 连接</div>
           <div class="network-grid">
             <label class="network-field"><span>控制器地址</span><input id="proxy-clash-api" type="text" placeholder="http://127.0.0.1:9097"></label>
@@ -368,7 +372,7 @@
           </div>
         </div>
 
-        <div class="network-fields">
+        <div class="network-fields" data-guide="platform-proxy-overrides">
           <div class="network-section-title">平台出口覆盖</div>
           <div class="network-grid">
             <label class="network-field"><span>Outlook</span><select id="proxy-mode-outlook" data-platform-proxy><option value="inherit">继承全局</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">动态住宅 IP</option></select></label>
@@ -380,7 +384,7 @@
           </div>
         </div>
 
-        <div class="network-actions">
+        <div class="network-actions" data-guide="network-actions">
           <button id="btn-save-proxy" class="btn-run" type="button">保存并应用</button>
           <button id="btn-rotate-proxy" class="btn-secondary" type="button">立即轮换</button>
           <button id="btn-test-proxy" class="btn-secondary" type="button">应用并测试 IP</button>
@@ -410,5 +414,33 @@
   <a href="https://t.me/TIANTIANAIPRO" target="_blank" rel="noopener">@TIANTIANAIPRO</a>
 </dialog>
 
-<script src="/static/app.js?v=20260803-split-4"></script></body>
+<div id="tour-layer" class="tour-layer" hidden aria-hidden="true">
+  <div id="tour-curtain-top" class="tour-curtain"></div>
+  <div id="tour-curtain-left" class="tour-curtain"></div>
+  <div id="tour-curtain-right" class="tour-curtain"></div>
+  <div id="tour-curtain-bottom" class="tour-curtain"></div>
+  <div id="tour-spotlight" class="tour-spotlight" aria-hidden="true"></div>
+  <section id="tour-popover" class="tour-popover" role="dialog" aria-modal="true" aria-labelledby="tour-title">
+    <div class="tour-head">
+      <span id="tour-section" class="tour-section">新手指南</span>
+      <button id="btn-tour-close" class="tour-close" type="button" aria-label="跳过新手指南">关闭</button>
+    </div>
+    <div class="tour-progress" aria-hidden="true">
+      <span id="tour-progress-label">1 / 1</span>
+      <span class="tour-progress-track"><span id="tour-progress-bar"></span></span>
+    </div>
+    <h2 id="tour-title"></h2>
+    <div id="tour-body" class="tour-body"></div>
+    <div class="tour-actions">
+      <button id="btn-tour-exit" class="tour-button tour-button-quiet" type="button">跳过指南</button>
+      <button id="btn-tour-skip-section" class="tour-button tour-button-quiet" type="button" hidden></button>
+      <span class="tour-action-spacer"></span>
+      <button id="btn-tour-prev" class="tour-button" type="button">上一步</button>
+      <button id="btn-tour-next" class="tour-button tour-button-primary" type="button">下一步</button>
+    </div>
+  </section>
+</div>
+
+<script src="/static/app.js?v=20260804-merge-1"></script>
+</body>
 </html>

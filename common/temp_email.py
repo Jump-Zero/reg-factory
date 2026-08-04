@@ -5,11 +5,12 @@ common/temp_email.py — 临时邮箱统一接口（纯 HTTP API 取验证码）
 参考 grokcli-2api（HM2899/grokcli-2api）：用临时邮箱 HTTP API 直接拉验证码，
 免去 Outlook 浏览器登录 + 收件箱轮询的重开销，取码从 ~80-120s 降到 ~10-30s。
 
-支持 4 个 provider：
+支持 5 个 provider：
   - moemail : beilunyang/moemail（自部署）           X-API-Key
   - yyds    : YYDS Mail (vip.215.im / maliapi.215.im) X-API-Key(AC-...) / Bearer token
   - gptmail : mail.chatgpt.org.uk（含公共测试 key）   X-API-Key(gpt-test)
   - cfmail  : dreamhunter2333/cloudflare_temp_email   x-admin-auth / Bearer jwt
+  - icloud  : mail.no-replyca.xyz（iCloud / iCloud code） URL query apikey
 
 统一接口：
   create_mailbox(provider=...) -> {"id","email","token","provider","raw"}
@@ -38,6 +39,7 @@ import requests
 try:
     from config import (
         TEMP_EMAIL_PROVIDER,
+        ICLOUD_MAIL_API_BASE, ICLOUD_MAIL_API_KEY, ICLOUD_MAIL_TYPE, ICLOUD_MAIL_SERVICE,
         MOEMAIL_BASE_URL, MOEMAIL_API_KEY, MOEMAIL_DOMAIN, MOEMAIL_EXPIRY_MS,
         YYDS_BASE_URL, YYDS_API_KEY,
         GPTMAIL_BASE_URL, GPTMAIL_API_KEY,
@@ -51,6 +53,8 @@ try:
     )
 except Exception:  # pragma: no cover - config 缺失时的兜底默认
     TEMP_EMAIL_PROVIDER = "gptmail"
+    ICLOUD_MAIL_API_BASE = "https://mail.no-replyca.xyz"
+    ICLOUD_MAIL_API_KEY = ICLOUD_MAIL_TYPE = ICLOUD_MAIL_SERVICE = ""
     MOEMAIL_BASE_URL = "https://moemail.example.com"
     MOEMAIL_API_KEY = MOEMAIL_DOMAIN = ""
     MOEMAIL_EXPIRY_MS = 3600000
@@ -177,10 +181,10 @@ def _extract_codes_and_links(text):
 
 
 def normalize_provider(provider=None, base_url=""):
-    """归一化 provider 名：moemail | yyds | gptmail | cfmail | custom。
+    """归一化 provider 名：moemail | yyds | gptmail | cfmail | icloud | custom。
     provider 显式给出优先；否则从 base_url 域名特征推断；再兜底 config 默认。"""
     p = (provider or "").strip().lower()
-    if p in ("moemail", "yyds", "gptmail", "cfmail", "custom"):
+    if p in ("moemail", "yyds", "gptmail", "cfmail", "icloud", "custom"):
         return p
     b = (base_url or "").lower()
     # base_url 命中自定义 API 根地址 → custom
@@ -194,8 +198,10 @@ def normalize_provider(provider=None, base_url=""):
         return "moemail"
     if "temp-email" in b or "awsl" in b:
         return "cfmail"
+    if "no-replyca" in b or "manageh.shop" in b:
+        return "icloud"
     dflt = (TEMP_EMAIL_PROVIDER or "gptmail").strip().lower()
-    return dflt if dflt in ("moemail", "yyds", "gptmail", "cfmail") else "gptmail"
+    return dflt if dflt in ("moemail", "yyds", "gptmail", "cfmail", "icloud") else "gptmail"
 
 
 def _norm_base(base_url, default):
@@ -508,6 +514,79 @@ def _gptmail_fetch(mailbox_id, email, token, api_key, base_url, sess):
     return out
 
 
+# ==================================================================== iCloud Mail API
+def _icloud_error(response, action):
+    """Format provider errors without echoing the apikey embedded in the URL."""
+    message = ""
+    try:
+        body = response.json() if response.content else {}
+        if isinstance(body, dict):
+            message = str(body.get("message") or body.get("error") or "")
+    except Exception:
+        pass
+    message = message[:160] or (response.text or "")[:160]
+    return RuntimeError(f"iCloud Mail {action} {response.status_code}: {message}")
+
+
+def _icloud_create(name, domain, expiry_ms, api_key, base_url, sess):
+    """Allocate an iCloud address from the provider's GET-only API."""
+    key = (api_key or ICLOUD_MAIL_API_KEY or "").strip()
+    if not key:
+        raise ValueError("iCloud Mail 需要 API key（ICLOUD_MAIL_API_KEY）")
+    base = _norm_base(base_url, ICLOUD_MAIL_API_BASE)
+    kind = (ICLOUD_MAIL_TYPE or "icloud-code").strip().lower()
+    if kind not in {"icloud", "icloud-code"}:
+        raise ValueError("ICLOUD_MAIL_TYPE 只能是 icloud 或 icloud-code")
+    params = {"type": kind, "apikey": key}
+    if kind == "icloud-code":
+        service = (ICLOUD_MAIL_SERVICE or "openai").strip().lower()
+        if not service:
+            raise ValueError("icloud-code 需要 ICLOUD_MAIL_SERVICE")
+        params["service"] = service
+    response = sess.get(f"{base}/api/user/email", params=params, timeout=HTTP_TIMEOUT)
+    if response.status_code >= 400:
+        raise _icloud_error(response, "create")
+    data = response.json() if response.content else {}
+    body = data.get("data") if isinstance(data, dict) and "data" in data else data
+    address = (body.get("email") or body.get("address")) if isinstance(body, dict) else None
+    if not address or "@" not in str(address):
+        raise RuntimeError(f"iCloud Mail create 返回异常: {str(data)[:220]}")
+    return {
+        "id": str(address),
+        "email": str(address),
+        "token": "",
+        "provider": "icloud",
+        "raw": data,
+    }
+
+
+def _icloud_fetch(mailbox_id, email, token, api_key, base_url, sess):
+    """Query the latest message; an empty success response means no mail yet."""
+    key = (api_key or ICLOUD_MAIL_API_KEY or "").strip()
+    address = (email or mailbox_id or "").strip()
+    if not key or "@" not in address:
+        return []
+    base = _norm_base(base_url, ICLOUD_MAIL_API_BASE)
+    response = sess.get(
+        f"{base}/api/user/mail",
+        params={"email": address, "apikey": key},
+        timeout=HTTP_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        raise _icloud_error(response, "fetch")
+    data = response.json() if response.content else {}
+    if isinstance(data, dict) and data.get("code") == 0 and "data" not in data:
+        return []
+    body = data.get("data") if isinstance(data, dict) and "data" in data else data
+    if not body:
+        return []
+    if isinstance(body, list):
+        return [dict(item) for item in body if isinstance(item, dict)]
+    if isinstance(body, dict):
+        return [dict(body)]
+    return []
+
+
 # ==================================================================== Cloudflare Temp Email
 def _cfmail_pick_domain(base, sess, site_pw):
     try:
@@ -680,6 +759,7 @@ _CREATE = {
     "moemail": _moemail_create,
     "yyds": _yyds_create,
     "gptmail": _gptmail_create,
+    "icloud": _icloud_create,
     "cfmail": _cfmail_create,
     "custom": _custom_create,
 }
@@ -687,6 +767,7 @@ _FETCH = {
     "moemail": _moemail_fetch,
     "yyds": _yyds_fetch,
     "gptmail": _gptmail_fetch,
+    "icloud": _icloud_fetch,
     "cfmail": _cfmail_fetch,
     "custom": _custom_fetch,
 }
@@ -757,7 +838,7 @@ def fetch_messages(mailbox_id, provider, email=None, token=None,
     for m in msgs:
         text = "\n".join(str(m.get(k) or "") for k in (
             "subject", "content", "text", "textBody", "html", "htmlBody",
-            "body", "from_address", "from", "sender", "verificationCode"))
+            "body", "from_address", "from", "sender", "verificationCode", "code"))
         ex = _extract_codes_and_links(text)
         # YYDS 服务端直接给 verificationCode 字段时优先采信
         vc = m.get("verificationCode")
@@ -842,6 +923,8 @@ def _provider_config(prov):
         return YYDS_BASE_URL, bool(YYDS_API_KEY or MOEMAIL_API_KEY), "YYDS_API_KEY"
     if prov == "gptmail":
         return GPTMAIL_BASE_URL, True, "GPTMAIL_API_KEY(或公共 gpt-test)"
+    if prov == "icloud":
+        return ICLOUD_MAIL_API_BASE, bool(ICLOUD_MAIL_API_KEY), "ICLOUD_MAIL_API_KEY"
     if prov == "cfmail":
         return CFMAIL_BASE_URL, bool(CFMAIL_ADMIN_PASSWORD), "CFMAIL_ADMIN_PASSWORD"
     if prov == "custom":
@@ -854,7 +937,7 @@ def _provider_config(prov):
 def doctor(providers=None):
     """连通性自测：逐个 provider 检查 域名目录可达 + 建号可用。
     不轮询收码（那要真发信）。返回 [(prov, ok, detail)]，并打印人类可读报告。"""
-    provs = _provider_list(providers) if providers else ["moemail", "yyds", "gptmail", "cfmail", "custom"]
+    provs = _provider_list(providers) if providers else ["moemail", "yyds", "gptmail", "cfmail", "icloud", "custom"]
     print("=" * 56)
     print(f"  临时邮箱连通性自测  providers={provs}")
     print("=" * 56)

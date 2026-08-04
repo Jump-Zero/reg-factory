@@ -23,6 +23,7 @@ import os
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bitbrowser import BitBrowser
+from bitbrowser import selected_browser_provider
 
 # 与 register.py 完全一致的反检测脚本
 STEALTH_JS = r"""
@@ -165,6 +166,21 @@ async def open_and_connect(name, p=None, browser_options=None):
     """创建并打开 BitBrowser 窗口，连接 Playwright 并注入 stealth。
     返回 (bb, profile_id, browser, context, page)。
     注意：调用方需自行管理 async_playwright 生命周期，或传入 p。"""
+    if selected_browser_provider() in {"ruyipage", "ruyi", "firefox_bidi"}:
+        from common.ruyipage_browser import RuyiPageBrowser
+
+        bb = RuyiPageBrowser()
+        pid = create_browser_with_retry(bb, name, **(browser_options or {}))
+        if not pid:
+            raise RuntimeError("create RuyiPage browser failed after retries")
+        browser, context, page = await bb.open_browser_async(pid)
+        try:
+            await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+        except Exception as e:
+            print(f"  set Accept-Language failed: {e}")
+        print("  RuyiPage Firefox connected (WebDriver BiDi)")
+        return bb, pid, browser, context, page
+
     bb = BitBrowser()
     pid = create_browser_with_retry(bb, name, **(browser_options or {}))
     if not pid:
@@ -203,6 +219,17 @@ async def open_and_connect(name, p=None, browser_options=None):
 
 async def teardown(bb, profile_id, delete=True):
     """关闭并（可选）删除窗口"""
+    if hasattr(bb, "close_browser_async"):
+        try:
+            await bb.close_browser_async(profile_id)
+        except Exception:
+            pass
+        if delete:
+            try:
+                bb.delete_browser(profile_id)
+            except Exception:
+                pass
+        return
     try:
         bb.close_browser(profile_id)
     except Exception:

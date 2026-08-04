@@ -155,5 +155,52 @@ class YydsMailTests(unittest.TestCase):
             )
 
 
+class ICloudMailTests(unittest.TestCase):
+    def test_create_uses_icloud_code_service_query(self):
+        sess = FakeSession([
+            FakeResponse(data={"code": 0, "message": "success", "data": {
+                "type": "icloud-code", "email": "icloud@example.com"
+            }}),
+        ])
+        with patch.object(temp_email, "ICLOUD_MAIL_TYPE", "icloud-code"), patch.object(
+            temp_email, "ICLOUD_MAIL_SERVICE", "openai"
+        ):
+            mailbox = temp_email._icloud_create(
+                None, None, None, "test-key", "https://mail.no-replyca.xyz", sess
+            )
+
+        self.assertEqual(mailbox["email"], "icloud@example.com")
+        self.assertEqual(sess.calls[0][1], "https://mail.no-replyca.xyz/api/user/email")
+        self.assertEqual(
+            sess.calls[0][2]["params"],
+            {"type": "icloud-code", "service": "openai", "apikey": "test-key"},
+        )
+
+    def test_fetch_maps_provider_code_and_empty_success(self):
+        sess = FakeSession([
+            FakeResponse(data={"code": 0, "message": "success"}),
+            FakeResponse(data={"code": 0, "message": "success", "data": {
+                "from": "no-reply@openai.com", "subject": "Your code", "code": "123456"
+            }}),
+        ])
+
+        self.assertEqual(
+            temp_email._icloud_fetch(
+                "icloud@example.com", "icloud@example.com", "", "test-key",
+                "https://mail.no-replyca.xyz", sess
+            ),
+            [],
+        )
+        with patch.object(temp_email, "_session", return_value=sess):
+            messages = temp_email.fetch_messages(
+                "icloud@example.com", "icloud", email="icloud@example.com", api_key="test-key",
+                base_url="https://mail.no-replyca.xyz"
+            )
+
+        self.assertEqual(messages[0]["extracted"]["codes"], ["123456"])
+        self.assertEqual(sess.calls[1][2]["params"]["email"], "icloud@example.com")
+
+
+
 if __name__ == "__main__":
     unittest.main()

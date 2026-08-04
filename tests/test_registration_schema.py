@@ -66,6 +66,28 @@ class RegistrationSchemaTests(unittest.TestCase):
         oauth_args = {item["flag"]: item for item in _script("oauth_codex")["args"]}
         self.assertEqual(oauth_args["--node"]["default"], "auto")
 
+    def test_chatgpt_promotes_direct_sub2api_import(self):
+        script = _script("register_chatgpt")
+        primary_flags = [item["flag"] for item in script["args"][:6]]
+        args = {item["flag"]: item for item in script["args"]}
+
+        self.assertIn("--email-provider", primary_flags)
+        self.assertIn("--codex", primary_flags)
+        self.assertIn("SUB2API", args["--codex"]["help"])
+        self.assertIn("--codex-group", args)
+
+    def test_ruyipage_is_the_default_browser(self):
+        browser_group = next(
+            group for group in ENV_SCHEMA if group["group"] == "指纹浏览器"
+        )
+        items = {item["key"]: item for item in browser_group["items"]}
+
+        self.assertEqual(items["FINGERPRINT_BROWSER"]["default"], "ruyipage")
+        self.assertEqual(
+            items["FINGERPRINT_BROWSER"]["choices"][0], "ruyipage"
+        )
+        self.assertIn("RUYIPAGE_BROWSER_PATH", items)
+
     def test_claude_defaults_to_latest_rt(self):
         args = {item["flag"]: item for item in _script("register_claude")["args"]}
         self.assertTrue(args["--latest-rt"]["default"])

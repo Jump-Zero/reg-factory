@@ -27,6 +27,10 @@ class AssetExhausted(AssetError):
     status_code = 404
 
 
+class AssetUnverified(AssetError):
+    status_code = 409
+
+
 _CURSOR_LOCK = threading.Lock()
 _PLATFORMS = {
     "claude": {
@@ -145,17 +149,71 @@ def _mailboxes() -> list[dict]:
     return records
 
 
-def get_email(index: int | None = None, output_format: str = "json") -> dict:
+def _verification_for(platform: str, email: str, source: str) -> dict | None:
+    """Return a recent normal scan record that identifies this local asset.
+
+    This import stays lazy because asset_scanner imports this module to read the
+    local pools.  Matching by email handles merged token/cookie records; the
+    source fallback keeps records without an embedded email usable.
+    """
+    from common import asset_scanner
+
+    normalized_email = str(email or "").strip().lower()
+    normalized_source = str(source or "").strip()
+    for item in asset_scanner.get_report().get("items", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("platform") != platform or item.get("status") != "normal":
+            continue
+        item_email = str(item.get("email") or "").strip().lower()
+        if normalized_email and item_email == normalized_email:
+            return {
+                "status": "normal",
+                "checked_at": str(item.get("checked_at") or ""),
+                "evidence": str(item.get("evidence") or ""),
+            }
+        sources = {part.strip() for part in str(item.get("source") or "").split(",")}
+        if normalized_source and normalized_source in sources:
+            return {
+                "status": "normal",
+                "checked_at": str(item.get("checked_at") or ""),
+                "evidence": str(item.get("evidence") or ""),
+            }
+    return None
+
+
+def _verified_records(platform: str, records: list[dict], source_for) -> list[dict]:
+    verified = []
+    for record in records:
+        verification = _verification_for(platform, record.get("email", ""), source_for(record))
+        if verification:
+            verified.append({**record, "_verification": verification})
+    if not verified:
+        raise AssetUnverified("没有通过本次在线检测的正常资产，已拦截封禁、失效和凭据异常记录")
+    return verified
+
+
+def get_email(
+    index: int | None = None,
+    output_format: str = "json",
+    verified_only: bool = False,
+) -> dict:
     output_format = str(output_format or "json").strip().lower()
     if output_format not in {"json", "line"}:
         raise AssetError("邮箱 format 仅支持 json、line")
-    records = _mailboxes()
-    selected, next_index, advanced = _select_index(len(records), "email", index)
+    records = [
+        {**record, "_asset_source": f"emails.txt:{line_number}"}
+        for line_number, record in enumerate(_mailboxes(), start=1)
+    ]
+    if verified_only:
+        records = _verified_records("outlook", records, lambda record: record["_asset_source"])
+    cursor_key = "verified:email" if verified_only else "email"
+    selected, next_index, advanced = _select_index(len(records), cursor_key, index)
     record = records[selected]
     data = record["line"] if output_format == "line" else {
-        key: value for key, value in record.items() if key != "line"
+        key: value for key, value in record.items() if key != "line" and not key.startswith("_")
     }
-    return {
+    result = {
         "kind": "email",
         "format": output_format,
         "index": selected,
@@ -164,6 +222,9 @@ def get_email(index: int | None = None, output_format: str = "json") -> dict:
         "cursor_advanced": advanced,
         "data": data,
     }
+    if verified_only:
+        result["verification"] = record["_verification"]
+    return result
 
 
 def _domain_allowed(domain: str, allowed: set[str]) -> bool:
@@ -294,7 +355,12 @@ def _email_from_session(session: dict, fallback: str = "") -> str:
     return str(user.get("email") or session.get("email") or fallback).strip()
 
 
-def get_platform_asset(platform: str, output_format: str = "raw", index: int | None = None) -> dict:
+def get_platform_asset(
+    platform: str,
+    output_format: str = "raw",
+    index: int | None = None,
+    verified_only: bool = False,
+) -> dict:
     platform = str(platform or "").strip().lower()
     output_format = str(output_format or "raw").strip().lower()
     if platform not in _PLATFORMS:
@@ -303,7 +369,10 @@ def get_platform_asset(platform: str, output_format: str = "raw", index: int | N
     token_formats = {"session", "sub2api", "cpa", "chatgpt2api"}
     if output_format in {"raw", "cookies", "header"}:
         records = _cookie_records(platform)
-        cursor_key = f"cookie:{platform}:{output_format}"
+        if verified_only:
+            records = _verified_records(platform, records, lambda record: record["path"].name)
+        cursor_prefix = "verified:cookie" if verified_only else "cookie"
+        cursor_key = f"{cursor_prefix}:{platform}:{output_format}"
         selected, next_index, advanced = _select_index(len(records), cursor_key, index)
         record = records[selected]
         if output_format == "raw":
@@ -321,7 +390,14 @@ def get_platform_asset(platform: str, output_format: str = "raw", index: int | N
         if platform == "grok" and output_format not in {"session", "sub2api"}:
             raise AssetError("Grok 仅支持 cookies、raw、header、session、sub2api 格式")
         records = _token_records(platform)
-        cursor_key = f"cookie:{platform}:{output_format}"
+        if verified_only:
+            records = _verified_records(
+                platform,
+                records,
+                lambda record: record["path"].name,
+            )
+        cursor_prefix = "verified:cookie" if verified_only else "cookie"
+        cursor_key = f"{cursor_prefix}:{platform}:{output_format}"
         selected, next_index, advanced = _select_index(len(records), cursor_key, index)
         record = records[selected]
         session = record["data"]
@@ -348,7 +424,7 @@ def get_platform_asset(platform: str, output_format: str = "raw", index: int | N
     else:
         raise AssetError("format 仅支持 raw、cookies、header、session、sub2api、cpa、chatgpt2api")
 
-    return {
+    result = {
         "kind": "platform_cookie",
         "platform": platform,
         "format": output_format,
@@ -361,6 +437,9 @@ def get_platform_asset(platform: str, output_format: str = "raw", index: int | N
         "data": data,
         **extra,
     }
+    if verified_only:
+        result["verification"] = record["_verification"]
+    return result
 
 
 def summary() -> dict:

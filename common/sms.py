@@ -39,22 +39,33 @@ from config import (
 
 
 def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=(), max_retries=5, max_price="0",
-              smsman_app=None, smsman_country="0", smsman_maxprice="", smsman_blacklist=()):
+              smsman_app=None, smsman_country="0", smsman_maxprice="", smsman_blacklist=(), provider="auto"):
     """返回 (phone, country_code, pkey)。sms-man.com 优先(若配 token+app)，再 firefox.fun，最后 hero-sms。
     hero-sms 与 sms-man 的 phone 已含国家码、country_code 返回 ''。
     max_price: firefox.fun 价格上限，'0' 只取最便宜(常是垃圾号段)，给够才摸得到好国家。
     smsman_app: sms-man 的 application_id(数字)或 code/名(自动解析)；None=不启用 sms-man。
     smsman_country: sms-man country_id，'0'=自动按价格升序逐国试；smsman_maxprice: 价格上限(USD)，''=不限。
-    smsman_blacklist: sms-man country_id 黑名单(自动逐国时跳过)。"""
+    smsman_blacklist: sms-man country_id 黑名单(自动逐国时跳过)。
+    provider: auto / smsman / firefox / hero；非 auto 时只使用指定平台。"""
+    provider = str(provider or "auto").strip().lower().replace("-", "")
+    aliases = {"smsman": "smsman", "firefoxfun": "firefox", "hero": "hero", "herosms": "hero", "auto": "auto"}
+    provider = aliases.get(provider, provider)
+    if provider not in {"auto", "smsman", "firefox", "hero"}:
+        raise ValueError(f"unknown SMS provider: {provider}")
+
     # —— sms-man.com 优先(Codex add-phone 主用)。配了 token + app 才尝试，否则跳过 ——
-    if SMSMAN_TOKEN and smsman_app not in (None, ""):
+    if provider in {"auto", "smsman"} and SMSMAN_TOKEN and smsman_app not in (None, ""):
         res = _smsman_get_phone(smsman_app, smsman_country, smsman_maxprice, smsman_blacklist)
         if res:
             full_phone, pkey = res
             return full_phone, "", pkey
+        if provider == "smsman":
+            raise RuntimeError("get phone failed: sms-man 无号/未配置")
         print("  [sms-man] 无号/未解析到 application，转 firefox.fun...")
+    elif provider == "smsman":
+        raise RuntimeError("get phone failed: sms-man 未配置")
 
-    if SMS_TOKEN and project_id:
+    if provider in {"auto", "firefox"} and SMS_TOKEN and project_id:
         for country in country_prefer:
             attempts = max_retries if country == "" else 1
             for attempt in range(attempts):
@@ -86,11 +97,16 @@ def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=
                     continue
                 break
 
-    print("  [sms] firefox.fun 无号/未配，转 hero-sms...")
-    res = _hero_get_phone(hero_service)
-    if res:
-        full_phone, pkey = res
-        return full_phone, "", pkey
+    if provider == "firefox":
+        raise RuntimeError("get phone failed: firefox.fun 无号/未配置")
+
+    if provider == "auto":
+        print("  [sms] firefox.fun 无号/未配，转 hero-sms...")
+    if provider in {"auto", "hero"}:
+        res = _hero_get_phone(hero_service)
+        if res:
+            full_phone, pkey = res
+            return full_phone, "", pkey
     raise RuntimeError("get phone failed: 所有平台都没号")
 
 

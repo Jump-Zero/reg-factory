@@ -6,13 +6,14 @@
 
 支持以下浏览器类型；外部客户端模式需要保持客户端运行：
 
+- [RuyiPage](https://github.com/LoseNine/ruyipage)：`FINGERPRINT_BROWSER=ruyipage`，默认用于 ChatGPT、Codex OAuth、GitHub 等共享浏览器流程。先运行 WebUI 的“安装 RuyiPage Firefox”任务，或执行 `python -m ruyipage install`。可用 `RUYIPAGE_BROWSER_PATH` 指定已有 Firefox。
 - 内置 Chromium：`FINGERPRINT_BROWSER=bundled`，安装程序会配置浏览器路径。
 - 普通 Chrome/Chromium：`FINGERPRINT_BROWSER=custom`，通过 `CUSTOM_BROWSER_PATH` 指定可执行文件；留空时会尝试查找系统 Chrome。
 - [BitBrowser 官方下载页](https://www.bitbrowser.cn/download)：默认 API 为 `http://127.0.0.1:54345`。
 - AdsPower：默认 API 为 `http://127.0.0.1:50325`，启用鉴权时还需 API Key。
 - 其他指纹浏览器：`FINGERPRINT_BROWSER=custom_api` 并设置 `CUSTOM_BROWSER_API`；当前要求兼容 BitBrowser 的 `/browser/update|open|close|delete|list` 协议。
 
-在 `.env` 中用 `FINGERPRINT_BROWSER=bundled|custom|bitbrowser|adspower|custom_api` 切换。
+在 `.env` 中用 `FINGERPRINT_BROWSER=ruyipage|bundled|custom|bitbrowser|adspower|custom_api` 切换。Claude、Grok 和 Outlook 的旧流程仍直接依赖 Playwright Chromium CDP；选择 RuyiPage 时这些流程自动使用 bundled Chromium，ChatGPT 与 Codex OAuth 使用 RuyiPage Firefox。
 
 ### 网络出口
 
@@ -39,7 +40,14 @@ Claude 的登录、验证码和 magic-link 验证必须保持同一个出口 IP�
 
 编排器会为每个平台创建独立子进程环境；住宅代理认证直接写入该平台新建的浏览器 profile。网络页的“轮换/测试目标”可逐个平台验证出口 IP。
 
-Clash 模式先安装 [Clash Verge 2.5.2 Windows x64](https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.2/Clash.Verge_2.5.2_x64-setup.exe)，再开启 External Controller，记录控制器地址、secret 和 mixed port。默认值：
+Clash 模式先安装 [Clash Verge 2.5.2 Windows x64](https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.2/Clash.Verge_2.5.2_x64-setup.exe)。在 Clash Verge 的“设置”中进入 Clash 设置或内核设置，找到“外部控制器”或 External Controller，按下面顺序配置：
+
+1. 启用 External Controller，并填仅本机监听地址，例如 `127.0.0.1:9097`。面板的控制器地址填写为 `http://127.0.0.1:9097`。mihomo 常见默认端口是 `9090`。
+2. 在同一页设置 Secret、Controller Secret 或 API Secret。将完全相同的值写入 `CLASH_SECRET`。未设置密码时，`CLASH_SECRET` 也必须留空。
+3. 找到 mixed-port 或混合端口，例如 `7897`，写入 `CLASH_PROXY=http://127.0.0.1:7897`。
+4. 保存后应用设置或重载内核，再在网络页点击“应用并测试 IP”。外部控制器只应监听 `127.0.0.1`，不要公开到网络。
+
+默认值：
 
 ```env
 CLASH_API=http://127.0.0.1:9097
@@ -105,13 +113,16 @@ cp .env.example .env
 | 网络出口 | `PROXY_MODE`、`CLASH_*`、`REG_FACTORY_PROXY*` | Clash 节点或住宅代理 |
 | Claude 验证 | `CLAUDE_VISION_*`、`CLAUDE_HCAPTCHA_*` | Claude 图形验证 |
 | 通用视觉 | `VISION_*`、`VOTE_*`、`IMAGE_EDIT_*` | 多模型视觉投票 |
-| 临时邮箱 | `YYDS_API_KEY` 等 provider 配置 | 不使用 Outlook 池时 |
-| 接码 | `SMSMAN_*`、`SMS_TOKEN`、`HERO_SMS_*` | 手机验证 |
+| ChatGPT iCloud 邮箱 | `CHATGPT_EMAIL_PROVIDER`、`ICLOUD_MAIL_*` | ChatGPT 不使用 Outlook 池时 |
+| 临时邮箱 | `YYDS_API_KEY` 等 provider 配置 | Claude/Grok 不使用 Outlook 池时 |
+| 接码 | `SMSMAN_*`、`SMS_API_NAME`、`SMS_TOKEN`、`HERO_SMS_*` | 手机验证；firefox.fun 使用 APIName 标识账号，token + 项目 ID 调用接口 |
 | SUB2API | `SUB2API_*` | Codex / Grok 下游导入 |
 | CPA | `CPA_URL`、`CPA_MGMT_KEY` | Codex 凭据导入 |
 | chatgpt2api | `CHATGPT2API_URL`、`CHATGPT2API_KEY` | 普通 ChatGPT 网页号导入 |
 
 密钥必须留在 `.env` 或进程环境变量中。不要把真实值写进 `.env.example`、README、测试和截图。
+
+ChatGPT 使用 iCloud 邮箱时，将 `CHATGPT_EMAIL_PROVIDER=icloud`，并填写 `ICLOUD_MAIL_API_KEY`。默认接口地址为 `https://mail.no-replyca.xyz`；`email.manageh.shop` 仅是接口文档站。`ICLOUD_MAIL_TYPE=icloud-code`、`ICLOUD_MAIL_SERVICE=openai` 用于申请 ChatGPT 接码邮箱；程序随后轮询 `/api/user/mail` 获取验证码。
 
 ## 连通性检查
 

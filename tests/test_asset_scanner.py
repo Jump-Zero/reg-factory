@@ -48,15 +48,21 @@ class AssetScannerTests(unittest.TestCase):
             json.dumps({"email": "grok@example.com", "sso": "grok-secret"}),
             encoding="utf-8",
         )
+        kiro = self.root / "tokens" / "kiro"
+        kiro.mkdir(parents=True)
+        (kiro / "kiro@example.com.account.json").write_text(
+            json.dumps({"email": "kiro@example.com", "refreshToken": "kiro-secret"}),
+            encoding="utf-8",
+        )
 
     def test_inventory_contains_each_pool_without_secrets(self):
         self._write_assets()
         report = asset_scanner.get_report()
 
-        self.assertEqual(report["summary"]["total"], 4)
+        self.assertEqual(report["summary"]["total"], 5)
         self.assertEqual({item["platform"] for item in report["items"]}, set(asset_scanner.PLATFORMS))
         encoded = json.dumps(report)
-        for secret in ("mail-pass", "mail-rt", "chat-secret", "claude-secret", "grok-secret"):
+        for secret in ("mail-pass", "mail-rt", "chat-secret", "claude-secret", "grok-secret", "kiro-secret"):
             self.assertNotIn(secret, encoded)
 
     def test_scan_persists_results_and_progress_without_secrets(self):
@@ -66,6 +72,7 @@ class AssetScannerTests(unittest.TestCase):
             "chatgpt": {"status": "banned", "detail": "chat banned", "evidence": "test"},
             "claude": {"status": "expired", "detail": "claude expired", "evidence": "test"},
             "grok": {"status": "restricted", "detail": "grok limited", "evidence": "test"},
+            "kiro": {"status": "normal", "detail": "kiro ok", "evidence": "test"},
         }
         progress = []
         patches = [
@@ -81,9 +88,9 @@ class AssetScannerTests(unittest.TestCase):
             }, clear=True):
                 report = asset_scanner.scan_pool(concurrency=2, progress=progress.append)
 
-        self.assertEqual(report["summary"]["statuses"]["normal"], 1)
+        self.assertEqual(report["summary"]["statuses"]["normal"], 2)
         self.assertEqual(report["summary"]["statuses"]["banned"], 1)
-        self.assertEqual(progress[-1]["completed"], 4)
+        self.assertEqual(progress[-1]["completed"], 5)
         cache_text = (self.root / "runtime" / "state" / "asset_pool_scan.json").read_text(encoding="utf-8")
         self.assertNotIn("chat-secret", cache_text)
         self.assertEqual(asset_scanner.get_report()["summary"]["statuses"]["restricted"], 1)

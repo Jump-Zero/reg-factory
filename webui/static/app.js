@@ -14,6 +14,12 @@ let assetScanPage = 1;
 let assetScanTimer = null;
 let currentWebVersion = '';
 let updateRequested = false;
+let guideActive = false;
+let guideIndex = 0;
+let guideTarget = null;
+let guidePositionFrame = null;
+let scriptsReady = null;
+let guideOriginalProxyMode = null;
 
 const $ = (s, r=document) => r.querySelector(s);
 const $$ = (s, r=document) => [...r.querySelectorAll(s)];
@@ -94,7 +100,7 @@ async function pollStatus(){
   try{
     const s = await (await fetch('/api/status')).json();
     $('#dot-bb').classList.toggle('on', s.bitbrowser);
-    const browserLabels = {adspower:'AdsPower', bundled:'内置浏览器', custom:'自定义 Chrome', custom_api:'自定义指纹浏览器'};
+    const browserLabels = {ruyipage:'RuyiPage Firefox', adspower:'AdsPower', bundled:'内置浏览器', custom:'自定义 Chrome', custom_api:'自定义指纹浏览器'};
     const label = browserLabels[s.browser_provider] || 'BitBrowser';
     $('#browser-label').textContent = label;
     const networkOnline = s.network ?? s.clash;
@@ -150,7 +156,7 @@ async function startUpdate(){
 $('#btn-update').onclick = startUpdate;
 
 // ---------------------------------------------------------------- 视图切换
-function showView(v){
+async function showView(v){
   setNavOpen(false);
   document.body.classList.toggle('k12-active', v==='k12');
   $('#view-run').style.display  = v==='run' ? '' : 'none';
@@ -162,11 +168,12 @@ function showView(v){
   $('#view-k12').style.display = v==='k12' ? 'block' : 'none';
   $$('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.view===v));
   if(v!=='run' && v!=='embed') $$('.scriptbtn').forEach(b=>b.classList.remove('active'));
-  if(v==='env') loadEnv();
-  if(v==='assets') loadAssetPanel();
-  if(v==='network') loadProxyPanel();
-  if(v==='mailpool') loadMailpool();
-  if(v==='k12') openK12Channel();
+  if(v==='env') return loadEnv();
+  if(v==='assets') return loadAssetPanel();
+  if(v==='network') return loadProxyPanel();
+  if(v==='mailpool') return loadMailpool();
+  if(v==='k12') return openK12Channel();
+  return Promise.resolve();
 }
 $$('.navbtn').forEach(b=> b.onclick = ()=> showView(b.dataset.view));
 
@@ -637,7 +644,7 @@ async function loadAssetScan(){
 
 async function startAssetScan(all=false){
   const platform = $('#asset-scan-platform').value;
-  const platforms = all || platform === 'all' ? ['outlook','chatgpt','claude','grok'] : [platform];
+  const platforms = all || platform === 'all' ? ['outlook','chatgpt','claude','grok','kiro'] : [platform];
   setAssetMessage('#asset-scan-msg', '正在启动扫描…');
   try{
     const response = await fetch('/api/assets/scan', {method:'POST', headers:assetHeaders(true), body:JSON.stringify({
@@ -646,7 +653,7 @@ async function startAssetScan(all=false){
       timeout:15,
     })});
     await readAssetResponse(response);
-    setAssetMessage('#asset-scan-msg', `已开始扫描 ${platforms.length === 4 ? '全部号池' : ASSET_SCAN_PLATFORM_LABELS[platforms[0]]}`, true);
+    setAssetMessage('#asset-scan-msg', `已开始扫描 ${all || platform === 'all' ? '全部号池' : ASSET_SCAN_PLATFORM_LABELS[platforms[0]]}`, true);
     await loadAssetScan();
   }catch(error){
     setAssetMessage('#asset-scan-msg', error.message || String(error), false);
@@ -719,14 +726,14 @@ async function saveAssetKey(){
 async function callAssetApi(){
   const button = $('#btn-call-asset');
   button.disabled = true;
-  setAssetMessage('#asset-call-msg', '调用中…');
+  setAssetMessage('#asset-call-msg', '正在在线校验并读取资产…');
   try{
     const request = buildAssetRequest();
     const response = await fetch(request.relative, {headers:assetHeaders()});
     const data = await readAssetResponse(response);
     $('#asset-response').textContent = JSON.stringify(data, null, 2);
     const progress = data.total === undefined ? '' : `，index ${data.index}/${Math.max(0, data.total-1)}`;
-    setAssetMessage('#asset-call-msg', `调用成功${progress}`, true);
+    setAssetMessage('#asset-call-msg', `在线校验通过并调用成功${progress}`, true);
     await refreshAssetSummary(true);
   }catch(error){
     $('#asset-response').textContent = JSON.stringify({error:error.message || String(error)}, null, 2);
@@ -740,7 +747,7 @@ async function resetAssetCursor(){
   const request = buildAssetRequest();
   const scope = $('#asset-reset-scope').value === 'all'
     ? 'all'
-    : (request.resource === 'emails' ? 'email' : `cookie:${request.resource}:${request.format}`);
+    : (request.resource === 'emails' ? 'verified:email' : `verified:cookie:${request.resource}:${request.format}`);
   try{
     const response = await fetch('/api/assets/cursors/reset', {method:'POST', headers:assetHeaders(true), body:JSON.stringify({scope})});
     const data = await readAssetResponse(response);
@@ -1015,6 +1022,7 @@ function selectScript(id){
 function renderArgField(a){
   const f = document.createElement('div');
   f.className='field';
+  f.dataset.argFlag = a.flag;
   const label = a.flag.replace(/^--/,'');
   if(a.type==='bool'){
     f.className='field checkbox';
@@ -1061,6 +1069,7 @@ function renderForm(s){
   p.appendChild(grid);
   if(advancedArgs.length){
     const more = document.createElement('details'); more.className='advanced-fields';
+    more.dataset.guide = 'advanced-task-options';
     more.innerHTML = `<summary><span>更多设置</span><span>${advancedArgs.length} 项</span></summary>`;
     const moreGrid = document.createElement('div'); moreGrid.className='form-grid';
     advancedArgs.forEach(a=>moreGrid.appendChild(renderArgField(a)));
@@ -1190,6 +1199,11 @@ async function loadEnv(){
   const wrap = $('#env-groups'); wrap.innerHTML='';
   data.groups.forEach(g=>{
     const box = document.createElement('div'); box.className='env-group';
+    const itemKeys = new Set((g.items||[]).map(item=>item.key));
+    if(itemKeys.has('FINGERPRINT_BROWSER')) box.dataset.guideGroup = 'browser';
+    else if(itemKeys.has('CHATGPT_EMAIL_PROVIDER')) box.dataset.guideGroup = 'chatgpt-email';
+    else if(itemKeys.has('TEMP_EMAIL_PROVIDER')) box.dataset.guideGroup = 'temp-email';
+    else if(itemKeys.has('SMSMAN_TOKEN')) box.dataset.guideGroup = 'sms';
     const tests = (g.tests||[]).map(t=>
       `<button class="btn-test" data-test="${t.target}">${t.label}</button>`).join('');
     box.innerHTML = `<div class="env-group-title">
@@ -1348,6 +1362,376 @@ async function releaseNum(pkey){
   await refreshRents();
 }
 
+// ---------------------------------------------------------------- 新手指南
+const GUIDE_STORAGE_KEY = 'reg-factory-guide-v1';
+const GUIDE_STEPS = [
+  {
+    id:'welcome', section:'开始', title:'先认识工作台', target:'.brand', placement:'bottom',
+    body:`<p>这套指南会带你完成一次运行前检查。教程只会切换页面和展开表单，不会自动保存配置，也不会启动注册任务。</p>
+      <p>任何阶段都可以跳过。以后可从顶栏的“新手指南”重新打开。</p>`,
+  },
+  {
+    id:'library', section:'界面', title:'任务和工具都在左侧', target:'[data-guide="task-library"]', placement:'right',
+    prepare:async()=>{ if(innerWidth<=900) setNavOpen(true); },
+    body:`<p>上半部分是可运行任务，下半部分是邮箱池、网络出口、环境配置和资产管理。</p>
+      <p>首次使用先完成网络、浏览器和接码配置，再选择任务。</p>`,
+  },
+  {
+    id:'network', section:'网络', title:'先打开网络出口', target:'[data-guide="network-entry"]', placement:'right',
+    prepare:async()=>{ await showView('network'); if(innerWidth<=900) setNavOpen(true); },
+    skipLabel:'跳过网络配置', skipTo:'env-overview',
+    body:`<p>网络出口决定注册页面看到的公网 IP。新手建议先用 Clash 自动轮换，稳定住宅代理也可以单独配置。</p>
+      <p>不同平台可使用不同出口，避免一个平台的设置影响全部任务。</p>`,
+  },
+  {
+    id:'clash', section:'网络', title:'Clash API 配置方法', target:'[data-guide="clash-config"]', placement:'left',
+    prepare:async()=>{ setNavOpen(false); await ensureGuideView('network'); previewGuideClashFields(); },
+    skipLabel:'跳过网络配置', skipTo:'env-overview',
+    body:`<ol class="tour-list">
+        <li>打开 Clash Verge，进入“设置”中的 Clash 设置或内核设置，找到“外部控制器”或 External Controller。</li>
+        <li>启用外部控制器，并填写监听地址 <code>127.0.0.1:9097</code>。面板中的控制器地址填写 <code>http://127.0.0.1:9097</code>。mihomo 常见端口是 <code>9090</code>。</li>
+        <li>在同一页填写控制密码。不同版本名称可能是 Secret、Controller Secret 或 API Secret。将完全相同的内容填入面板的“控制器密钥”。</li>
+        <li>保存 Clash 设置后应用或重载内核。若 Clash 未设置控制密码，面板中的控制器密钥也必须留空。</li>
+        <li>找到 mixed-port 或混合端口，通常为 <code>7897</code>。面板中的混合代理地址填写 <code>http://127.0.0.1:7897</code>。</li>
+        <li>全局模式的代理组通常填 <code>GLOBAL</code>，规则模式填写实际节点选择组名。</li>
+      </ol>
+      <p class="tour-note">外部控制器应只监听 <code>127.0.0.1</code>，不要配置为公网地址。教程临时切换到自动轮换用于展示，当前配置尚未保存。</p>`,
+  },
+  {
+    id:'residential', section:'网络', title:'住宅代理填写方法', target:'#network-residential-fields', placement:'left',
+    prepare:async()=>{ setNavOpen(false); await ensureGuideView('network'); previewGuideProxyMode('residential'); },
+    skipLabel:'跳过网络配置', skipTo:'env-overview',
+    body:`<p>选择“动态住宅 IP”后，单个代理填写完整地址，例如 <code>http://user:pass@host:port</code> 或 <code>socks5://user:pass@host:port</code>。</p>
+      <p>有多个出口时使用代理池，每行一个。程序会在创建新的浏览器 profile 时从池中选择代理。</p>
+      <p>供应商提供换 IP 接口时填写接口地址和请求方法。轮换后新的浏览器窗口才会使用新 IP。</p>
+      <p class="tour-note">教程临时切换到住宅代理表单用于展示，当前配置尚未保存。</p>`,
+  },
+  {
+    id:'platform-proxy', section:'网络', title:'平台出口覆盖和继承全局', target:'[data-guide="platform-proxy-overrides"]', placement:'top',
+    prepare:async()=>{ setNavOpen(false); await ensureGuideView('network'); },
+    skipLabel:'跳过网络配置', skipTo:'env-overview',
+    body:`<p>每个平台默认选择“继承全局”，表示直接使用页面顶部选择的全局网络模式和配置。</p>
+      <p>只有某个平台需要单独出口时才改为 Clash 自动、Clash 固定或动态住宅 IP。例如 Outlook 用 Clash，ChatGPT 用住宅代理。</p>
+      <p>下方“轮换或测试目标”选择具体平台后，轮换和 IP 测试只作用于该平台。没有特殊需求时全部保持继承全局。</p>`,
+  },
+  {
+    id:'network-test', section:'网络', title:'保存后先测试出口', target:'[data-guide="network-actions"]', placement:'top',
+    prepare:async()=>{ setNavOpen(false); await ensureGuideView('network'); },
+    skipLabel:'跳过网络配置', skipTo:'env-overview',
+    body:`<p>填写完成后先点“应用并测试 IP”。成功时会显示出口 IP 和当前节点。</p>
+      <p>测试失败时不要直接跑任务，先检查 Clash 是否启动、端口是否正确、Secret 是否一致，以及代理组是否能切换节点。</p>`,
+  },
+  {
+    id:'env-overview', section:'环境配置', title:'环境配置按功能分组', target:'#view-env .env-head', placement:'bottom',
+    prepare:async()=>{ setNavOpen(false); restoreGuideProxyMode(); await showView('env'); },
+    skipLabel:'跳过环境配置', skipTo:'chatgpt-email',
+    body:`<p>环境配置会保存到本机 <code>.env</code>，新任务立即读取，无需重启服务。</p>
+      <ul class="tour-list">
+        <li>指纹浏览器决定 Chrome、内置浏览器或 BitBrowser 的启动方式。</li>
+        <li>邮箱和临时邮箱组用于收取网页验证码。</li>
+        <li>短信接码和打码平台只在需要手机号或验证码挑战时配置。</li>
+        <li>SUB2API、CPA、chatgpt2api 等组只在注册后自动导入时配置。</li>
+      </ul>
+      <p>只填写本次任务会用到的组。所有填写完成后点击这里的“保存配置”。</p>`,
+  },
+  {
+    id:'browser', section:'浏览器', title:'选择浏览器方式', target:'[data-guide-group="browser"]', placement:'left',
+    prepare:async()=>ensureGuideView('env'),
+    skipLabel:'跳过浏览器配置', skipTo:'env-test',
+    body:`<p><strong>ruyipage</strong> 是默认值，使用 Firefox WebDriver BiDi 指纹内核。首次使用先在任务库运行“安装 RuyiPage Firefox”，再点本组连通测试。</p>
+      <p><strong>bundled</strong> 使用程序自带或系统可用的 Chromium；Claude、Grok 和 Outlook 等仍依赖 Chromium CDP 的旧流程会自动回退到它。</p>
+      <p><strong>custom</strong> 使用普通 Chrome，填写 <code>CUSTOM_BROWSER_PATH</code>。Windows 常见路径是 <code>C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe</code>。</p>
+      <p><strong>bitbrowser</strong> 需要先启动比特浏览器，并确认本地 API 通常为 <code>http://127.0.0.1:54345</code>。填写后使用本组的连通测试。</p>`,
+  },
+  {
+    id:'env-test', section:'环境配置', title:'每组都可以一键测试', target:()=>$('[data-guide-group="browser"] .btn-test'), placement:'left',
+    prepare:async()=>ensureGuideView('env'),
+    skipLabel:'跳过环境配置', skipTo:'asset-scan',
+    body:`<p>组标题右侧的测试按钮会使用当前表单中的值发起连通检查，即使还没有保存也可以先测试。</p>
+      <p>浏览器组用于测试本地浏览器 API，临时邮箱和短信组用于测试接码服务。测试通过后再点击页面顶部“保存配置”。</p>
+      <p>连通测试只确认本机配置和服务接口可用，不代表目标网站一定允许注册，注册前仍应测试网络出口。</p>`,
+  },
+  {
+    id:'asset-scan', section:'资产 API', title:'先看号池状态', target:'[data-guide="asset-scan"]', placement:'bottom',
+    prepare:async()=>{ setNavOpen(false); await showView('assets'); },
+    skipLabel:'跳过资产 API', skipTo:'chatgpt-email',
+    body:`<p>资产 API 用于向本地程序或下游服务读取邮箱、Cookie 和登录凭据。先在号池状态区选择类型，再运行“扫描当前类型”或“一键扫描全部”。</p>
+      <p>扫描会将资产分为正常、待解锁、封禁、过期、受限、凭据异常和检测异常。网络错误或目标站风控会显示为受限或检测异常，不会误判为封禁。</p>
+      <p>API 不会输出未验证、封禁、过期、受限或凭据异常资产。</p>`,
+  },
+  {
+    id:'asset-call', section:'资产 API', title:'每次输出前都会在线校验', target:'[data-guide="asset-call"]', placement:'top',
+    prepare:async()=>ensureGuideView('assets'),
+    skipLabel:'跳过资产 API', skipTo:'chatgpt-email',
+    body:`<p>选择资产、输出格式和取用方式后，点击“在线校验并调用 API”。顺序取用只会在健康资产池中推进，指定 index 也以健康资产池为准。</p>
+      <p>接口会先扫描对应平台，再只返回状态为“正常”的记录。响应中的 verification 字段包含本次检测时间和依据。</p>
+      <p>这代表账号在本次检测时可用，不代表后续不会被目标服务限制。读取地址和 API key 仅应提供给受信任的本地服务。</p>`,
+  },
+  {
+    id:'chatgpt-email', section:'邮箱接码', title:'ChatGPT 邮箱接码', target:'[data-guide-group="chatgpt-email"]', placement:'left',
+    prepare:async()=>ensureGuideView('env'),
+    skipLabel:'跳过邮箱接码', skipTo:'sms',
+    body:`<p>使用 Outlook 邮箱池时选择 <code>pool</code>，并先在左侧“邮箱池”导入邮箱、密码、refresh token 和 client id。</p>
+      <p>使用 iCloud API 时选择 <code>icloud</code>，填写 API 地址和 API key。推荐类型为 <code>icloud-code</code>，服务名为 <code>openai</code>。</p>
+      <p>API key 只保存在本机 <code>.env</code>。</p>`,
+  },
+  {
+    id:'temp-email', section:'邮箱接码', title:'Claude 和 Grok 临时邮箱', target:'[data-guide-group="temp-email"]', placement:'left',
+    prepare:async()=>ensureGuideView('env'),
+    skipLabel:'跳过邮箱接码', skipTo:'sms',
+    body:`<p>按任务选择 YYDS、GPTMail、MoeMail、CFMail 或自定义 provider，并填写对应 API key。</p>
+      <p>配置后使用组标题右侧的连通测试。测试通过只代表邮箱 API 可用，注册页面是否放行仍取决于网络出口。</p>`,
+  },
+  {
+    id:'sms', section:'短信接码', title:'只有需要手机号时才配置', target:'[data-guide-group="sms"]', placement:'left',
+    prepare:async()=>ensureGuideView('env'),
+    skipLabel:'跳过短信接码', skipTo:'task',
+    body:`<p>Codex OAuth 的 add-phone、Gmail 注册等流程需要短信接码。常用配置是 <code>SMSMAN_TOKEN</code> 和 OpenAI 服务 ID。</p>
+      <p>只注册普通 ChatGPT、Claude 或 Grok 网页账号时，可以跳过本项。填写后先运行本组连通测试。</p>`,
+  },
+  {
+    id:'task', section:'运行任务', title:'新手从端到端全流程开始', target:'.scriptbtn[data-id="run_full_flow"]', placement:'right',
+    prepare:async()=>{
+      setNavOpen(false);
+      await showView('run');
+      selectScript('run_full_flow');
+      if(innerWidth<=900) setNavOpen(true);
+    },
+    body:`<p>端到端全流程会先准备邮箱，再注册你选中的平台。第一次建议只选一个平台并只跑一轮，确认链路正常后再批量运行。</p>
+      <p>已有邮箱时也可以使用“三平台注册”或单平台任务。</p>`,
+  },
+  {
+    id:'platforms', section:'运行任务', title:'先选择要注册的平台', target:'[data-arg-flag="--platforms"]', placement:'right',
+    prepare:async()=>{
+      setNavOpen(false);
+      await ensureGuideView('run');
+      selectScript('run_full_flow');
+    },
+    body:`<p>在 platforms 中勾选目标平台。首次测试只保留一个选项，rounds 保持为 1。</p>
+      <p>需要直接使用现成邮箱时，展开更多设置并勾选 skip-email，再填写 email 和 password。</p>`,
+  },
+  {
+    id:'task-options', section:'运行任务', title:'按目标勾选附加功能', target:'[data-guide="advanced-task-options"]', placement:'right',
+    prepare:async()=>{
+      await ensureGuideView('run');
+      selectScript('run_full_flow');
+      const advanced = $('.advanced-fields');
+      if(advanced) advanced.open = true;
+    },
+    body:`<ul class="tour-list">
+        <li>ChatGPT 需要导入 SUB2API 时勾选 codex。</li>
+        <li>Grok 需要导入 SUB2API 时勾选 grok-sub2api。</li>
+        <li>ChatGPT 需要导入 chatgpt2api 时勾选 import-c2a。</li>
+        <li>首次配置建议先勾选 dry-run，只预览命令，不执行注册。</li>
+      </ul>
+      <p>未使用的附加功能不要勾选，对应的 API 配置也可以跳过。</p>`,
+  },
+  {
+    id:'run', section:'运行任务', title:'确认后启动任务', target:'.form-actions', placement:'top',
+    prepare:async()=>{ await ensureGuideView('run'); selectScript('run_full_flow'); },
+    body:`<p>确认平台、轮数和附加功能后点击“运行任务”。按钮右侧会显示实际命令，便于检查参数。</p>
+      <p>教程不会替你点击运行。正式运行前建议先完成一次 dry-run。</p>`,
+  },
+  {
+    id:'logs', section:'完成', title:'从日志判断结果', target:'.log-panel', placement:'left',
+    prepare:async()=>ensureGuideView('run'),
+    body:`<p>运行日志会持续显示当前步骤。顶部状态为“已成功”才代表任务正常结束，失败时保留最后一段日志用于排查。</p>
+      <p>现在已经完成基础配置路线。以后可随时从顶栏重新打开本指南。</p>`,
+  },
+];
+
+function guideStorageCompleted(){
+  try{ return localStorage.getItem(GUIDE_STORAGE_KEY)==='complete'; }
+  catch(_error){ return false; }
+}
+
+function saveGuideCompleted(){
+  try{ localStorage.setItem(GUIDE_STORAGE_KEY, 'complete'); }
+  catch(_error){}
+}
+
+function guideViewVisible(view){
+  const element = $(`#view-${view}`);
+  return !!element && getComputedStyle(element).display!=='none';
+}
+
+function previewGuideProxyMode(mode){
+  if(guideOriginalProxyMode===null) guideOriginalProxyMode = proxyMode;
+  setProxyMode(mode);
+}
+
+function previewGuideClashFields(){
+  previewGuideProxyMode('clash_auto');
+}
+
+function restoreGuideProxyMode(){
+  if(guideOriginalProxyMode===null) return;
+  setProxyMode(guideOriginalProxyMode);
+  guideOriginalProxyMode = null;
+}
+
+async function ensureGuideView(view){
+  if(!guideViewVisible(view)) await showView(view);
+}
+
+async function waitForGuideTarget(selector, timeout=4000){
+  const deadline = Date.now()+timeout;
+  while(Date.now()<deadline){
+    const element = typeof selector==='function' ? selector() : $(selector);
+    if(element && element.getClientRects().length) return element;
+    await new Promise(resolve=>setTimeout(resolve, 80));
+  }
+  return $('.content') || document.body;
+}
+
+function setGuideRect(element, left, top, width, height){
+  element.style.left = `${Math.max(0,left)}px`;
+  element.style.top = `${Math.max(0,top)}px`;
+  element.style.width = `${Math.max(0,width)}px`;
+  element.style.height = `${Math.max(0,height)}px`;
+}
+
+function positionGuide(){
+  if(!guideActive || !guideTarget || !guideTarget.isConnected) return;
+  const viewportWidth = innerWidth;
+  const viewportHeight = innerHeight;
+  const padding = 7;
+  const raw = guideTarget.getBoundingClientRect();
+  const left = Math.max(6, raw.left-padding);
+  const top = Math.max(6, raw.top-padding);
+  const right = Math.min(viewportWidth-6, raw.right+padding);
+  const bottom = Math.min(viewportHeight-6, raw.bottom+padding);
+  const width = Math.max(0, right-left);
+  const height = Math.max(0, bottom-top);
+  const spotlight = $('#tour-spotlight');
+  setGuideRect(spotlight, left, top, width, height);
+  setGuideRect($('#tour-curtain-top'), 0, 0, viewportWidth, top);
+  setGuideRect($('#tour-curtain-left'), 0, top, left, height);
+  setGuideRect($('#tour-curtain-right'), right, top, viewportWidth-right, height);
+  setGuideRect($('#tour-curtain-bottom'), 0, bottom, viewportWidth, viewportHeight-bottom);
+
+  const popover = $('#tour-popover');
+  const margin = 12;
+  const gap = 14;
+  popover.style.width = `${Math.min(390, viewportWidth-margin*2)}px`;
+  const popWidth = popover.offsetWidth;
+  const popHeight = popover.offsetHeight;
+  const spaces = {
+    right:viewportWidth-right,
+    left:left,
+    bottom:viewportHeight-bottom,
+    top:top,
+  };
+  const preferred = GUIDE_STEPS[guideIndex].placement || 'right';
+  let side = preferred;
+  const needed = (side==='left' || side==='right' ? popWidth : popHeight)+gap+margin;
+  if(spaces[side]<needed){
+    side = Object.keys(spaces).sort((a,b)=>spaces[b]-spaces[a])[0];
+  }
+  let popLeft = margin;
+  let popTop = margin;
+  if(side==='right'){
+    popLeft = right+gap;
+    popTop = raw.top;
+  }else if(side==='left'){
+    popLeft = left-popWidth-gap;
+    popTop = raw.top;
+  }else if(side==='bottom'){
+    popLeft = raw.left+(raw.width-popWidth)/2;
+    popTop = bottom+gap;
+  }else{
+    popLeft = raw.left+(raw.width-popWidth)/2;
+    popTop = top-popHeight-gap;
+  }
+  popLeft = Math.max(margin, Math.min(viewportWidth-popWidth-margin, popLeft));
+  popTop = Math.max(margin, Math.min(viewportHeight-popHeight-margin, popTop));
+  popover.style.left = `${popLeft}px`;
+  popover.style.top = `${popTop}px`;
+}
+
+function scheduleGuidePosition(){
+  if(!guideActive || guidePositionFrame) return;
+  guidePositionFrame = requestAnimationFrame(()=>{
+    guidePositionFrame = null;
+    positionGuide();
+  });
+}
+
+async function renderGuideStep(index){
+  if(!guideActive) return;
+  const renderToken = ++guideRenderToken;
+  guideIndex = Math.max(0, Math.min(GUIDE_STEPS.length-1, index));
+  const step = GUIDE_STEPS[guideIndex];
+  if(step.prepare) await step.prepare();
+  if(!guideActive || renderToken!==guideRenderToken) return;
+  if(guideTarget) guideTarget.classList.remove('tour-target-active');
+  guideTarget = await waitForGuideTarget(step.target);
+  if(!guideActive || renderToken!==guideRenderToken) return;
+  guideTarget.classList.add('tour-target-active');
+  guideTarget.scrollIntoView({block:'center', inline:'nearest'});
+  $('#tour-section').textContent = step.section;
+  $('#tour-title').textContent = step.title;
+  $('#tour-body').innerHTML = step.body;
+  $('#tour-progress-label').textContent = `${guideIndex+1} / ${GUIDE_STEPS.length}`;
+  $('#tour-progress-bar').style.width = `${((guideIndex+1)/GUIDE_STEPS.length)*100}%`;
+  $('#btn-tour-prev').disabled = guideIndex===0;
+  $('#btn-tour-next').textContent = guideIndex===GUIDE_STEPS.length-1 ? '完成指南' : '下一步';
+  const skipSection = $('#btn-tour-skip-section');
+  skipSection.hidden = !step.skipTo;
+  skipSection.textContent = step.skipLabel || '跳过此配置';
+  skipSection.dataset.skipTo = step.skipTo || '';
+  await new Promise(resolve=>requestAnimationFrame(resolve));
+  positionGuide();
+  $('#btn-tour-next').focus({preventScroll:true});
+}
+
+async function startGuide(index=0){
+  if(scriptsReady){
+    try{ await scriptsReady; }catch(_error){}
+  }
+  guideActive = true;
+  document.body.classList.add('tour-open');
+  const layer = $('#tour-layer');
+  layer.hidden = false;
+  layer.setAttribute('aria-hidden', 'false');
+  await renderGuideStep(index);
+}
+
+function finishGuide(){
+  guideActive = false;
+  guideRenderToken++;
+  saveGuideCompleted();
+  if(guideTarget) guideTarget.classList.remove('tour-target-active');
+  guideTarget = null;
+  restoreGuideProxyMode();
+  setNavOpen(false);
+  document.body.classList.remove('tour-open');
+  const layer = $('#tour-layer');
+  layer.hidden = true;
+  layer.setAttribute('aria-hidden', 'true');
+  $('#btn-guide').focus({preventScroll:true});
+}
+
+let guideRenderToken = 0;
+$('#btn-guide').onclick = ()=>startGuide(0);
+$('#btn-tour-close').onclick = finishGuide;
+$('#btn-tour-exit').onclick = finishGuide;
+$('#btn-tour-prev').onclick = ()=>renderGuideStep(guideIndex-1);
+$('#btn-tour-next').onclick = ()=>{
+  if(guideIndex>=GUIDE_STEPS.length-1) finishGuide();
+  else renderGuideStep(guideIndex+1);
+};
+$('#btn-tour-skip-section').onclick = event=>{
+  const targetId = event.currentTarget.dataset.skipTo;
+  const targetIndex = GUIDE_STEPS.findIndex(step=>step.id===targetId);
+  renderGuideStep(targetIndex>=0 ? targetIndex : guideIndex+1);
+};
+window.addEventListener('resize', scheduleGuidePosition);
+document.addEventListener('scroll', scheduleGuidePosition, true);
+document.addEventListener('keydown', event=>{
+  if(guideActive && event.key==='Escape') finishGuide();
+});
+
 // ---------------------------------------------------------------- 邮箱池
 async function loadMailpool(){
   try{
@@ -1380,5 +1764,8 @@ $('#btn-import-mail').onclick = async ()=>{
 };
 
 // ---------------------------------------------------------------- 启动
-loadScripts();
+scriptsReady = loadScripts();
+scriptsReady.then(()=>{
+  if(!guideStorageCompleted()) setTimeout(()=>startGuide(0), 500);
+}).catch(()=>{});
 pollStatus();

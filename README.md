@@ -65,7 +65,7 @@
 运行前需要：
 
 - Python 3.10+
-- 内置 Chromium、自定义 Chrome/Chromium、[BitBrowser](https://www.bitbrowser.cn/download)、AdsPower，或 BitBrowser 兼容的其他指纹浏览器 API
+- 默认使用 [RuyiPage](https://github.com/LoseNine/ruyipage) Firefox WebDriver BiDi 指纹浏览器，也支持内置 Chromium、自定义 Chrome/Chromium、BitBrowser 和 AdsPower
 - [Clash Verge 2.5.2 Windows x64](https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.2/Clash.Verge_2.5.2_x64-setup.exe)（自动/固定节点模式），或一个住宅代理服务
 - Node.js 20+（仅 Codex K12 控制台需要）
 
@@ -73,7 +73,7 @@ Windows：
 
 ```text
 1. 双击 install.bat
-2. 启动指纹浏览器和 Clash Verge
+2. 首次安装会下载 RuyiPage Firefox；启动 Clash Verge
 3. 双击 start.bat
 4. 打开 http://127.0.0.1:8799/
 ```
@@ -91,11 +91,12 @@ macOS / Linux：
 
 主控制台默认监听 `http://127.0.0.1:8799/`，提供以下入口：
 
+- 新手指南：首次打开自动引导 Clash External Controller、控制密码、住宅代理、继承全局、浏览器、接码、资产 API 和任务勾选配置；支持按阶段跳过并从顶栏重新打开。
 - 任务库：按流程分类选择任务，只展示常用参数，低频参数收进“更多设置”。
 - 运行日志：实时查看输出和结果状态；可停止当前任务树，或一键清理新旧版本遗留的全部注册任务。
 - 邮箱池：批量导入已有 Outlook 邮箱。
-- 资产 API：配置访问密钥，选择邮箱或平台凭据、输出格式及顺序/index 取用，并在线调用和查看结果。
-- 号池扫描：一键校验 Outlook、ChatGPT、Claude 和 Grok，查看正常、待解锁、封禁、过期、受限及检测异常明细。
+- 资产 API：每次输出前在线校验，只读取本次检测正常的邮箱或平台凭据，并提供顺序/index 取用和下游格式转换。
+- 号池扫描：一键校验 Outlook、ChatGPT、Claude、Grok 和 Kiro，查看正常、待解锁、封禁、过期、受限及检测异常明细。
 - 网络出口：切换 Clash 自动轮换、固定节点或动态住宅 IP，并测试公网出口。
 - 环境配置：分组编辑 `.env` 并测试外部服务连通性。
 - Codex K12：管理 K12 workspace、邮箱资产、任务与 Codex 凭据。
@@ -106,7 +107,7 @@ macOS / Linux：
 
 ## 本地资产 API
 
-本地接口支持按顺序或指定 `index` 读取邮箱、Claude/ChatGPT/Grok Cookie 和 Kiro Builder ID 账号；`format=cookies` 输出浏览器扩展可导入的标准 JSON，并可把 ChatGPT 会话转换为 SUB2API、CPA 或 chatgpt2api 格式。控制台左侧打开“资产 API”即可配置、生成调用命令、在线测试，并一键扫描各类号池状态。默认仅允许本机访问，可配置 `REG_FACTORY_ASSET_API_KEY`。
+本地接口支持按顺序或指定 `index` 读取邮箱、Claude/ChatGPT/Grok Cookie 和 Kiro Builder ID 账号；`format=cookies` 输出浏览器扩展可导入的标准 JSON，并可把 ChatGPT 会话转换为 SUB2API、CPA 或 chatgpt2api 格式。每个读取请求都会先在线校验对应平台，只从本次检测正常的健康资产池返回数据，并在响应中附带 `verification`。这只证明检测时刻可用，不代表账号之后不会被目标服务限制。控制台左侧打开“资产 API”即可配置访问密钥、生成调用命令和查看状态。默认仅允许本机访问，可配置 `REG_FACTORY_ASSET_API_KEY`。
 
 ```bash
 # 按顺序取下一个邮箱
@@ -142,6 +143,9 @@ python register.py --count 1 --node auto --latest-rt
 
 # Claude 使用 YYDS 临时邮箱
 python register.py --count 1 --node auto --provider yyds
+
+# ChatGPT 使用 iCloud 接码邮箱（先在 .env 配置 ICLOUD_MAIL_API_KEY）
+python register_chatgpt.py --count 1 --email-provider icloud
 
 # Grok 浏览器注册并导入 SUB2API
 python register_grok.py --count 1 --sub2api

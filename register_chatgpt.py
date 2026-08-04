@@ -31,12 +31,14 @@ from common.browser import open_and_connect, teardown, human_type, react_fill
 from common.mailbox import get_code_by_token, get_code_outlook_pw, prelogin_outlook
 from common.cookies import save_platform_cookies
 from common import emails as email_pool
+from common.temp_email import create_mailbox, poll_verification_code
 from common import proxy_switch
 
 try:
-    from config import CHATGPT2API_URL, CHATGPT2API_KEY
+    from config import CHATGPT2API_URL, CHATGPT2API_KEY, CHATGPT_EMAIL_PROVIDER
 except Exception:
     CHATGPT2API_URL, CHATGPT2API_KEY = "", ""
+    CHATGPT_EMAIL_PROVIDER = "pool"
 
 try:
     from config import (
@@ -57,12 +59,14 @@ FIXED_EMAIL = None
 FIXED_PASSWORD = None
 FIXED_REFRESH_TOKEN = None
 FIXED_CLIENT_ID = None
+EMAIL_PROVIDER = "pool"
 IMPORT_C2A = False  # 注册成功后即时把 token 导入 chatgpt2api（--import-c2a 开启）
 C2A_URL = None  # chatgpt2api host（默认取 config.CHATGPT2API_URL）
 C2A_KEY = None  # chatgpt2api admin key（默认取 config.CHATGPT2API_KEY）
 EXTRACT_CODEX = False  # 注册成功后顺手走 Codex OAuth 提取 rt 导入 SUB2API（--codex 开启）
 CODEX_GROUP = None  # SUB2API 目标分组（默认取 config.SUB2API_GROUP）
 CODEX_MANUAL_PHONE = False  # add-phone 手动模式（不接码，自己在浏览器填号收码）
+CODEX_SMS_PROVIDER = "auto"  # auto / smsman / firefox / hero
 CODEX_TIMEOUT = 120  # Codex 授权捕获超时秒
 CHATGPT_NODE = "auto"
 ACTIVE_CHATGPT_NODE = None
@@ -401,7 +405,10 @@ class AuthResponseMonitor:
             parsed = urlsplit(response.url)
             if response.request.method.upper() != "POST" or parsed.hostname != "auth.openai.com":
                 return
-            if not any(marker in parsed.path.lower() for marker in ("account", "onboarding", "about-you")):
+            if not any(
+                marker in parsed.path.lower()
+                for marker in ("account", "onboarding", "about-you", "email-verification")
+            ):
                 return
             self._tasks.append(asyncio.create_task(self._record(response, parsed.path)))
         except Exception:
@@ -428,6 +435,96 @@ class AuthResponseMonitor:
     async def latest(self):
         await self._drain()
         return self.errors[-1] if self.errors else None
+
+
+async def is_email_verification_route_error(page):
+    """Detect the auth UI error returned when a JSON route responds with HTML."""
+    try:
+        body = (await page.locator("body").inner_text(timeout=2500)).strip().lower()
+    except Exception:
+        return False
+    return "route error" in body and (
+        "invalid content type" in body or "text/html" in body
+    )
+
+
+_VERIFICATION_SUBMIT_LABELS = [
+    "Continue", "続行", "Verify", "確認", "确认", "继续", "Submit", "次へ",
+    "Teruskan", "Sahkan",
+]
+_VERIFICATION_RETRY_LABELS = [
+    "Retry", "重试", "重試", "再试一次", "再試行", "Réessayer", "Erneut versuchen",
+]
+
+
+async def _fill_and_submit_email_code(page, code_sel, code, *, tries=3, verbose=True):
+    code_input = page.locator(code_sel).first
+    if await code_input.count() == 0:
+        return False
+    if not await react_fill(page, code_sel, code, tries=tries, verbose=verbose):
+        print("  [4] code fill not committed after retries")
+    if not await click_any_exact(page, _VERIFICATION_SUBMIT_LABELS):
+        submit = page.locator('button[type="submit"]')
+        if await submit.count() > 0:
+            await submit.first.click()
+        else:
+            return False
+    return True
+
+
+async def submit_email_verification_code(page, code_sel, code, route_retries=2):
+    """Submit an email code and recover the transient auth HTML route error."""
+    if not await _fill_and_submit_email_code(page, code_sel, code):
+        raise RuntimeError("email_verification_form_unavailable")
+    await asyncio.sleep(5)
+    await dump_state(page, "after-code")
+
+    for attempt in range(route_retries):
+        if not await is_email_verification_route_error(page):
+            break
+        print(
+            "  [4] verification route returned HTML; "
+            f"clicking Retry ({attempt + 1}/{route_retries})..."
+        )
+        if not await click_any_exact(page, _VERIFICATION_RETRY_LABELS):
+            break
+        await asyncio.sleep(5)
+        if not any(
+            marker in page.url.lower()
+            for marker in ("verification", "verify", "email-verification")
+        ):
+            break
+        if await page.locator(code_sel).first.count() > 0:
+            await _fill_and_submit_email_code(
+                page, code_sel, code, tries=2, verbose=False
+            )
+            await asyncio.sleep(5)
+        await dump_state(page, f"after-code-route-retry-{attempt + 1}")
+
+    if await is_email_verification_route_error(page):
+        raise RuntimeError(
+            "email_verification_route_error: auth route kept returning HTML after Retry"
+        )
+
+    if any(
+        marker in page.url.lower()
+        for marker in ("verification", "verify", "email-verification")
+    ):
+        code_input = page.locator(code_sel).first
+        if await code_input.count() == 0:
+            raise RuntimeError("email_verification_not_completed")
+        print("  [4] still on verification page, re-submitting code once...")
+        if not await _fill_and_submit_email_code(
+            page, code_sel, code, tries=2, verbose=False
+        ):
+            raise RuntimeError("email_verification_submit_unavailable")
+        await asyncio.sleep(5)
+        await dump_state(page, "after-code-retry")
+        if any(
+            marker in page.url.lower()
+            for marker in ("verification", "verify", "email-verification")
+        ):
+            raise RuntimeError("email_verification_not_completed")
 
 
 # OpenAI 发件人 / 验证码邮件特征
@@ -770,7 +867,7 @@ async def extract_codex(page, email, p=None, ctx=None, release_current=None):
             page, lambda: ox.generate_auth_url(origin, token),
             account_email=email, phone_skip_attempts=skip_n,
             skip_timeout=120, phone_timeout=timeout, manual_phone=CODEX_MANUAL_PHONE,
-            reset_page=reset_fn)
+            reset_page=reset_fn, sms_provider=CODEX_SMS_PROVIDER)
         if reset_fn is not None:
             try:
                 await reset_fn.cleanup()
@@ -813,12 +910,22 @@ async def register_one(index, total, p):
         if time.time() - start > REGISTER_TIMEOUT:
             raise TimeoutError(f"timeout {REGISTER_TIMEOUT}s")
 
+    mailbox = None
     # 取邮箱。调试同一邮箱注册多平台时可通过 CLI 指定，避免邮箱池自动分配。
     if FIXED_EMAIL:
         email = FIXED_EMAIL
         email_pw = FIXED_PASSWORD or ""
         refresh_token = FIXED_REFRESH_TOKEN or ""
         client_id = FIXED_CLIENT_ID or ""
+    elif EMAIL_PROVIDER == "icloud":
+        try:
+            mailbox = create_mailbox(provider="icloud")
+            email = mailbox["email"]
+            email_pw = refresh_token = client_id = ""
+            print(f"  [email] iCloud mailbox allocated: {email}")
+        except Exception as exc:
+            print(f"  [email] iCloud mailbox unavailable: {str(exc)[:160]}")
+            return None
     else:
         em = email_pool.next_email(PLATFORM)
         if not em:
@@ -1061,6 +1168,8 @@ async def register_one(index, total, p):
         if await code_input.count() > 0 or "verify" in page.url.lower() or "check" in (await page.locator("body").inner_text()).lower():
             code_sel = 'input[inputmode="numeric"], input[name="code"], input[autocomplete="one-time-code"], input[type="text"]'
 
+            icloud_seen_codes = set()
+
             async def _fetch_email_code(received_after=None, allow_browser_fallback=False):
                 """取一次码：先 Graph token，失败再浏览器登录 Outlook 取信。
                 取码窗口**跨 resend 复用**：已登录就只刷新收件箱轮询(skip_login)，不关窗不重登。
@@ -1069,6 +1178,16 @@ async def register_one(index, total, p):
                 浏览器兜底只是去查同一个收件箱、纯浪费；取不到码该靠上层 resend 重发，而非开窗口。
                 received_after: resend 后传重发时刻，只收该时刻后到的邮件(旧码已被 OpenAI 作废)。"""
                 nonlocal mail_bb, mail_pid, mail_page, mail_logged_in
+                if mailbox and mailbox.get("provider") == "icloud":
+                    c = await poll_verification_code(
+                        mailbox["id"], "icloud", email=mailbox["email"],
+                        max_wait=120, poll_interval=4,
+                        sender_hint=(), subject_hint=(), code_regex=r"\b(\d{6})\b",
+                        exclude_codes=tuple(icloud_seen_codes),
+                    )
+                    if c:
+                        icloud_seen_codes.add(str(c))
+                    return c
                 c = await asyncio.get_event_loop().run_in_executor(
                     None, functools.partial(
                         get_code_by_token, email, refresh_token, client_id or None,
@@ -1175,27 +1294,8 @@ async def register_one(index, total, p):
             if code:
                 print(f"  got code: {code}")
                 await dismiss_cookie_banner(page)
-                ci = page.locator(code_sel).first
-                # 填码（React 受控输入：键盘逐字+JS setter 兜底；fill 不触发 onChange 会停在验证页）
-                if not await react_fill(page, code_sel, code, tries=3):
-                    print("  [4] code fill not committed after retries")
-                # 提交（中/英/日多语言精确匹配）
-                if not await click_any_exact(page, ["Continue", "続行", "Verify", "確認", "确认", "继续", "Submit", "次へ", "Teruskan", "Sahkan"]):
-                    sub = page.locator('button[type="submit"]')
-                    if await sub.count() > 0:
-                        await sub.first.click()
-                await asyncio.sleep(5)
-                await dump_state(page, "after-code")
-                # 若仍停在验证页（码没被接受/没提交成功），补填再交一次
-                if any(k in page.url.lower() for k in ["verification", "verify", "email-verification"]):
-                    print("  [4] still on verification page, re-submitting code once...")
-                    await react_fill(page, code_sel, code, tries=2, verbose=False)
-                    if not await click_any_exact(page, ["Continue", "続行", "Verify", "確認", "确认", "Teruskan", "Sahkan"]):
-                        sub = page.locator('button[type="submit"]')
-                        if await sub.count() > 0:
-                            await sub.first.click()
-                    await asyncio.sleep(5)
-                    await dump_state(page, "after-code-retry")
+                # React 受控输入需要真实键盘事件；HTML Route Error 则点击页面上的 Retry 恢复。
+                await submit_email_verification_code(page, code_sel, code)
             else:
                 print("  no code received")
                 # 收不到码：只从 chatgpt 平台拉黑（记 emails_error_chatgpt.txt），其它平台仍可取
@@ -1752,6 +1852,8 @@ async def main():
     parser.add_argument("--password", default=None, help="指定邮箱密码")
     parser.add_argument("--refresh-token", default=None, help="指定 Outlook refresh_token")
     parser.add_argument("--client-id", default=None, help="指定 Outlook OAuth client_id")
+    parser.add_argument("--email-provider", choices=["pool", "icloud"], default=None,
+                        help="邮箱来源：pool=emails.txt，icloud=API 自动申请并取码")
     parser.add_argument("--import-c2a", action="store_true",
                         help="注册成功后即时把 token 导入 chatgpt2api (POST <host>/api/accounts)")
     parser.add_argument("--c2a-url", default=None, help="chatgpt2api host (默认取 config.CHATGPT2API_URL)")
@@ -1762,25 +1864,32 @@ async def main():
                         help="SUB2API 目标分组名 (默认取 config.SUB2API_GROUP)")
     parser.add_argument("--codex-manual-phone", action="store_true",
                         help="Codex add-phone 手动模式: 不接码, 自己在浏览器填号收码")
+    parser.add_argument("--codex-sms-provider", choices=["auto", "smsman", "firefox", "hero"], default="auto",
+                        help="Codex 自动接码平台；auto 按默认顺序")
     parser.add_argument("--codex-timeout", type=int, default=120,
                         help="Codex 授权捕获超时秒 (手动填号会自动抬到至少 300)")
     args = parser.parse_args()
 
-    global REGISTER_TIMEOUT, KEEP_ON_FAIL, FIXED_EMAIL, FIXED_PASSWORD, FIXED_REFRESH_TOKEN, FIXED_CLIENT_ID
+    global REGISTER_TIMEOUT, KEEP_ON_FAIL, FIXED_EMAIL, FIXED_PASSWORD, FIXED_REFRESH_TOKEN, FIXED_CLIENT_ID, EMAIL_PROVIDER
     global IMPORT_C2A, C2A_URL, C2A_KEY
-    global EXTRACT_CODEX, CODEX_GROUP, CODEX_MANUAL_PHONE, CODEX_TIMEOUT, CHATGPT_NODE
+    global EXTRACT_CODEX, CODEX_GROUP, CODEX_MANUAL_PHONE, CODEX_SMS_PROVIDER, CODEX_TIMEOUT, CHATGPT_NODE
     REGISTER_TIMEOUT = args.timeout
     KEEP_ON_FAIL = args.keep_on_fail
     FIXED_EMAIL = args.email
     FIXED_PASSWORD = args.password
     FIXED_REFRESH_TOKEN = args.refresh_token
     FIXED_CLIENT_ID = args.client_id
+    EMAIL_PROVIDER = args.email_provider or CHATGPT_EMAIL_PROVIDER or "pool"
+    if EMAIL_PROVIDER not in {"pool", "icloud"}:
+        print(f"  [config] CHATGPT_EMAIL_PROVIDER={EMAIL_PROVIDER!r} 无效，回退 pool")
+        EMAIL_PROVIDER = "pool"
     IMPORT_C2A = args.import_c2a
     C2A_URL = args.c2a_url
     C2A_KEY = args.c2a_key
     EXTRACT_CODEX = args.codex
     CODEX_GROUP = args.codex_group
     CODEX_MANUAL_PHONE = args.codex_manual_phone
+    CODEX_SMS_PROVIDER = args.codex_sms_provider
     CODEX_TIMEOUT = args.codex_timeout
     CHATGPT_NODE = args.node
 

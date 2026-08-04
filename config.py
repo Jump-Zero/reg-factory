@@ -50,8 +50,8 @@ def _env_int(name, default):
 
 
 # ---------------------------------------------------------------- 本地基建
-# Fingerprint browser provider: bitbrowser / adspower
-FINGERPRINT_BROWSER = _env("FINGERPRINT_BROWSER", "bitbrowser").strip().lower()
+# Fingerprint browser provider: ruyipage / bundled / bitbrowser / adspower
+FINGERPRINT_BROWSER = _env("FINGERPRINT_BROWSER", "ruyipage").strip().lower()
 
 # BitBrowser 本地 API 地址
 BITBROWSER_API = _env("BITBROWSER_API", "http://127.0.0.1:54345")
@@ -92,8 +92,11 @@ MAIL_NEW_PASS = _env("MAIL_NEW_PASS", "")
 GROK_USE_TEMP_EMAIL = _env("GROK_USE_TEMP_EMAIL", "false").strip().lower() in ("1", "true", "yes", "on")
 # CLAUDE_USE_TEMP_EMAIL=true 时 register.py 走临时邮箱取 magic link，免去 Outlook 注册/轮询。
 CLAUDE_USE_TEMP_EMAIL = _env("CLAUDE_USE_TEMP_EMAIL", "false").strip().lower() in ("1", "true", "yes", "on")
-# provider: moemail | yyds | gptmail | cfmail（默认 gptmail，带公共测试 key 开箱即用）
+# provider: moemail | yyds | gptmail | cfmail | icloud（默认 gptmail，带公共测试 key 开箱即用）
 TEMP_EMAIL_PROVIDER = _env("TEMP_EMAIL_PROVIDER", "gptmail").strip().lower() or "gptmail"
+
+# ChatGPT 邮箱来源：pool=emails.txt Outlook 池；icloud=自动申请 iCloud 地址并通过 API 取码。
+CHATGPT_EMAIL_PROVIDER = _env("CHATGPT_EMAIL_PROVIDER", "pool").strip().lower() or "pool"
 
 # MoeMail（beilunyang/moemail，需自部署）
 MOEMAIL_BASE_URL = _env("MOEMAIL_BASE_URL", "https://moemail.example.com")
@@ -108,6 +111,12 @@ YYDS_API_KEY = _env("YYDS_API_KEY", "")  # AC-... 格式，profile 页获取
 # GPTMail（mail.chatgpt.org.uk），支持公共测试 key "gpt-test"
 GPTMAIL_BASE_URL = _env("GPTMAIL_BASE_URL", "https://mail.chatgpt.org.uk")
 GPTMAIL_API_KEY = _env("GPTMAIL_API_KEY", "gpt-test")
+
+# iCloud Mail API（API 主机，不是文档站 email.manageh.shop）
+ICLOUD_MAIL_API_BASE = _env("ICLOUD_MAIL_API_BASE", "https://mail.no-replyca.xyz")
+ICLOUD_MAIL_API_KEY = _env("ICLOUD_MAIL_API_KEY", "")
+ICLOUD_MAIL_TYPE = _env("ICLOUD_MAIL_TYPE", "icloud-code").strip().lower() or "icloud-code"
+ICLOUD_MAIL_SERVICE = _env("ICLOUD_MAIL_SERVICE", "openai").strip().lower() or "openai"
 
 # Cloudflare Temp Email（dreamhunter2333/cloudflare_temp_email，建议自部署 Workers）
 CFMAIL_BASE_URL = _env("CFMAIL_BASE_URL", "https://temp-email-api.awsl.uk")
@@ -139,7 +148,8 @@ CUSTOM_MAIL_MSG_PATH = _env("CUSTOM_MAIL_MSG_PATH", "")         # detail 响应�
 
 # ---------------------------------------------------------------- 短信接码平台 (firefox.fun)
 SMS_API_BASE = _env("SMS_API_BASE", "http://www.firefox.fun/yhapi.ashx")
-SMS_TOKEN = _env("SMS_TOKEN", "")  # 接码平台 token
+SMS_API_NAME = _env("SMS_API_NAME", "")  # firefox.fun APIName（仅标识账号）
+SMS_TOKEN = _env("SMS_TOKEN", "")  # firefox.fun 持久 token；取号还需平台项目 iid
 SMS_PROJECT_ID = _env("SMS_PROJECT_ID", "2313")  # claude 项目
 # 优先国家列表，按顺序尝试，""=任意(排除黑名单)
 SMS_COUNTRY_PREFER = ["60", "56", "57", "44", ""]  # 60=马来西亚 56=智利 57=哥伦比亚 44=英国 ""=任意

@@ -16,7 +16,7 @@ import requests
 from common import asset_store
 
 
-PLATFORMS = ("outlook", "chatgpt", "claude", "grok")
+PLATFORMS = ("outlook", "chatgpt", "claude", "grok", "kiro")
 STATUSES = (
     "normal",
     "unlock",

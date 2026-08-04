@@ -47,8 +47,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM ---- 4. install Playwright Chromium ----
-echo [4/6] installing Playwright Chromium ...
+REM ---- 4. install browser runtimes ----
+echo [4/6] installing RuyiPage Firefox and Playwright Chromium ...
+"%VENV_PY%" -m ruyipage install
+if errorlevel 1 ( echo [WARN] RuyiPage Firefox install failed, run later: .venv\Scripts\python -m ruyipage install )
 "%VENV_PY%" -m playwright install chromium
 if errorlevel 1 ( echo [WARN] playwright core install failed, run later: .venv\Scripts\playwright install chromium )
 
@@ -87,7 +89,8 @@ if exist ".env" (
 echo.
 echo ============================================================
 echo   Install done!
-echo   - Start BitBrowser/AdsPower and Clash Verge clients
+echo   - RuyiPage Firefox is the default; start Clash Verge before tasks
+echo   - Start BitBrowser/AdsPower only when selecting those providers
 echo   - Double-click start.bat to open the control panel
 echo ============================================================
 if not "%REG_FACTORY_NONINTERACTIVE%"=="1" pause

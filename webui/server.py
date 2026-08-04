@@ -18,6 +18,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -154,6 +155,7 @@ ASSET_SCAN_STATE = {
     "error": "",
     "progress": {"completed": 0, "total": 0, "current": ""},
 }
+ASSET_SCAN_LOCK = threading.Lock()
 
 # 更新由独立进程执行；当前 WebUI 会在 updater 停止自身前返回 202。
 UPDATE_PROCESS = None
@@ -489,15 +491,27 @@ def _test_clash():
 
 def _fingerprint_provider():
     return (
-        _read_config_val("FINGERPRINT_BROWSER", "bitbrowser")
+        _read_config_val("FINGERPRINT_BROWSER", "ruyipage")
         or os.environ.get("BROWSER_PROVIDER")
-        or "bitbrowser"
+        or "ruyipage"
     ).strip().lower()
 
 
 def _test_bitbrowser():
     """Test selected fingerprint browser local API."""
     provider = _fingerprint_provider()
+    if provider in {"ruyipage", "ruyi", "firefox_bidi"}:
+        try:
+            import ruyipage
+            from ruyipage import resolve_firefox_path
+
+            configured = _read_config_val("RUYIPAGE_BROWSER_PATH", "")
+            path = resolve_firefox_path(configured or None)
+            if path:
+                return True, f"RuyiPage {ruyipage.__version__} Firefox ready: {os.path.basename(path)}"
+        except Exception as exc:
+            return False, f"RuyiPage 不可用: {str(exc)[:100]}"
+        return False, "RuyiPage Firefox runtime 未安装；请运行面板中的安装任务"
     if provider in {"bundled", "embedded", "local", "custom", "chrome", "chromium"}:
         from common.bundled_browser import find_browser_path
 
@@ -575,17 +589,20 @@ def _test_smsman():
 
 
 def _test_firefox():
-    """测 firefox.fun 接码：用 token 查询(getBalance 类)。"""
+    """测 firefox.fun 接码：用官方 myInfo 动作验证持久 token。"""
+    api_name = _read_config_val("SMS_API_NAME", "").strip()
     token = _read_config_val("SMS_TOKEN", "")
+    if not api_name:
+        return False, "未配置 SMS_API_NAME"
     if not token:
         return False, "未配置 SMS_TOKEN"
     base = _read_config_val("SMS_API_BASE", "http://www.firefox.fun/yhapi.ashx")
     try:
-        code, body = _proxied_get(base + "?" + urllib.parse.urlencode({"act": "getuserinfo", "token": token}), timeout=15)
+        code, body = _proxied_get(base + "?" + urllib.parse.urlencode({"act": "myInfo", "token": token}), timeout=15)
         body = body.strip()
         # firefox 返回 1|... 表示成功，0|... 表示错误
         if body.startswith("1"):
-            return True, f"firefox.fun 连通 ✓ {body[:80]}"
+            return True, "firefox.fun 连通，APIName 与 token 已配置，token 有效"
         return False, f"firefox.fun 返回：{body[:80]}（token 可能无效）"
     except Exception as e:
         return False, f"firefox.fun 请求失败：{str(e)[:80]}"
@@ -668,9 +685,16 @@ def api_asset_email(request: Request, index: int | None = None, format: str = "j
     denied = _asset_api_denied(request)
     if denied:
         return denied
-    from common import asset_store
-
-    return _asset_result(lambda: asset_store.get_email(index=index, output_format=format))
+    return _asset_result(
+        lambda: _get_verified_asset(
+            "outlook",
+            lambda asset_store: asset_store.get_email(
+                index=index,
+                output_format=format,
+                verified_only=True,
+            ),
+        )
+    )
 
 
 @app.get("/api/assets/cookies/{platform}")
@@ -683,10 +707,16 @@ def api_asset_cookie(
     denied = _asset_api_denied(request)
     if denied:
         return denied
-    from common import asset_store
-
     return _asset_result(
-        lambda: asset_store.get_platform_asset(platform, output_format=format, index=index)
+        lambda: _get_verified_asset(
+            platform,
+            lambda asset_store: asset_store.get_platform_asset(
+                platform,
+                output_format=format,
+                index=index,
+                verified_only=True,
+            ),
+        )
     )
 
 
@@ -743,6 +773,36 @@ def _set_asset_scan_progress(value):
     }
 
 
+def _scan_assets_sync(platforms, concurrency=4, timeout=15, progress=None):
+    from common import asset_scanner
+
+    with ASSET_SCAN_LOCK:
+        return asset_scanner.scan_pool(
+            platforms=platforms,
+            concurrency=concurrency,
+            timeout=timeout,
+            progress=progress,
+        )
+
+
+def _get_verified_asset(platform, callback):
+    """Scan the requested pool immediately before exposing a credential."""
+    from common import asset_store
+
+    normalized = str(platform or "").strip().lower()
+    if normalized not in {"outlook", "chatgpt", "claude", "grok", "kiro"}:
+        raise asset_store.AssetError("platform 仅支持 outlook、chatgpt、claude、grok、kiro")
+    if ASSET_SCAN_STATE["running"]:
+        raise asset_store.AssetUnverified("号池扫描正在运行，请等待扫描结束后再次读取资产")
+    with ASSET_SCAN_LOCK:
+        if ASSET_SCAN_STATE["running"]:
+            raise asset_store.AssetUnverified("号池扫描正在运行，请等待扫描结束后再次读取资产")
+        from common import asset_scanner
+
+        asset_scanner.scan_pool(platforms=[normalized], concurrency=4, timeout=15)
+        return callback(asset_store)
+
+
 async def _run_asset_scan(platforms, concurrency, timeout, emails=None):
     global ASSET_SCAN_TASK
     from common import asset_scanner
@@ -754,7 +814,7 @@ async def _run_asset_scan(platforms, concurrency, timeout, emails=None):
 
     try:
         report = await asyncio.to_thread(
-            asset_scanner.scan_pool,
+            _scan_assets_sync,
             platforms=platforms,
             concurrency=concurrency,
             timeout=timeout,
@@ -1480,7 +1540,17 @@ def api_update():
 @app.get("/api/status")
 def api_status():
     provider = _fingerprint_provider()
-    if provider in {"bundled", "embedded", "local", "custom", "chrome", "chromium"}:
+    if provider in {"ruyipage", "ruyi", "firefox_bidi"}:
+        try:
+            from ruyipage import resolve_firefox_path
+
+            bb = resolve_firefox_path(
+                _read_config_val("RUYIPAGE_BROWSER_PATH", "") or None
+            ) or ""
+        except Exception:
+            bb = ""
+        provider_label = "ruyipage"
+    elif provider in {"bundled", "embedded", "local", "custom", "chrome", "chromium"}:
         from common.bundled_browser import find_browser_path
 
         bb = find_browser_path()
@@ -1511,7 +1581,7 @@ def api_status():
         "version": WEBUI_VERSION,
         "root": ROOT,
         "data_root": os.environ.get("REG_FACTORY_DATA_DIR") or ROOT,
-        "bitbrowser": os.path.isfile(bb) if provider_label in {"bundled", "custom"} else _http_alive(bb),
+        "bitbrowser": os.path.isfile(bb) if provider_label in {"ruyipage", "bundled", "custom"} else _http_alive(bb),
         "browser_provider": provider_label,
         "clash": network,
         "network": network,

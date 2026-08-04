@@ -68,6 +68,8 @@ async def main():
                         help="add-phone 半自动:脚本填该号(E.164,如 +8618001623966)+选 WhatsApp+发送,你只手输码")
     parser.add_argument("--phone-skip", type=int, default=0,
                         help="先赌免手机直连的次数(默认0=直接一次性接码,不赌免手机)：>0 时每次关窗重开+重登重摇风控，弹手机就跳过，用尽才接码")
+    parser.add_argument("--sms-provider", choices=["auto", "smsman", "firefox", "hero"], default="auto",
+                        help="自动接码平台；auto 按 sms-man、firefox.fun、hero-sms 顺序")
     parser.add_argument("--skip-cpa", action="store_true",
                         help="不把 OAuth 凭据推到 CPA(默认 CPA 配好就推,带真 refresh_token)")
     parser.add_argument("--keep", action="store_true", help="失败保留窗口")
@@ -152,7 +154,7 @@ async def main():
                 skip_timeout=120, phone_timeout=timeout,
                 debug_dump="oauth_authorize_dump.html",
                 manual_phone=args.manual_phone, semi_phone=args.phone,
-                reset_page=reset_fn)
+                reset_page=reset_fn, sms_provider=args.sms_provider)
             if reset_fn is not None:
                 try:
                     await reset_fn.cleanup()

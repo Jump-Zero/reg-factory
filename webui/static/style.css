@@ -40,12 +40,15 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 }
 .brand-row,.top-actions{display:flex;align-items:center;gap:12px;min-width:0}
 .top-actions{justify-content:flex-end}
+.guide-button,
 .update-button{
   min-height:30px;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;
   border:1px solid var(--line-strong);border-radius:6px;background:transparent;
   color:var(--muted);font-size:11px;white-space:nowrap;cursor:pointer
 }
+.guide-button:hover,
 .update-button:hover:not(:disabled){border-color:var(--accent);color:#9fc2ff;background:var(--accent-soft)}
+.guide-short{display:none}
 .update-button:disabled{opacity:.55;cursor:not-allowed}
 .update-button.running{border-color:rgba(77,141,247,.55);color:#9fc2ff;cursor:wait}
 .update-button.running>span:first-child{animation:update-spin 1s linear infinite}
@@ -564,6 +567,60 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   color:#fff;font-size:20px;line-height:1;cursor:pointer
 }
 
+/* First-run guide */
+.tour-layer[hidden]{display:none}
+.tour-layer{position:fixed;inset:0;z-index:100;pointer-events:none}
+.tour-curtain{
+  position:fixed;z-index:100;background:rgba(5,6,8,.78);pointer-events:auto;
+  transition:left .16s ease,top .16s ease,width .16s ease,height .16s ease
+}
+.tour-spotlight{
+  position:fixed;z-index:101;border:2px solid #7aa9f8;border-radius:7px;
+  box-shadow:0 0 0 1px rgba(122,169,248,.25),0 8px 28px rgba(0,0,0,.38);
+  pointer-events:none;transition:left .16s ease,top .16s ease,width .16s ease,height .16s ease
+}
+.tour-popover{
+  position:fixed;z-index:102;display:grid;grid-template-rows:auto auto auto minmax(0,1fr) auto;
+  width:min(390px,calc(100vw - 24px));max-height:min(620px,calc(100dvh - 24px));padding:16px;
+  overflow:hidden;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);
+  color:var(--text);box-shadow:0 20px 70px rgba(0,0,0,.58);pointer-events:auto
+}
+.tour-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.tour-section{color:#8eb8ff;font-size:10px;font-weight:750;text-transform:uppercase}
+.tour-close{
+  min-height:28px;padding:4px 8px;border:1px solid var(--line);border-radius:5px;
+  background:transparent;color:var(--muted);font-size:10.5px;cursor:pointer
+}
+.tour-close:hover{border-color:var(--line-strong);color:var(--text);background:var(--surface-hover)}
+.tour-progress{display:flex;align-items:center;gap:9px;margin:10px 0 13px;color:var(--quiet);font:10px var(--mono)}
+.tour-progress-track{height:3px;flex:1;overflow:hidden;border-radius:2px;background:var(--line)}
+.tour-progress-track span{display:block;height:100%;background:var(--accent);transition:width .18s ease}
+.tour-popover h2{margin:0;font-size:17px;line-height:1.35;font-weight:680;overflow-wrap:anywhere}
+.tour-body{min-height:0;margin-top:9px;padding-right:2px;overflow-y:auto;color:#c8ccd2;font-size:12px;line-height:1.6}
+.tour-body p{margin:0 0 9px}
+.tour-body p:last-child{margin-bottom:0}
+.tour-body strong{color:var(--text)}
+.tour-body code{
+  padding:1px 4px;border:1px solid var(--line);border-radius:4px;background:var(--surface-raised);
+  color:#9fc2ff;font:10.5px var(--mono);overflow-wrap:anywhere
+}
+.tour-list{margin:0 0 9px;padding-left:20px}
+.tour-list li{margin:0 0 6px;padding-left:2px}
+.tour-note{padding:8px 9px;border-left:3px solid var(--amber);background:rgba(229,168,75,.08);color:#efcb91}
+.tour-actions{display:flex;align-items:center;gap:7px;margin-top:14px;padding-top:13px;border-top:1px solid var(--line)}
+.tour-action-spacer{flex:1}
+.tour-button{
+  min-height:31px;padding:5px 10px;border:1px solid var(--line-strong);border-radius:6px;
+  background:var(--surface-raised);color:var(--text);font-size:10.5px;font-weight:600;white-space:nowrap;cursor:pointer
+}
+.tour-button:hover:not(:disabled){border-color:var(--accent);background:var(--accent-soft);color:#a9c8ff}
+.tour-button:disabled{opacity:.35;cursor:not-allowed}
+.tour-button-primary{border-color:var(--accent);background:var(--accent);color:#fff}
+.tour-button-primary:hover:not(:disabled){background:#619afb;color:#fff}
+.tour-button-quiet{border-color:transparent;background:transparent;color:var(--quiet);font-weight:500}
+.tour-button[hidden]{display:none}
+.tour-target-active{scroll-margin:72px}
+
 @media (max-width:900px){
   body{grid-template-rows:52px minmax(0,1fr)}
   .topbar{padding:0 10px}
@@ -602,6 +659,9 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   .health-summary{min-height:28px;padding:3px 8px;font-size:10.5px}
   .update-button{padding:4px 8px}
   .update-button>span:last-child{display:none}
+  .guide-button{padding:4px 8px}
+  .guide-long{display:none}
+  .guide-short{display:inline}
   .running{display:none}
   .content{padding:8px}
   #view-run{gap:8px;height:auto;min-height:100%}
@@ -671,4 +731,13 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   .network-actions .btn-run,.network-actions .btn-secondary{width:100%;min-height:41px}
   .network-message{margin:2px 0 0}
   .contact-dialog{padding:9px}
+  .tour-popover{max-height:min(68dvh,560px);padding:13px}
+  .tour-popover h2{font-size:15px}
+  .tour-body{font-size:11.5px}
+  .tour-actions{display:grid;grid-template-columns:1fr 1fr}
+  .tour-action-spacer{display:none}
+  .tour-button{width:100%;white-space:normal}
+  #btn-tour-exit,#btn-tour-skip-section{grid-column:1/-1}
+  #btn-tour-prev{grid-column:1}
+  #btn-tour-next{grid-column:2}
 }

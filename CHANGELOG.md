@@ -1,5 +1,51 @@
 ﻿# 更新日志
 
+## 2026-08-04 - 1.2.19
+
+**RuyiPage 默认浏览器和 ChatGPT 网页端修复**
+- 新增 RuyiPage Firefox WebDriver BiDi 浏览器，并设为共享网页流程的默认浏览器；首次使用可从 WebUI 一键安装 runtime，也可配置自定义 Firefox 路径。
+- ChatGPT iCloud 注册修复邮箱验证码提交后的 HTML Route Error，页面会点击 Retry 并按实际表单状态继续，不再盲目重复提交旧验证码。
+- WebUI 的 ChatGPT 注册表单突出 iCloud 邮箱来源和注册后直接导入 SUB2API 选项，补充目标分组配置。
+- Codex OAuth 在 ChatGPT cookie 未传递到新授权域时自动完成 iCloud 邮箱重新登录，并支持 RuyiPage 的 localhost 回调捕获、cookie 字段转换和导航硬超时。
+- Codex 手机验证支持在 Hero SMS、SMS-Man、firefox.fun 和自动切换之间明确选择；无回码时释放号码并重新登录后继续换号。
+- firefox.fun 配置补充 APIName 字段，一键测试改用官方 myInfo 动作验证 token；取号继续按官方要求使用 token 和项目 ID。
+- Chromium 专用的旧注册流程继续自动使用内置浏览器，避免将不兼容流程强行切换到 Firefox。
+
+---
+
+## 2026-08-04 - 1.2.18
+
+**新手网络引导和健康资产 API**
+- 新手指南补充 Clash Verge 的 External Controller 开启路径、监听地址、控制密码、mixed-port、代理组与面板字段对应关系。
+- 增加动态住宅 IP 的单代理、代理池、换 IP 接口说明，并说明平台出口覆盖中的继承全局选择方式。
+- 环境配置路线说明 .env 功能分组、未保存配置的一键连通测试和保存生效范围。
+- 新手指南新增资产 API 章节，介绍扫描状态、访问密钥、顺序或 index 取用、下游格式和响应中的 verification 信息。
+- 资产 API 每次输出前在线扫描对应平台，只从本次检测正常的健康资产池返回邮箱、Cookie 或凭据；封禁、过期、受限、凭据异常和未验证资产不会被返回。
+- 号池扫描和资产 API 增加 Kiro 支持。在线检测只证明检测时刻可用，后续状态仍需以目标服务的实际响应为准。
+
+---
+
+## 2026-08-04 - 1.2.17
+
+**WebUI 新手指南**
+- 首次打开控制面板时启动交互式新手指南，按实际界面依次介绍任务库、网络出口、浏览器、邮箱接码、短信接码和任务运行。
+- 增加 Clash API 专项配置说明，覆盖 External Controller、Secret、mixed-port、代理组和出口测试。
+- 教程可跳过单个配置阶段或整套指南，完成状态仅保存在当前浏览器，并可从顶栏随时重新打开。
+- 任务步骤说明平台选择、SUB2API 和 chatgpt2api 相关勾选项、现成邮箱用法、dry-run 预览和日志结果判断。
+- 桌面与移动端均使用响应式遮罩和目标高亮，教程展示过程不会保存配置或自动启动任务。
+
+---
+
+## 2026-08-04 - 1.2.16
+
+**ChatGPT iCloud 邮箱支持**
+- 新增 `icloud` 邮箱 provider，支持 `icloud-code + service=openai` 申请地址，并通过 `/api/user/mail` 轮询 ChatGPT 验证码。
+- ChatGPT 新增 `--email-provider icloud`；WebUI 增加邮箱来源、API 地址、API key、类型和 service 配置项。
+- 正确处理 iCloud API 的空邮件响应，不会把 `{code: 0, message: success}` 误当成验证码邮件。
+- API key 仅从 `.env` 或进程环境读取，示例配置不包含真实密钥；文档站 `email.manageh.shop` 与实际 API 主机 `mail.no-replyca.xyz` 已明确区分。
+
+---
+
 ## 2026-08-02 - 1.2.15
 
 **WebUI Grok OAuth 路径修复**

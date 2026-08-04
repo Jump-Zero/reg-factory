@@ -236,6 +236,58 @@ class ChatGPTFlowTests(unittest.TestCase):
         self.assertEqual(error["code"], "unsupported_country_region_territory")
         self.assertEqual(error["status"], 403)
 
+    def test_email_verification_html_route_error_is_detected(self):
+        body = MagicMock()
+        body.inner_text = AsyncMock(
+            return_value=(
+                'Route Error (400 Invalid content type: text/html; charset=UTF-8)'
+            )
+        )
+        page = MagicMock()
+        page.locator.return_value = body
+
+        detected = asyncio.run(
+            register_chatgpt.is_email_verification_route_error(page)
+        )
+
+        self.assertTrue(detected)
+
+    def test_email_verification_route_error_clicks_retry(self):
+        page = MagicMock()
+        page.url = "https://auth.openai.com/email-verification"
+        code_input = MagicMock()
+        code_input.first = code_input
+        code_input.count = AsyncMock(side_effect=[1, 0])
+        page.locator.return_value = code_input
+
+        with (
+            patch.object(
+                register_chatgpt,
+                "_fill_and_submit_email_code",
+                AsyncMock(return_value=True),
+            ),
+            patch.object(
+                register_chatgpt,
+                "is_email_verification_route_error",
+                AsyncMock(side_effect=[True, False]),
+            ),
+            patch.object(
+                register_chatgpt,
+                "click_any_exact",
+                AsyncMock(side_effect=lambda _page, labels, **_kwargs: "重试" in labels),
+            ) as click,
+            patch.object(register_chatgpt, "dump_state", AsyncMock()),
+            patch.object(register_chatgpt.asyncio, "sleep", AsyncMock()),
+        ):
+            page.url = "https://chatgpt.com/"
+            asyncio.run(
+                register_chatgpt.submit_email_verification_code(
+                    page, 'input[name="code"]', "519907"
+                )
+            )
+
+        self.assertTrue(any("重试" in call.args[1] for call in click.await_args_list))
+
     def test_blank_codex_numeric_env_uses_default(self):
         with patch.dict(os.environ, {"CODEX_SMS_TIMEOUT": ""}):
             self.assertEqual(register_chatgpt._env_int("CODEX_SMS_TIMEOUT", 150), 150)

@@ -23,8 +23,13 @@ def _selected_provider():
         os.environ.get("FINGERPRINT_BROWSER")
         or os.environ.get("BROWSER_PROVIDER")
         or FINGERPRINT_BROWSER
-        or "bitbrowser"
+        or "ruyipage"
     ).strip().lower()
+
+
+def selected_browser_provider():
+    """Return the live provider selection, including WebUI environment updates."""
+    return _selected_provider()
 
 
 def _use_adspower():
@@ -35,6 +40,13 @@ class BitBrowser:
     provider_name = "bitbrowser"
 
     def __new__(cls, api_base=None):
+        if cls is BitBrowser and _selected_provider() in {
+            "ruyipage", "ruyi", "firefox_bidi",
+        }:
+            # Legacy flows still call Playwright Chromium CDP directly. They use
+            # the local Chromium adapter until they migrate to the shared layer.
+            from common.bundled_browser import BundledBrowser
+            return BundledBrowser(api_base=api_base)
         if cls is BitBrowser and _selected_provider() in {
             "bundled", "embedded", "local", "custom", "chrome", "chromium",
         }:

@@ -179,6 +179,27 @@ class WebUIEnvReloadTests(unittest.TestCase):
             self.assertIsNone(server._asset_api_denied(by_bearer))
             self.assertEqual(server._asset_api_denied(denied).status_code, 401)
 
+    def test_asset_api_scans_before_returning_an_email(self):
+        from common import asset_scanner, asset_store
+
+        events = []
+
+        def scan_pool(**_kwargs):
+            events.append("scan")
+            return {"items": []}
+
+        def get_email(**kwargs):
+            events.append("read")
+            self.assertTrue(kwargs["verified_only"])
+            return {"kind": "email", "verification": {"status": "normal"}}
+
+        with patch.object(asset_scanner, "scan_pool", side_effect=scan_pool):
+            with patch.object(asset_store, "get_email", side_effect=get_email):
+                result = server.api_asset_email(FakeJSONRequest())
+
+        self.assertEqual(events, ["scan", "read"])
+        self.assertEqual(result["verification"]["status"], "normal")
+
 
 class WebUIRunStreamTests(unittest.IsolatedAsyncioTestCase):
     def test_task_process_matcher_excludes_webui_and_other_python_projects(self):
@@ -288,6 +309,19 @@ class WebUIAssetScanTests(unittest.IsolatedAsyncioTestCase):
     async def test_asset_scan_rejects_unknown_platform(self):
         response = await server.api_asset_scan_start(FakeJSONRequest({"platforms": ["unknown"]}))
         self.assertEqual(response.status_code, 400)
+
+    async def test_asset_scan_accepts_kiro(self):
+        from common import asset_scanner
+
+        report = {"items": [], "summary": {"total": 0, "statuses": {}, "platforms": {}}}
+        with patch.object(asset_scanner, "get_report", return_value=report):
+            with patch.object(asset_scanner, "scan_pool", return_value=report):
+                started = await server.api_asset_scan_start(
+                    FakeJSONRequest({"platforms": ["kiro"], "concurrency": 2})
+                )
+                task = server.ASSET_SCAN_TASK
+                self.assertTrue(started["ok"])
+                await task
 
 
 
