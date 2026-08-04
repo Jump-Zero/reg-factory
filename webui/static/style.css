@@ -364,6 +364,20 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .asset-message{min-width:0;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
 .asset-message.ok{color:var(--green)}
 .asset-message.bad{color:var(--red)}
+
+/* ─── 悬浮通知面板 ─── */
+.rf-toast-stack{position:fixed;bottom:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;max-width:380px;pointer-events:none}
+.rf-toast{pointer-events:auto;background:var(--surface-raised);border:1px solid var(--line-strong);border-radius:8px;padding:10px 14px 10px 12px;font-size:12px;line-height:1.5;color:var(--text);box-shadow:0 4px 16px rgba(0,0,0,.4);display:flex;align-items:flex-start;gap:8px;animation:rf-toast-in .25s ease;overflow-wrap:anywhere}
+.rf-toast.ok{border-left:3px solid var(--green)}
+.rf-toast.bad{border-left:3px solid var(--red)}
+.rf-toast.info{border-left:3px solid var(--accent)}
+.rf-toast.warn{border-left:3px solid var(--amber)}
+.rf-toast-body{flex:1;min-width:0}
+.rf-toast-close{flex-shrink:0;background:none;border:0;color:var(--quiet);cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;border-radius:4px}
+.rf-toast-close:hover{color:var(--text);background:var(--surface-hover)}
+@keyframes rf-toast-in{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+.rf-toast.removing{animation:rf-toast-out .2s ease forwards}
+@keyframes rf-toast-out{to{opacity:0;transform:translateX(20px)}}
 .asset-pool-head{align-items:center}
 .asset-scan-actions{display:flex;align-items:flex-end;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 .asset-scan-concurrency{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:10.5px}

@@ -513,6 +513,10 @@ ENV_SCHEMA = [
         {"key": "WEBCHAT2API_URL", "help": "webchat2api 地址(用 Grok 时)"},
         {"key": "WEBCHAT2API_KEY", "secret": True, "help": "webchat2api key"},
     ]},
+    {"group": "OmniRoute(Kiro 账号导入)", "items": [
+        {"key": "OMNIROUTE_URL", "help": "OmniRoute 管理地址，如 http://localhost:20128"},
+        {"key": "OMNIROUTE_PASSWORD", "secret": True, "help": "OmniRoute 管理控制台登录密码"},
+    ]},
     {"group": "Codex add-phone 接码调参", "items": [
         {"key": "CODEX_PHONE_SKIP_ATTEMPTS", "default": "0", "help": "先赌免手机次数(0=直接接码)"},
         {"key": "CODEX_ADDPHONE_ATTEMPTS", "default": "2", "help": "接码换号上限次数"},

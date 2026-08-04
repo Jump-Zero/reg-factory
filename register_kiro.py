@@ -101,16 +101,49 @@ class KiroClient:
         self.client_id = ""
         self.client_secret = ""
 
-    def _headers(self, referer="", origin="", content_type="application/json"):
+    def _headers(self, referer="", origin="", content_type="application/json", fetch_site="same-origin"):
         headers = {"Accept": "application/json, text/plain, */*", "Content-Type": content_type,
                    "User-Agent": self.fp.ua, "sec-ch-ua": self.fp.sec_ua,
                    "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"',
-                   "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"}
+                   "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": fetch_site}
         if referer:
             headers["Referer"] = referer
         if origin:
             headers["Origin"] = origin
         return headers
+
+    def _nav_headers(self, referer=""):
+        """Headers for top-level page navigation (document requests)."""
+        headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                   "User-Agent": self.fp.ua, "sec-ch-ua": self.fp.sec_ua,
+                   "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"',
+                   "sec-fetch-dest": "document", "sec-fetch-mode": "navigate",
+                   "sec-fetch-site": "none" if not referer else "cross-site",
+                   "Upgrade-Insecure-Requests": "1"}
+        if referer:
+            headers["Referer"] = referer
+        return headers
+
+    def warmup(self):
+        """Visit the start page and signin page to establish session cookies before API calls."""
+        try:
+            self.session.get(
+                f"{VIEW_BASE}/start/",
+                headers=self._nav_headers(),
+                timeout=self.timeout, allow_redirects=True, verify=False,
+            )
+            time.sleep(random.uniform(0.5, 1.5))
+        except Exception:
+            pass
+        try:
+            self.session.get(
+                f"{SIGNIN_BASE}/platform/{DIRECTORY_ID}/login",
+                headers=self._nav_headers(referer=f"{VIEW_BASE}/start/"),
+                timeout=self.timeout, allow_redirects=True, verify=False,
+            )
+            time.sleep(random.uniform(0.3, 0.8))
+        except Exception:
+            pass
 
     def request(self, method, url, payload=None, headers=None, *, data=None, expected=None, allow_redirects=True):
         kwargs = {"headers": headers or self._headers(), "allow_redirects": allow_redirects, "timeout": self.timeout}
@@ -155,15 +188,25 @@ class KiroClient:
     def fetch_app_config(self):
         try:
             response = self.get(f"{SIGNIN_BASE}/assets/js/app.js", headers={"Accept": "*/*", "Referer": f"{SIGNIN_BASE}/"})
+            old_key = self.fp.key
             self.fp.update_app_js(response.text)
-        except Exception:
-            pass
+            if self.fp.key != old_key:
+                print("  [kiro] fingerprint key updated from app.js")
+            else:
+                print("  [kiro] warning: using fallback fingerprint key (app.js regex may be outdated)")
+        except Exception as e:
+            print(f"  [kiro] warning: failed to fetch app.js: {str(e)[:80]}")
 
     def portal_login(self, user_code=None):
         code = user_code or self.user_code
         redirect = urllib.parse.quote(f"{VIEW_BASE}/start/#/device?user_code={code}", safe="")
-        response = self.get(f"{PORTAL_BASE}/login?directory_id=view&redirect_url={redirect}",
-                            headers=self._headers(origin=VIEW_BASE, referer=f"{VIEW_BASE}/"))
+        # portal.sso.us-east-1.amazonaws.com is a different site from view.awsapps.com
+        headers = self._headers(origin=VIEW_BASE, referer=f"{VIEW_BASE}/", fetch_site="cross-site")
+        try:
+            response = self.get(f"{PORTAL_BASE}/login?directory_id=view&redirect_url={redirect}",
+                                headers=headers)
+        except KiroError as e:
+            raise KiroError(f"Portal login 被拦截 (可能IP信誉差): {e}")
         data = _json(response)
         location = str(data.get("redirectUrl") or "")
         self.workflow_handle = _query(location, "workflowStateHandle")
@@ -177,7 +220,12 @@ class KiroClient:
     def fetch_d2c(self, referer):
         parsed = urllib.parse.urlparse(referer)
         origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else SIGNIN_BASE
-        response = self.post("https://vs.aws.amazon.com/token", {}, headers=self._headers(origin=origin, referer=referer))
+        # vs.aws.amazon.com is a different site from us-east-1.signin.aws
+        headers = self._headers(origin=origin, referer=referer, fetch_site="cross-site")
+        try:
+            response = self.post("https://vs.aws.amazon.com/token", {}, headers=headers)
+        except KiroError as e:
+            raise KiroError(f"D2C token 获取被拦截 (TES风控): {e}")
         data = _json(response)
         token = str(data.get("token") or "")
         if token:
@@ -366,7 +414,7 @@ class KiroClient:
     def sso_token(self):
         redirect = urllib.parse.quote(f"{VIEW_BASE}/start/#/", safe="")
         data = _json(self.get(f"{PORTAL_BASE}/login?directory_id=view&redirect_url={redirect}",
-                              headers=self._headers(origin=VIEW_BASE, referer=f"{VIEW_BASE}/")))
+                              headers=self._headers(origin=VIEW_BASE, referer=f"{VIEW_BASE}/", fetch_site="cross-site")))
         csrf = str(data.get("csrfToken") or "")
         if csrf:
             self.session.cookies.set("loginCsrfToken", csrf)
@@ -494,15 +542,24 @@ def register_one(email, mailbox_password, mailbox_token, mailbox_client_id, args
     proxy = proxy_switch.effective_proxy_url()
     client = KiroClient(proxy=proxy, timeout=args.timeout)
     try:
+        client.warmup()
         client.fetch_app_config()
-        client.register_client(); client.register_device()
-        client.portal_login(); client.workflow_init()
+        time.sleep(random.uniform(0.3, 0.8))
+        client.register_client()
+        time.sleep(random.uniform(0.2, 0.5))
+        client.register_device()
+        time.sleep(random.uniform(0.5, 1.5))
+        client.portal_login()
+        time.sleep(random.uniform(0.3, 0.8))
+        client.workflow_init()
+        time.sleep(random.uniform(0.3, 0.6))
         status = client.submit_email(email)
         if status == "login":
             raise KiroError("邮箱已注册，跳过")
         if status != "signup":
             raise KiroError("邮箱状态无法进入注册")
         client.signup(email); client.signup_init(email); client.profile_init(); client.profile_start()
+        time.sleep(random.uniform(0.5, 1.0))
         sent_at = client.send_otp(email)
         if not mailbox_token or not mailbox_client_id:
             raise KiroError("Kiro 注册需要 Outlook refresh token 和 client id 读取验证码")

@@ -13,6 +13,37 @@ let assetScanData = null;
 let assetScanPage = 1;
 let assetScanTimer = null;
 let currentWebVersion = '';
+
+// ─── 悬浮通知系统 ───
+const _toastStack = () => document.getElementById('rf-toast-stack');
+const _toastTimers = new Map();
+function showToast(text, type='info', timeout=6000){
+  const stack = _toastStack();
+  if(!stack) return;
+  const el = document.createElement('div');
+  el.className = `rf-toast ${type}`;
+  el.innerHTML = `<div class="rf-toast-body"></div><button class="rf-toast-close" type="button" aria-label="关闭">&times;</button>`;
+  el.querySelector('.rf-toast-body').textContent = text;
+  const close = () => {
+    el.classList.add('removing');
+    const tid = _toastTimers.get(el);
+    if(tid){ clearTimeout(tid); _toastTimers.delete(el); }
+    setTimeout(()=> el.remove(), 200);
+  };
+  el.querySelector('.rf-toast-close').onclick = close;
+  stack.appendChild(el);
+  if(timeout > 0) _toastTimers.set(el, setTimeout(close, timeout));
+  return el;
+}
+function showPersistentToast(text, type='info'){
+  return showToast(text, type, 0);
+}
+function updatePersistentToast(el, text, type){
+  if(!el) return showToast(text, type, 0);
+  el.className = `rf-toast ${type}`;
+  el.querySelector('.rf-toast-body').textContent = text;
+  return el;
+}
 let updateRequested = false;
 let guideActive = false;
 let guideIndex = 0;
@@ -373,10 +404,18 @@ function assetHeaders(json=false){
 }
 
 function setAssetMessage(target, text, ok=null){
+  // 同时写内联元素（保持兼容）和悬浮通知
   const message = $(target);
-  message.textContent = text || '';
-  message.classList.toggle('ok', ok===true);
-  message.classList.toggle('bad', ok===false);
+  if(message){
+    message.textContent = text || '';
+    message.classList.toggle('ok', ok===true);
+    message.classList.toggle('bad', ok===false);
+  }
+  // 悬浮通知：只对扫描/导入/删除/分裂相关消息弹出
+  if(target === '#asset-scan-msg' && text){
+    const type = ok===true ? 'ok' : ok===false ? 'bad' : 'info';
+    showToast(text, type, ok===true ? 5000 : 8000);
+  }
 }
 
 function updateAssetFormats(){
@@ -771,7 +810,7 @@ $('#btn-copy-curl').onclick = ()=>copyText($('#asset-curl-example').textContent,
 $('#btn-scan-all').onclick = ()=>startAssetScan(true);
 $('#btn-scan-current').onclick = ()=>startAssetScan(false);
 $('#btn-scan-selected').onclick = ()=>startAssetScanSelected();
-$('#asset-scan-platform').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); };
+$('#asset-scan-platform').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); updateScanSelectAllState(); };
 $('#asset-scan-status').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); };
 $$('[data-scan-status]').forEach(button=>button.onclick=()=>{
   $('#asset-scan-status').value = button.dataset.scanStatus;
@@ -809,6 +848,11 @@ function updateScanSelectAllState(){
     splitBtn.disabled = checked.length === 0;
     splitBtn.textContent = checked.length > 0 ? `分裂选中(${checked.length})` : '分裂选中';
   }
+  const omniBtn = $('#btn-omni-import');
+  if(omniBtn){
+    omniBtn.disabled = checked.length === 0;
+    omniBtn.textContent = checked.length > 0 ? `导入 OmniRoute(${checked.length})` : '导入 OmniRoute';
+  }
 }
 
 $('#asset-scan-check-all').onchange = function(){
@@ -826,7 +870,7 @@ $('#btn-delete-scan-mails').onclick = async ()=>{
   const emails = getCheckedScanEmails();
   if(!emails.length) return;
   const platform = $('#asset-scan-platform').value;
-  const platformLabels = {outlook:'Outlook',chatgpt:'ChatGPT',claude:'Claude',grok:'Grok'};
+  const platformLabels = {outlook:'Outlook',chatgpt:'ChatGPT',claude:'Claude',grok:'Grok',kiro:'Kiro'};
   const plabel = platformLabels[platform] || platform;
   let confirmMsg;
   if(platform === 'outlook'){
@@ -893,6 +937,40 @@ $('#btn-split-selected').onclick = async ()=>{
   btn.disabled = false;
   btn.textContent = '分裂选中';
   await Promise.all([refreshAssetSummary(), loadAssetScan(), loadMailpool()]);
+};
+
+// ---------------------------------------------------------------- Kiro → OmniRoute 导入
+$('#btn-omni-import').onclick = async ()=>{
+  const emails = getCheckedScanEmails();
+  if(!emails.length) return;
+  if(!confirm(`确认将选中的 ${emails.length} 个账号导入到 OmniRoute？\n（需先在环境配置中填写 OMNIROUTE_URL 和密码）`)) return;
+  const btn = $('#btn-omni-import');
+  btn.disabled = true;
+  btn.textContent = '导入中…';
+  const toastEl = showPersistentToast('正在导入 OmniRoute…', 'info');
+  try{
+    const r = await (await fetch('/api/kiro/omni-import',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({emails})})).json();
+    if(r.ok){
+      let msg = r.msg;
+      if(r.skipped && r.skipped.length > 0){
+        msg += `（跳过 ${r.skipped.length} 个: ${r.skipped.join('; ')}）`;
+      }
+      updatePersistentToast(toastEl, msg, 'ok');
+      setTimeout(()=>{ const e=toastEl; if(e){e.classList.add('removing');setTimeout(()=>e.remove(),200);} }, 5000);
+    } else {
+      let msg = r.msg || '导入失败';
+      if(r.skipped && r.skipped.length > 0){
+        msg += `（跳过: ${r.skipped.join('; ')}）`;
+      }
+      updatePersistentToast(toastEl, msg, 'bad');
+    }
+  }catch(e){
+    updatePersistentToast(toastEl, '导入请求失败: '+e, 'bad');
+  }finally{
+    btn.disabled = false;
+    btn.textContent = '导入 OmniRoute';
+  }
 };
 
 // ---------------------------------------------------------------- Codex K12 集成通道

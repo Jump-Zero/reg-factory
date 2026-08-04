@@ -773,7 +773,7 @@ def _set_asset_scan_progress(value):
     }
 
 
-def _scan_assets_sync(platforms, concurrency=4, timeout=15, progress=None):
+def _scan_assets_sync(platforms, concurrency=4, timeout=15, progress=None, emails=None):
     from common import asset_scanner
 
     with ASSET_SCAN_LOCK:
@@ -782,6 +782,7 @@ def _scan_assets_sync(platforms, concurrency=4, timeout=15, progress=None):
             concurrency=concurrency,
             timeout=timeout,
             progress=progress,
+            emails=emails,
         )
 
 
@@ -1331,16 +1332,16 @@ def _delete_platform_credentials(platform, targets):
 @app.post("/api/mailpool/delete")
 async def api_mailpool_delete(request: Request):
     """批量删除选中邮箱。
-    body: {"emails": [...], "platform": "outlook"|"chatgpt"|"claude"|"grok"}
+    body: {"emails": [...], "platform": "outlook"|"chatgpt"|"claude"|"grok"|"kiro"}
     - outlook（默认）：完全删除 emails.txt + meta
-    - chatgpt/claude/grok：仅删除该平台凭据文件，不影响邮箱本身
+    - chatgpt/claude/grok/kiro：仅删除该平台凭据文件，不影响邮箱本身
     """
     data = await request.json()
     targets = set(str(e).lower() for e in (data or {}).get("emails", []))
     platform = str((data or {}).get("platform", "outlook")).strip().lower()
     if not targets:
         return {"ok": False, "msg": "未选择邮箱"}
-    if platform not in {"outlook", "chatgpt", "claude", "grok"}:
+    if platform not in {"outlook", "chatgpt", "claude", "grok", "kiro"}:
         platform = "outlook"
 
     if platform == "outlook":
@@ -1380,6 +1381,153 @@ async def api_mailpool_delete(request: Request):
             "cleaned_accounts": result["cleaned_accounts"],
             "cleaned_uploads": result["cleaned_uploads"],
         }
+
+
+# ============================================================ Kiro → OmniRoute 导入
+@app.post("/api/kiro/omni-import")
+async def api_kiro_omni_import(request: Request):
+    """把选中的 Kiro 账号导入到 OmniRoute。
+    OmniRoute API:
+      1. POST /api/auth/login {"password": "..."} → 获取 auth_token cookie
+      2. POST /api/oauth/kiro/import {"refreshToken": "...", "region": "...", "clientId": "...", "clientSecret": "..."} → 逐个导入
+    body: {"emails": ["email1@outlook.com", ...]}
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    emails = (data or {}).get("emails") or []
+    if not emails:
+        return JSONResponse({"ok": False, "msg": "未选择任何账号"})
+
+    omni_url = _read_config_val("OMNIROUTE_URL", "").strip().rstrip("/")
+    omni_password = _read_config_val("OMNIROUTE_PASSWORD", "").strip()
+    if not omni_url:
+        return JSONResponse({"ok": False, "msg": "未配置 OMNIROUTE_URL，请到环境配置页填写"})
+
+    token_dir = os.path.join(
+        ROOT, _read_config_val("TOKEN_OUTPUT_DIR", "tokens"), "kiro"
+    )
+
+    import glob as _glob
+    accounts = []
+    skipped = []
+    for email in emails:
+        token_path = os.path.join(token_dir, f"{email}.account.json")
+        if not os.path.isfile(token_path):
+            local = email.split("@")[0].split("+")[0]
+            matches = _glob.glob(os.path.join(token_dir, f"{local}*.account.json"))
+            if matches:
+                token_path = matches[0]
+            else:
+                skipped.append(f"{email}: token 文件不存在")
+                continue
+        try:
+            with open(token_path, encoding="utf-8") as f:
+                token_data = json.load(f)
+            refresh_token = token_data.get("refreshToken", "")
+            if not refresh_token:
+                skipped.append(f"{email}: 缺少 refreshToken")
+                continue
+            account = {
+                "email": email,
+                "refreshToken": refresh_token,
+                "region": token_data.get("region", "us-east-1"),
+            }
+            client_id = token_data.get("clientId")
+            client_secret = token_data.get("clientSecret")
+            if client_id and client_secret:
+                account["clientId"] = client_id
+                account["clientSecret"] = client_secret
+            accounts.append(account)
+        except Exception as e:
+            skipped.append(f"{email}: {e}")
+
+    if not accounts:
+        return JSONResponse({"ok": False, "msg": "没有可导入的账号", "skipped": skipped})
+
+    try:
+        import requests as _requests
+        session = _requests.Session()
+
+        # 1. 登录 OmniRoute 获取 auth cookie
+        login_resp = session.post(
+            f"{omni_url}/api/auth/login",
+            json={"password": omni_password},
+            timeout=15,
+        )
+        if not login_resp.ok:
+            try:
+                err_data = login_resp.json()
+                raw_err = err_data.get("error", "") if isinstance(err_data, dict) else ""
+                if isinstance(raw_err, dict):
+                    err = raw_err.get("message", str(raw_err))
+                else:
+                    err = str(raw_err)
+            except Exception:
+                err = ""
+            return JSONResponse({
+                "ok": False,
+                "msg": f"OmniRoute 登录失败: HTTP {login_resp.status_code} {err}",
+                "skipped": skipped,
+            })
+
+        # 2. 逐个导入 Kiro 账号
+        success_count = 0
+        errors = []
+        for acc in accounts:
+            import_body = {
+                "refreshToken": acc["refreshToken"],
+                "region": acc.get("region", "us-east-1"),
+            }
+            if acc.get("clientId") and acc.get("clientSecret"):
+                import_body["clientId"] = acc["clientId"]
+                import_body["clientSecret"] = acc["clientSecret"]
+
+            import_resp = session.post(
+                f"{omni_url}/api/oauth/kiro/import",
+                json=import_body,
+                timeout=30,
+            )
+            if import_resp.ok:
+                success_count += 1
+            else:
+                try:
+                    err_data = import_resp.json()
+                    raw_err = err_data.get("error", "") if isinstance(err_data, dict) else ""
+                    if isinstance(raw_err, dict):
+                        err_msg = raw_err.get("message", str(raw_err))
+                    else:
+                        err_msg = str(raw_err)
+                except Exception:
+                    err_msg = ""
+                errors.append(f"{acc['email']}: {err_msg or f'HTTP {import_resp.status_code}'}")
+
+        if success_count > 0:
+            msg = f"成功导入 {success_count}/{len(accounts)} 个账号到 OmniRoute"
+            if errors:
+                msg += f"（{len(errors)} 个失败: {'; '.join(errors)}）"
+            return JSONResponse({
+                "ok": True,
+                "msg": msg,
+                "created": success_count,
+                "total": len(accounts),
+                "skipped": skipped,
+                "errors": errors,
+            })
+        else:
+            return JSONResponse({
+                "ok": False,
+                "msg": f"导入全部失败: {'; '.join(errors)}",
+                "skipped": skipped,
+                "errors": errors,
+            })
+    except Exception as e:
+        return JSONResponse({
+            "ok": False,
+            "msg": f"请求 OmniRoute 失败: {e}",
+            "skipped": skipped,
+        })
 
 
 # ============================================================ sms-man 接码助手

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
-<link rel="stylesheet" href="/static/style.css?v=20260804-merge-1">
+<link rel="stylesheet" href="/static/style.css?v=20260804-toast-1">
 </head>
 <body>
 <header class="topbar">
@@ -240,6 +240,7 @@
             </label>
             <button id="btn-split-selected" class="btn-secondary" type="button" disabled>分裂选中</button>
             <button id="btn-delete-scan-mails" class="btn-danger" type="button" disabled>删除选中</button>
+            <button id="btn-omni-import" class="btn-secondary" type="button" disabled>导入 OmniRoute</button>
             <span id="asset-scan-msg" class="asset-message" role="status" aria-live="polite"></span>
           </div>
 
@@ -441,6 +442,8 @@
   </section>
 </div>
 
-<script src="/static/app.js?v=20260804-merge-1"></script>
+<div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
+
+<script src="/static/app.js?v=20260804-toast-1"></script>
 </body>
 </html>
