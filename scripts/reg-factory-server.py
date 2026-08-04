@@ -125,17 +125,38 @@ def _running_data_root(requested: int = 8799) -> Path | None:
     return None
 
 
+def _portable_ancestor_data_root() -> Path | None:
+    """Find an existing data root above an extracted portable package."""
+    if not getattr(sys, "frozen", False):
+        return None
+    install_dir = Path(sys.executable).resolve().parent
+    candidates = [install_dir, *list(install_dir.parents)[:3]]
+    for candidate in candidates:
+        if not (candidate / ".env").is_file():
+            continue
+        if any(
+            (candidate / marker).exists()
+            for marker in (".git", "emails.txt", "cookies", "tokens")
+        ):
+            return candidate.resolve()
+    return None
+
+
 def _adopt_running_data_root() -> None:
     if not getattr(sys, "frozen", False) or "REG_FACTORY_DATA_DIR" in os.environ:
         return
     candidate = _running_data_root()
+    source = "现有实例"
+    if candidate is None:
+        candidate = _portable_ancestor_data_root()
+        source = "便携包上级目录"
     if candidate is None:
         return
     os.environ["REG_FACTORY_DATA_DIR"] = str(candidate)
     env_path = candidate / ".env"
     if env_path.is_file() and "REG_FACTORY_ENV_FILE" not in os.environ:
         os.environ["REG_FACTORY_ENV_FILE"] = str(env_path)
-    print(f"[reg-factory] 已沿用现有资产目录：{candidate}", flush=True)
+    print(f"[reg-factory] 已沿用{source}的资产目录：{candidate}", flush=True)
 
 
 def _open_when_ready(port: int) -> None:

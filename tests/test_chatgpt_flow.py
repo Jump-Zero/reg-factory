@@ -12,6 +12,125 @@ import oauth_codex
 
 
 class ChatGPTFlowTests(unittest.TestCase):
+    def test_age_selector_does_not_capture_generic_number_inputs(self):
+        self.assertNotIn('input[type="number"]', register_chatgpt._AGE_SELECTOR)
+        self.assertIn('name="age"', register_chatgpt._AGE_SELECTOR)
+
+    def test_birthday_part_handles_camel_case_without_misreading_birthday(self):
+        self.assertIsNone(register_chatgpt._birthday_part("birthday"))
+        self.assertEqual(
+            register_chatgpt._birthday_part("birthdayMonth"), "month"
+        )
+        self.assertEqual(register_chatgpt._birthday_part("dob-year"), "year")
+
+    def test_single_birthday_text_field_is_filled(self):
+        async def exercise():
+            field = MagicMock()
+            field.get_attribute = AsyncMock(
+                side_effect=lambda name: {
+                    "type": "text",
+                    "name": "birthday",
+                    "placeholder": "MM/DD/YYYY",
+                }.get(name)
+            )
+            inputs = MagicMock()
+            inputs.count = AsyncMock(return_value=1)
+            inputs.first = field
+            page = MagicMock()
+            page.locator.return_value = inputs
+
+            with patch.object(
+                register_chatgpt,
+                "_keyboard_fill_control",
+                AsyncMock(return_value=True),
+            ) as fill, patch.object(
+                register_chatgpt, "_blur_control", AsyncMock()
+            ), patch.object(register_chatgpt.asyncio, "sleep", AsyncMock()):
+                result = await register_chatgpt.fill_birthday_fields(
+                    page, "Enter your date of birth"
+                )
+            return result, fill
+
+        result, fill = asyncio.run(exercise())
+        self.assertEqual(result, (True, True))
+        self.assertEqual(fill.await_args.args[2], "06/15/1995")
+
+    def test_segmented_number_birthday_fields_are_not_treated_as_age(self):
+        async def exercise():
+            fields = []
+            for name in ("birthdayMonth", "birthdayDay", "birthdayYear"):
+                field = MagicMock()
+                field.get_attribute = AsyncMock(
+                    side_effect=lambda attr, value=name: value if attr == "name" else None
+                )
+                fields.append(field)
+            inputs = MagicMock()
+            inputs.count = AsyncMock(return_value=3)
+            inputs.nth.side_effect = fields
+            page = MagicMock()
+            page.locator.return_value = inputs
+
+            with patch.object(
+                register_chatgpt,
+                "_keyboard_fill_control",
+                AsyncMock(return_value=True),
+            ) as fill, patch.object(
+                register_chatgpt, "_blur_control", AsyncMock()
+            ):
+                result = await register_chatgpt.fill_birthday_fields(
+                    page, "Birthday"
+                )
+            return result, fill
+
+        result, fill = asyncio.run(exercise())
+        self.assertEqual(result, (True, True))
+        self.assertEqual(
+            [call.args[2] for call in fill.await_args_list],
+            ["06", "15", "1995"],
+        )
+
+    def test_react_aria_birthday_segments_are_filled(self):
+        async def exercise():
+            segments_list = []
+            for label in ("Month", "Day", "Year"):
+                segment = MagicMock()
+                segment.get_attribute = AsyncMock(
+                    side_effect=lambda attr, value=label: value if attr == "aria-label" else None
+                )
+                segments_list.append(segment)
+
+            empty = MagicMock()
+            empty.count = AsyncMock(return_value=0)
+            segments = MagicMock()
+            segments.count = AsyncMock(return_value=3)
+            segments.nth.side_effect = segments_list
+            page = MagicMock()
+
+            def locator(selector):
+                if selector == register_chatgpt._BIRTHDAY_SEGMENT_SELECTOR:
+                    return segments
+                return empty
+
+            page.locator.side_effect = locator
+            with patch.object(
+                register_chatgpt,
+                "_keyboard_fill_control",
+                AsyncMock(return_value=True),
+            ) as fill, patch.object(
+                register_chatgpt, "_blur_control", AsyncMock()
+            ):
+                result = await register_chatgpt.fill_birthday_fields(
+                    page, "Let's confirm your age Birthday 08/04/2026"
+                )
+            return result, fill
+
+        result, fill = asyncio.run(exercise())
+        self.assertEqual(result, (True, True))
+        self.assertEqual(
+            [call.args[2] for call in fill.await_args_list],
+            ["6", "15", "1995"],
+        )
+
     def test_auth_step_waits_through_blank_redirect(self):
         page = MagicMock()
         page.url = "https://chatgpt.com/auth/login"

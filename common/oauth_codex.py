@@ -150,6 +150,26 @@ async def _has_phone_error(page):
     return False
 
 
+def _is_phone_flow_url(url):
+    """Return whether *url* is any step of the phone verification flow."""
+    path = urlparse(str(url or "")).path.lower()
+    return "/add-phone" in path or "/phone" in path
+
+
+def _is_authorization_advanced_url(url):
+    """Return whether OAuth has advanced beyond phone verification."""
+    value = str(url or "").lower()
+    return any(
+        marker in value
+        for marker in (
+            "/consent",
+            "sign-in-with-chatgpt",
+            "localhost:1455",
+            "127.0.0.1:1455",
+        )
+    )
+
+
 async def _select_sms_if_present(page):
     """add-phone「コードの受け取り方法」可能有 WhatsApp / SMS 切换，默认常选中 WhatsApp。
     接码平台(sms-man/firefox)发的是 **SMS**，必须切到 SMS 否则码发去 WhatsApp、脚本永远收不到。
@@ -246,25 +266,89 @@ async def _semi_fill_phone(page, full_e164):
 
 
 async def _enter_otp(page, code):
-    """验证码页:填 OTP(单框或分段)，必要时点提交。"""
-    inp = page.locator('input[autocomplete="one-time-code"], input[name*="code" i], input[inputmode="numeric"], input[type="tel"]')
+    """用真实键盘事件填入 OTP，并确认可见输入框已经接收验证码。"""
+    from common.browser import react_fill
+
+    code = str(code or "").strip()
+    selector = (
+        'input[autocomplete="one-time-code"]:visible, '
+        'input[name*="code" i]:visible, '
+        'input[inputmode="numeric"]:visible, '
+        'input[type="tel"]:visible'
+    )
+    inp = page.locator(selector)
     await inp.first.wait_for(state="visible", timeout=20000)
     cnt = await inp.count()
+
+    committed = False
     if cnt > 1 and cnt >= len(code):
-        for i, ch in enumerate(code):
-            try:
-                await inp.nth(i).fill(ch)
-            except Exception:
-                pass
+        # 分段 OTP 通常会自动跳到下一格，从第一格一次键入最接近人工操作。
+        try:
+            await inp.first.click(timeout=4000)
+            await page.keyboard.type(code, delay=70)
+            await asyncio.sleep(0.5)
+            values = [await inp.nth(i).input_value() for i in range(len(code))]
+            committed = "".join(values) == code
+        except Exception:
+            committed = not _is_phone_flow_url(page.url)
+
+        # 某些页面不自动跳格，逐格发送真实键盘事件兜底。
+        if not committed and _is_phone_flow_url(page.url):
+            values = []
+            for i, ch in enumerate(code):
+                field = inp.nth(i)
+                try:
+                    await field.click(timeout=2500)
+                    await field.press("Control+A", timeout=1500)
+                    await field.press("Delete", timeout=1500)
+                    await page.keyboard.type(ch, delay=70)
+                    values.append(await field.input_value())
+                except Exception:
+                    values.append("")
+            committed = "".join(values) == code
     else:
-        await inp.first.fill(code)
-    await asyncio.sleep(1.0)
+        committed = await react_fill(
+            page, selector, code, tries=3, delay=70, verbose=False, settle=0.5
+        )
+
+    if not committed and not _is_phone_flow_url(page.url):
+        committed = True
+    if not committed:
+        return False
+
+    await asyncio.sleep(0.5)
+    if not _is_phone_flow_url(page.url):
+        return True
+
     try:
-        b = page.locator('button[type="submit"], button[data-dd-action-name="Continue"]')
-        if await b.count() and await b.first.is_visible():
-            await b.first.click(timeout=4000)
+        button = page.locator(
+            'button[type="submit"]:visible, '
+            'button[data-dd-action-name="Continue"]:visible'
+        )
+        if await button.count() and await button.first.is_visible():
+            await button.first.click(timeout=4000)
+        else:
+            await inp.first.press("Enter", timeout=2000)
     except Exception:
-        pass
+        try:
+            await inp.first.press("Enter", timeout=2000)
+        except Exception:
+            pass
+    return True
+
+
+async def _wait_for_phone_flow_exit(page, timeout=20):
+    """Wait until phone verification reaches consent or the OAuth callback."""
+    deadline = time.time() + timeout
+    while time.time() <= deadline:
+        if _is_authorization_advanced_url(page.url):
+            return True
+        if not _is_phone_flow_url(page.url):
+            return False
+        if await _has_phone_error(page):
+            return False
+        await asyncio.sleep(0.5)
+    return False
 
 
 async def _goto_add_phone(page, auth_url, account_email, timeout=45):
@@ -290,7 +374,7 @@ async def _goto_add_phone(page, auth_url, account_email, timeout=45):
     deadline = time.time() + timeout
     while time.time() < deadline:
         url = page.url
-        if "add-phone" in url or "/phone" in url:
+        if _is_phone_flow_url(url):
             try:
                 await page.locator("#tel").wait_for(state="visible", timeout=4000)
                 return True
@@ -360,12 +444,8 @@ async def handle_add_phone(page, auth_url="", account_email="", attempts=None, s
                     break
                 print("  [add-phone] 回退到输手机号页...")
                 if not await _goto_add_phone(page, auth_url, account_email):
-                    if "add-phone" not in page.url:
-                        advanced = any(
-                            marker in page.url
-                            for marker in ("/consent", "sign-in-with-chatgpt", "localhost:1455", "127.0.0.1:1455")
-                        )
-                        if advanced:
+                    if not _is_phone_flow_url(page.url):
+                        if _is_authorization_advanced_url(page.url):
                             print("  [add-phone] 已离开 add-phone，继续处理授权回调")
                             return True
                         print(f"  [add-phone] 换号未回到手机号页: {page.url[:80]}")
@@ -388,7 +468,7 @@ async def handle_add_phone(page, auth_url="", account_email="", attempts=None, s
             print(f"  [add-phone] 尝试 {i+1}/{attempts}: +{cc}{phone}")
             await _fill_phone_continue(page, cc, phone)
             await asyncio.sleep(4)
-            if "add-phone" in page.url and await _has_phone_error(page):
+            if _is_phone_flow_url(page.url) and await _has_phone_error(page):
                 print("  [add-phone] 号码被拒，换号重试")
                 sms.release(pkey)
                 continue
@@ -397,12 +477,14 @@ async def handle_add_phone(page, auth_url="", account_email="", attempts=None, s
                 print("  [add-phone] 未收到验证码，换号重试")
                 sms.release(pkey)
                 continue
-            await _enter_otp(page, code)
-            await asyncio.sleep(4)
-            if "add-phone" not in page.url:
-                print("  [add-phone] 手机验证通过 ✅")
+            if not await _enter_otp(page, code):
+                print("  [add-phone] 验证码未写入输入框，换号重试")
+                sms.release(pkey)
+                continue
+            if await _wait_for_phone_flow_exit(page):
+                print("  [add-phone] 手机验证通过")
                 return True
-            print("  [add-phone] 验证码未通过，换号重试")
+            print(f"  [add-phone] 验证码提交后仍在手机验证页: {page.url[:80]}")
             sms.release(pkey)
         except Exception as e:
             print(f"  [add-phone] err: {str(e)[:80]}")
@@ -520,7 +602,7 @@ async def drive_authorize(page, auth_url, timeout=120, debug_dump=None, account_
             # add-phone 页:manual_phone=True 时不接码，由用户在浏览器手动填号+输码(如 WhatsApp 码)，
             # 脚本只轮询等待离开 add-phone 页；否则走接码自动过。
             try:
-                if "add-phone" in page.url or "/phone" in page.url:
+                if _is_phone_flow_url(page.url):
                     if not allow_phone:
                         # 本次只赌"免手机直连"，弹了手机就立刻退出(不接码不花钱)，交给上层换会话重试
                         print("  [add-phone] 本次免手机策略：检测到要手机验证，跳过本次(不接码)")

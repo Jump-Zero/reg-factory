@@ -2,10 +2,70 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from common.oauth_codex import _icloud_existing_codes, handle_add_phone
+from common.oauth_codex import (
+    _enter_otp,
+    _icloud_existing_codes,
+    _is_phone_flow_url,
+    _wait_for_phone_flow_exit,
+    handle_add_phone,
+)
 
 
 class OAuthCodexTests(unittest.TestCase):
+    def test_phone_verification_route_remains_in_phone_flow(self):
+        self.assertTrue(
+            _is_phone_flow_url("https://auth.openai.com/phone-verification")
+        )
+        self.assertTrue(_is_phone_flow_url("https://auth.openai.com/add-phone"))
+        self.assertFalse(_is_phone_flow_url("https://auth.openai.com/codex/consent"))
+
+    def test_phone_flow_exit_requires_consent_or_callback(self):
+        async def exercise(url):
+            page = MagicMock()
+            page.url = url
+            with patch(
+                "common.oauth_codex._has_phone_error", new=AsyncMock(return_value=False)
+            ):
+                return await _wait_for_phone_flow_exit(page, timeout=0)
+
+        self.assertFalse(
+            asyncio.run(exercise("https://auth.openai.com/phone-verification"))
+        )
+        self.assertTrue(
+            asyncio.run(exercise("https://auth.openai.com/codex/consent"))
+        )
+
+    def test_single_otp_uses_react_fill_and_visible_submit(self):
+        async def exercise():
+            page = MagicMock()
+            page.url = "https://auth.openai.com/phone-verification"
+
+            otp = MagicMock()
+            otp.first = otp
+            otp.wait_for = AsyncMock()
+            otp.count = AsyncMock(return_value=1)
+
+            submit = MagicMock()
+            submit.first = submit
+            submit.count = AsyncMock(return_value=1)
+            submit.is_visible = AsyncMock(return_value=True)
+            submit.click = AsyncMock()
+            page.locator.side_effect = [otp, submit]
+
+            with patch(
+                "common.browser.react_fill", new=AsyncMock(return_value=True)
+            ) as react_fill, patch(
+                "common.oauth_codex.asyncio.sleep", new=AsyncMock()
+            ):
+                ok = await _enter_otp(page, "606325")
+            return ok, react_fill, submit
+
+        ok, react_fill, submit = asyncio.run(exercise())
+        self.assertTrue(ok)
+        self.assertEqual(react_fill.await_args.args[2], "606325")
+        self.assertIn(":visible", react_fill.await_args.args[1])
+        submit.click.assert_awaited_once()
+
     def test_existing_icloud_codes_collects_extracted_and_body_codes(self):
         messages = [
             {"extracted": {"codes": ["123456"]}, "subject": "Code 654321"}

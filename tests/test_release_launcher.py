@@ -83,6 +83,39 @@ class ReleaseLauncherTests(unittest.TestCase):
             with patch.object(launcher, "_existing_reg_factory", return_value=status):
                 self.assertIsNone(launcher._running_data_root())
 
+    def test_portable_package_adopts_ancestor_project_env(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = root / "dist" / "reg-factory-windows-x64-1.2.21"
+            install.mkdir(parents=True)
+            executable = install / "reg-factory.exe"
+            (root / ".env").write_text("SUB2API_URL=http://local\n", encoding="utf-8")
+            (root / "emails.txt").write_text("mail@example.com\n", encoding="utf-8")
+
+            with patch.object(launcher.sys, "frozen", True, create=True):
+                with patch.object(launcher.sys, "executable", str(executable)):
+                    self.assertEqual(
+                        launcher._portable_ancestor_data_root(), root.resolve()
+                    )
+
+    def test_data_root_falls_back_to_portable_ancestor(self):
+        root = Path("E:/reg-factory")
+        with patch.object(launcher.sys, "frozen", True, create=True):
+            with patch.object(launcher, "_running_data_root", return_value=None):
+                with patch.object(
+                    launcher, "_portable_ancestor_data_root", return_value=root
+                ):
+                    with patch.dict(launcher.os.environ, {}, clear=True):
+                        with patch.object(Path, "is_file", return_value=True):
+                            launcher._adopt_running_data_root()
+                        self.assertEqual(
+                            launcher.os.environ["REG_FACTORY_DATA_DIR"], str(root)
+                        )
+                        self.assertEqual(
+                            launcher.os.environ["REG_FACTORY_ENV_FILE"],
+                            str(root / ".env"),
+                        )
+
     def test_proxy_test_applies_current_form_before_request(self):
         source = (ROOT / "webui" / "static" / "app.js").read_text(encoding="utf-8")
         function = source.split("async function testProxy(){", 1)[1].split("\n}", 1)[0]

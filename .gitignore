@@ -18,6 +18,7 @@ __pycache__/
 venv/
 .pytest_cache/
 .test-bundled-browser*/
+ruyipage-profiles/
 
 # 运行期数据 / PII（账号、cookie、日志、截图）
 runtime/**

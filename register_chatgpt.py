@@ -16,6 +16,7 @@ import functools
 import json
 import os as _os
 import random
+import re
 import string
 import sys
 import time
@@ -1648,6 +1649,7 @@ async def dump_onboarding_fields(page, tag=""):
             try:
                 print(f"    input[{i}] type={await el.get_attribute('type')} "
                       f"name={await el.get_attribute('name')} "
+                      f"id={await el.get_attribute('id')} "
                       f"placeholder={await el.get_attribute('placeholder')} "
                       f"inputmode={await el.get_attribute('inputmode')} "
                       f"aria-label={await el.get_attribute('aria-label')}")
@@ -1658,6 +1660,7 @@ async def dump_onboarding_fields(page, tag=""):
             el = page.locator("select").nth(i)
             try:
                 print(f"    select[{i}] name={await el.get_attribute('name')} "
+                      f"id={await el.get_attribute('id')} "
                       f"aria-label={await el.get_attribute('aria-label')}")
             except Exception:
                 pass
@@ -1665,8 +1668,361 @@ async def dump_onboarding_fields(page, tag=""):
         nc = await page.get_by_role("combobox").count()
         if nc:
             print(f"    comboboxes: {nc}")
+        segments = page.locator(
+            '[role="spinbutton"]:visible, [contenteditable="true"]:visible'
+        )
+        segment_count = await segments.count()
+        for i in range(min(segment_count, 8)):
+            el = segments.nth(i)
+            try:
+                print(
+                    f"    date-segment[{i}] role={await el.get_attribute('role')} "
+                    f"data-type={await el.get_attribute('data-type')} "
+                    f"aria-label={await el.get_attribute('aria-label')} "
+                    f"aria-valuenow={await el.get_attribute('aria-valuenow')}"
+                )
+            except Exception:
+                pass
     except Exception as e:
         print(f"  [onboarding-dump] error: {e}")
+
+
+_AGE_SELECTOR = (
+    'input[name="age" i]:visible, input[id="age" i]:visible, '
+    'input[placeholder*="age" i]:visible, input[aria-label*="age" i]:visible, '
+    'input[placeholder*="年齢"]:visible, input[aria-label*="年齢"]:visible, '
+    'input[placeholder*="年龄"]:visible, input[aria-label*="年龄"]:visible, '
+    'input[placeholder*="年齡"]:visible, input[aria-label*="年齡"]:visible, '
+    'input[placeholder*="umur" i]:visible, input[aria-label*="umur" i]:visible'
+)
+
+_BIRTHDAY_INPUT_SELECTOR = (
+    'input[type="date"]:visible, '
+    'input[name*="birthday" i]:not([type="hidden"]):visible, '
+    'input[name*="birthdate" i]:not([type="hidden"]):visible, '
+    'input[name*="dob" i]:not([type="hidden"]):visible, '
+    'input[id*="birthday" i]:visible, input[id*="birthdate" i]:visible, '
+    'input[id*="dob" i]:visible, '
+    'input[name*="month" i]:visible, input[name*="day" i]:visible, '
+    'input[name*="year" i]:visible, input[id*="month" i]:visible, '
+    'input[id*="day" i]:visible, input[id*="year" i]:visible, '
+    'input[placeholder*="birth" i]:visible, input[aria-label*="birth" i]:visible, '
+    'input[placeholder*="生日"]:visible, input[aria-label*="生日"]:visible, '
+    'input[placeholder*="出生"]:visible, input[aria-label*="出生"]:visible, '
+    'input[placeholder*="DD" i]:visible, input[placeholder*="MM" i]:visible, '
+    'input[placeholder*="YYYY" i]:visible, input[aria-label="day" i]:visible, '
+    'input[aria-label="month" i]:visible, input[aria-label="year" i]:visible'
+)
+
+_BIRTHDAY_SELECT_SELECTOR = (
+    'select[name*="birth" i]:visible, select[name*="dob" i]:visible, '
+    'select[id*="birth" i]:visible, select[id*="dob" i]:visible, '
+    'select[name*="month" i]:visible, select[name*="day" i]:visible, '
+    'select[name*="year" i]:visible, select[id*="month" i]:visible, '
+    'select[id*="day" i]:visible, select[id*="year" i]:visible, '
+    'select[aria-label*="month" i]:visible, select[aria-label*="day" i]:visible, '
+    'select[aria-label*="year" i]:visible'
+)
+
+_BIRTHDAY_SEGMENT_SELECTOR = (
+    '[role="spinbutton"]:visible, '
+    '[contenteditable="true"][data-type="month" i]:visible, '
+    '[contenteditable="true"][data-type="day" i]:visible, '
+    '[contenteditable="true"][data-type="year" i]:visible, '
+    '[contenteditable="true"][aria-label*="month" i]:visible, '
+    '[contenteditable="true"][aria-label*="day" i]:visible, '
+    '[contenteditable="true"][aria-label*="year" i]:visible, '
+    '[contenteditable="true"]:visible'
+)
+
+_BIRTHDAY_COMBOBOX_SELECTOR = (
+    '[role="combobox"][name*="birth" i]:visible, '
+    '[role="combobox"][name*="dob" i]:visible, '
+    '[role="combobox"][id*="birth" i]:visible, '
+    '[role="combobox"][id*="dob" i]:visible, '
+    '[role="combobox"][data-type="month" i]:visible, '
+    '[role="combobox"][data-type="day" i]:visible, '
+    '[role="combobox"][data-type="year" i]:visible, '
+    '[role="combobox"][aria-label*="month" i]:visible, '
+    '[role="combobox"][aria-label*="day" i]:visible, '
+    '[role="combobox"][aria-label*="year" i]:visible'
+)
+
+
+async def _birthday_metadata(control):
+    values = []
+    for name in (
+        "name", "id", "placeholder", "aria-label", "data-testid", "data-type"
+    ):
+        try:
+            value = await control.get_attribute(name)
+        except Exception:
+            value = None
+        if value:
+            values.append(str(value))
+    return " ".join(values)
+
+
+def _birthday_part(metadata):
+    """Classify a date segment without treating the word birthday as day."""
+    value = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", str(metadata or "")).lower()
+    tokens = set(re.findall(r"[a-z]+|\d+|[年月日]", value))
+    birth_prefix = r"(?:birthday|birthdate|birth|dob)[-_ ]+"
+    if "year" in tokens or "yyyy" in value or "年" in tokens or re.search(birth_prefix + "year", value):
+        return "year"
+    if "month" in tokens or "mm" in tokens or "月" in tokens or re.search(birth_prefix + "month", value):
+        return "month"
+    if "day" in tokens or "dd" in tokens or "日" in tokens or re.search(birth_prefix + "day", value):
+        return "day"
+    return None
+
+
+async def _keyboard_fill_control(page, control, value):
+    """Replace an input or editable date segment using real keyboard events."""
+    value = str(value)
+    try:
+        await control.click(timeout=4000)
+        await control.evaluate(
+            """node => {
+                node.focus();
+                if (typeof node.select === 'function') {
+                    node.select();
+                    return;
+                }
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }"""
+        )
+        await page.keyboard.type(value, delay=20)
+        await asyncio.sleep(0.2)
+    except Exception:
+        return False
+
+    observed = []
+    try:
+        observed.append(await control.input_value())
+    except Exception:
+        pass
+    try:
+        observed.append(await control.text_content())
+    except Exception:
+        pass
+    for attr in ("aria-valuenow", "data-value"):
+        try:
+            observed.append(await control.get_attribute(attr))
+        except Exception:
+            pass
+    expected = value.lstrip("0") or "0"
+    return any(
+        str(item or "").strip() == value
+        or (str(item or "").strip().lstrip("0") or "0") == expected
+        for item in observed
+    )
+
+
+async def _blur_control(control):
+    try:
+        await control.evaluate(
+            """node => {
+                node.dispatchEvent(new Event('blur', {bubbles: true}));
+                node.dispatchEvent(new Event('focusout', {bubbles: true}));
+                if (typeof node.blur === 'function') node.blur();
+            }"""
+        )
+    except Exception:
+        pass
+
+
+async def _map_birthday_controls(controls):
+    mapped = {}
+    unknown = []
+    count = await controls.count()
+    for i in range(count):
+        control = controls.nth(i)
+        part = _birthday_part(await _birthday_metadata(control))
+        if part and part not in mapped:
+            mapped[part] = control
+        else:
+            unknown.append(control)
+    for part, control in zip(
+        [item for item in ("month", "day", "year") if item not in mapped], unknown
+    ):
+        mapped[part] = control
+    return mapped
+
+
+async def _fill_native_birthday_select(control, candidates):
+    try:
+        return bool(await control.evaluate(
+            """(node, candidates) => {
+                const options = Array.from(node.options || []);
+                const normalize = value => String(value || '').trim().toLowerCase();
+                let option = null;
+                for (const candidate of candidates) {
+                    const wanted = normalize(candidate);
+                    option = options.find(item =>
+                        normalize(item.value) === wanted || normalize(item.textContent) === wanted
+                    );
+                    if (option) break;
+                }
+                if (!option) {
+                    const wantedNumber = Number(candidates[candidates.length - 1]);
+                    option = options.find(item =>
+                        Number(item.value) === wantedNumber || Number(item.textContent) === wantedNumber
+                    );
+                }
+                if (!option) return false;
+                node.value = option.value;
+                node.dispatchEvent(new Event('input', {bubbles: true}));
+                node.dispatchEvent(new Event('change', {bubbles: true}));
+                return true;
+            }""",
+            candidates,
+        ))
+    except Exception:
+        return False
+
+
+async def _birthday_context_present(page, body=""):
+    text = str(body or "").lower()
+    if any(marker in text for marker in (
+        "birthday", "date of birth", "birth date", "出生", "生日", "生年月日",
+        "tanggal lahir", "tarikh lahir",
+    )):
+        return True
+    for selector in (_BIRTHDAY_INPUT_SELECTOR, _BIRTHDAY_SELECT_SELECTOR):
+        try:
+            if await page.locator(selector).count() > 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def fill_birthday_fields(page, body="", year=1995, month=6, day=15):
+    """Fill all known ChatGPT birthday layouts. Returns (present, filled)."""
+    if not await _birthday_context_present(page, body):
+        return False, False
+
+    iso = f"{year:04d}-{month:02d}-{day:02d}"
+    month_text = f"{month:02d}"
+    day_text = f"{day:02d}"
+
+    inputs = page.locator(_BIRTHDAY_INPUT_SELECTOR)
+    input_count = await inputs.count()
+    if input_count == 1:
+        field = inputs.first
+        metadata = await _birthday_metadata(field)
+        metadata_lower = metadata.lower()
+        field_type = (await field.get_attribute("type") or "").lower()
+        if field_type == "date":
+            try:
+                await field.fill(iso)
+                await field.evaluate(
+                    """node => {
+                        node.dispatchEvent(new Event('input', {bubbles: true}));
+                        node.dispatchEvent(new Event('change', {bubbles: true}));
+                    }"""
+                )
+                if (await field.input_value()).strip() == iso:
+                    await _blur_control(field)
+                    return True, True
+            except Exception:
+                pass
+
+        dd_pos = metadata_lower.find("dd")
+        mm_pos = metadata_lower.find("mm")
+        yyyy_pos = metadata_lower.find("yyyy")
+        if dd_pos >= 0 and mm_pos >= 0 and dd_pos < mm_pos:
+            values = [f"{day:02d}/{month:02d}/{year:04d}", iso]
+        elif yyyy_pos >= 0 and mm_pos >= 0 and yyyy_pos < mm_pos:
+            separator = "/" if "/" in metadata_lower else "-"
+            values = [f"{year:04d}{separator}{month:02d}{separator}{day:02d}"]
+        else:
+            values = [f"{month:02d}/{day:02d}/{year:04d}", iso]
+        for value in values:
+            if await _keyboard_fill_control(page, field, value):
+                await _blur_control(field)
+                await asyncio.sleep(0.2)
+                if (await field.get_attribute("aria-invalid")) != "true":
+                    return True, True
+
+    if input_count >= 3:
+        mapped = await _map_birthday_controls(inputs)
+        if all(part in mapped for part in ("month", "day", "year")):
+            results = [
+                await _keyboard_fill_control(page, mapped["month"], month_text),
+                await _keyboard_fill_control(page, mapped["day"], day_text),
+                await _keyboard_fill_control(page, mapped["year"], str(year)),
+            ]
+            await _blur_control(mapped["year"])
+            if all(results):
+                return True, True
+
+    selects = page.locator(_BIRTHDAY_SELECT_SELECTOR)
+    if await selects.count() >= 3:
+        mapped = await _map_birthday_controls(selects)
+        if all(part in mapped for part in ("month", "day", "year")):
+            results = [
+                await _fill_native_birthday_select(
+                    mapped["month"], ["June", "Jun", month_text, str(month)]
+                ),
+                await _fill_native_birthday_select(mapped["day"], [day_text, str(day)]),
+                await _fill_native_birthday_select(mapped["year"], [str(year)]),
+            ]
+            if all(results):
+                await _blur_control(mapped["year"])
+                return True, True
+
+    segments = page.locator(_BIRTHDAY_SEGMENT_SELECTOR)
+    if await segments.count() >= 3:
+        mapped = await _map_birthday_controls(segments)
+        if all(part in mapped for part in ("month", "day", "year")):
+            results = [
+                await _keyboard_fill_control(page, mapped["month"], str(month)),
+                await _keyboard_fill_control(page, mapped["day"], str(day)),
+                await _keyboard_fill_control(page, mapped["year"], str(year)),
+            ]
+            await _blur_control(mapped["year"])
+            if all(results):
+                return True, True
+
+    combos = page.locator(_BIRTHDAY_COMBOBOX_SELECTOR)
+    if await combos.count() >= 3:
+        mapped = await _map_birthday_controls(combos)
+        labels = {
+            "month": ["June", "Jun", str(month), month_text, f"{month}月"],
+            "day": [str(day), day_text, f"{day}日"],
+            "year": [str(year), f"{year}年"],
+        }
+        completed = True
+        for part in ("month", "day", "year"):
+            control = mapped.get(part)
+            if control is None:
+                completed = False
+                break
+            try:
+                await control.click(timeout=4000)
+                selected = False
+                for label in labels[part]:
+                    option = page.get_by_role("option", name=label, exact=True)
+                    if await option.count() > 0 and await option.first.is_visible():
+                        await option.first.click(timeout=4000)
+                        selected = True
+                        break
+                if not selected:
+                    await page.keyboard.type(labels[part][0], delay=20)
+                    await page.keyboard.press("Enter")
+            except Exception:
+                completed = False
+                break
+        if completed:
+            return True, True
+
+    return True, False
 
 
 async def handle_onboarding(page, index, max_rounds=6, auth_monitor=None):
@@ -1682,7 +2038,7 @@ async def handle_onboarding(page, index, max_rounds=6, auth_monitor=None):
             await dump_onboarding_fields(page, tag=f"round{r}")  # 首轮 dump 结构，便于排查未知布局
 
         name_sel = 'input[name="name"], input[placeholder*="name" i], input[placeholder*="全名"], input[placeholder*="姓名"], input[autocomplete="name"]'
-        age_sel = 'input[name="age"], input[type="number"], input[placeholder*="age" i], input[placeholder*="年齢"], input[placeholder*="年龄"]'
+        age_sel = _AGE_SELECTOR
         on_about_you = await page.locator(age_sel).count() > 0
 
         # about-you 页（名字+年龄）：填一次 -> 失焦触发校验 -> 等按钮可用后点 Finish。
@@ -1721,63 +2077,32 @@ async def handle_onboarding(page, index, max_rounds=6, auth_monitor=None):
             # 没点动则继续往下走泛化兜底（极少数布局）
 
         # 名字（其它引导页：input name=name placeholder=全名/Full name，多语言界面）
-        if not on_about_you and await page.locator(name_sel).count() > 0:
+        if (
+            not on_about_you
+            and not name_done
+            and await page.locator(name_sel).count() > 0
+        ):
             first, last = rand_name()
             if await react_fill(page, name_sel, f"{first} {last}", tries=2, verbose=False):
                 print(f"  [onboarding] name: {first} {last}")
+                name_done = True
+                await blur_field(page, name_sel)
                 await asyncio.sleep(1)
 
-        # 生日页：仅当存在**可见**生日输入框时才处理（另一种 onboarding 布局）。
-        # 注意 about-you 页有个 name=birthday 的 type=hidden 字段，是 OpenAI 前端按 age 自动算的，
-        # 绝不能碰 —— 故这里排除 hidden，用 :visible 限定，避免误填隐藏框导致卡死。
-        bday = page.locator(
-            'input[type="date"]:visible, '
-            'input[name="birthday"]:not([type="hidden"]):visible, '
-            'input[name="dob"]:visible, '
-            'input[placeholder*="birth" i]:visible, input[placeholder*="生日"]:visible, '
-            'input[placeholder*="出生"]:visible, '
-            'input[placeholder*="DD" i]:visible, input[placeholder*="MM" i]:visible, '
-            'input[placeholder*="YYYY" i]:visible')
-        if not bday_done and not on_about_you and await bday.count() > 0:
-            filled = False
-            # 1) 原生 date：fill ISO 即可
-            try:
-                first_bday = bday.first
-                btype = await first_bday.get_attribute("type")
-                if btype == "date":
-                    await first_bday.fill("1995-06-15")
-                    filled = (await first_bday.input_value()).strip() != ""
-            except Exception:
-                pass
-            # 2) React 受控文本/分段（MM/DD/YYYY 等）：逐个填
-            if not filled:
-                cnt = await bday.count()
-                if cnt >= 3:
-                    # 分段 month/day/year 三框：按 placeholder 判断填 06 / 15 / 1995
-                    for i in range(min(cnt, 3)):
-                        seg = bday.nth(i)
-                        ph = (await seg.get_attribute("placeholder") or "").lower()
-                        v = "1995" if ("y" in ph or "年" in ph) else ("15" if ("d" in ph or "日" in ph) else "06")
-                        try:
-                            await seg.click(timeout=4000)
-                            await seg.press("Control+A", timeout=2000)
-                            await seg.press("Delete", timeout=2000)
-                            await page.keyboard.type(v, delay=12)
-                        except Exception:
-                            pass
-                    filled = True
-                else:
-                    # 单框文本日期：试 ISO，再试 MM/DD/YYYY
-                    for v in ["1995-06-15", "06/15/1995"]:
-                        if await react_fill(page, 'input[type="date"]:visible, input[name="dob"]:visible',
-                                            v, tries=1, delay=12, settle=0.15, verbose=False):
-                            filled = True
-                            break
-            if filled:
-                print("  [onboarding] birthday filled")
-                bday_done = True
-                await blur_field(page, 'input[type="date"]:visible, input[name="dob"]:visible')
-                await asyncio.sleep(0.3)
+        # 生日页可能是单框、月日年三框、原生下拉或 React Aria 可编辑日期段。
+        # 隐藏 birthday 状态字段始终排除，避免直接改 DOM 后 React 状态为空。
+        birthday_present = False
+        if not on_about_you:
+            if bday_done:
+                birthday_present = await _birthday_context_present(page, body)
+            else:
+                birthday_present, filled = await fill_birthday_fields(page, body)
+                if filled:
+                    print("  [onboarding] birthday filled")
+                    bday_done = True
+                    await asyncio.sleep(0.3)
+                elif birthday_present:
+                    print("  [onboarding] birthday controls found but values were not committed")
 
         # 点完成/续行（多语言：中/繁/英/日）。具体"完成创建账号"按钮优先于泛化 Continue，
         # 否则 about-you 页只有 'Finish creating account' 这一个按钮会被泛化匹配漏掉。
@@ -1835,7 +2160,7 @@ async def handle_onboarding(page, index, max_rounds=6, auth_monitor=None):
             if await page.locator('[data-testid="composer-speech-button"], textarea, #prompt-textarea').count() > 0:
                 print("  [onboarding] reached main UI")
                 return
-        if not clicked and await page.locator(name_sel).count() == 0 and await bday.count() == 0:
+        if not clicked and await page.locator(name_sel).count() == 0 and not birthday_present:
             # 没有可操作元素，可能已完成
             break
 
