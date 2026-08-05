@@ -1,0 +1,118 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>reg-factory ChatGPT Plus 订阅工作台</title>
+  <link rel="stylesheet" href="static/direct-bind.css?v=20260805-rf6">
+</head>
+<body>
+  <main class="shell batch-shell">
+    <section class="hero">
+      <span class="eyebrow">ONE CARD / ACCOUNT LIST / CHECKOUT LINKS</span>
+      <h1>ChatGPT Plus 订阅工作台</h1>
+      <p>账号先导入列表，再按勾选账号执行任务；每个账号始终只占一行。</p>
+    </section>
+
+    <section class="card batch-card">
+      <div class="steps batch-steps">
+        <span id="stepCard" class="active">1 填写卡片</span>
+        <span id="stepAt">2 导入账号</span>
+        <span id="stepBind">3 批量绑卡</span>
+        <span id="stepLink">4 批量提链</span>
+      </div>
+
+      <div class="setup-grid">
+        <section class="batch-section card-setup-section">
+          <div class="section-title">
+            <div><b>卡片信息</b><small>当前页面录入一次，自动应用到选中的账号批次</small></div>
+            <span class="tag">AUTO FILL</span>
+          </div>
+          <div class="card-paste-row">
+            <input id="cardPasteInput" class="card-paste-input" type="text" autocomplete="off" placeholder="粘贴卡号|有效期|CVC">
+            <button id="parseCardButton" class="secondary" type="button">自动填卡</button>
+          </div>
+          <div class="card-fields-grid">
+            <label class="card-field card-number-field"><span>卡号</span><input id="cardNumberInput" class="card-field-box" type="text" inputmode="numeric" autocomplete="cc-number"></label>
+            <label class="card-field"><span>有效期</span><input id="cardExpiryInput" class="card-field-box" type="text" inputmode="numeric" autocomplete="cc-exp" placeholder="MM/YY"></label>
+            <label class="card-field"><span>CVC</span><input id="cardCvcInput" class="card-field-box" type="password" inputmode="numeric" autocomplete="cc-csc"></label>
+          </div>
+          <div class="billing-head"><b>账单地址</b><small>工作台自动生成，仅用于本页当前操作</small></div>
+          <div class="billing-grid">
+            <label class="billing-field billing-wide"><span>持卡人姓名</span><input id="billingName" type="text" readonly autocomplete="off"></label>
+            <label class="billing-field billing-wide"><span>账单地址</span><input id="billingLine1" type="text" readonly autocomplete="off"></label>
+            <label class="billing-field"><span>城市</span><input id="billingCity" type="text" readonly autocomplete="off"></label>
+            <label class="billing-field"><span>州或省代码</span><input id="billingState" type="text" maxlength="3" readonly autocomplete="off"></label>
+            <label class="billing-field"><span>邮编</span><input id="billingPostalCode" type="text" readonly autocomplete="off"></label>
+            <label class="billing-field"><span>国家代码</span><input id="billingCountry" type="text" maxlength="2" value="US" readonly autocomplete="off"></label>
+          </div>
+          <div class="billing-actions">
+            <button id="applyBillingButton" class="secondary" type="button">重新生成地址</button>
+            <div id="billingAutoStatus" class="billing-auto-status is-live">正在生成账单地址…</div>
+          </div>
+          <div id="cardReady" class="inline-state">请先导入账号和卡片信息</div>
+          <div id="runtimeRouteNote" class="proxy-pool-note"></div>
+          <button id="loadCardButton" class="secondary load-card-button" type="button" disabled>预检账号并加载环境</button>
+        </section>
+
+        <section class="batch-section account-import-section">
+          <div class="section-title">
+            <div><b>导入账号</b><small>每行一个 AT；导入后输入框立即清空，账号进入下方列表</small></div>
+            <span id="atCount" class="tag">0 条待导入</span>
+          </div>
+          <textarea id="accountImportInput" class="account-import-input" spellcheck="false" autocomplete="off" placeholder="每行粘贴一个 AT"></textarea>
+          <div class="import-actions">
+            <button id="importAtButton" type="button">导入到账号列表</button>
+            <button id="importAtFileButton" class="secondary" type="button">从文件导入</button>
+            <input id="atFileInput" type="file" accept=".txt,.json" hidden>
+          </div>
+          <div id="accountImportStatus" class="proxy-pool-note">等待导入账号文件</div>
+          <div class="proxy-pool-note">导入框不保存；导入后立即分配注册项目指纹。账号、指纹、状态、错误和链接刷新后继续显示。</div>
+        </section>
+      </div>
+
+      <div hidden aria-hidden="true">
+        <input id="bindProxyPool" value="">
+        <input id="promoProxyPool" value="">
+        <span id="bindProxyCount">0 PROXY</span>
+        <span id="promoProxyCount">0 PROXY</span>
+      </div>
+
+      <div class="action-row">
+        <label class="concurrency-control"><span>批量并发（1-27，每批）</span><input id="batchConcurrency" type="number" min="1" max="27" value="27" inputmode="numeric"></label>
+        <label class="batch-mode-control"><span>批次模式</span><select id="batchMode"><option value="auto">自动轮换</option><option value="manual">手动轮换</option></select></label>
+        <button id="nextBatchButton" class="secondary" type="button" disabled>执行下一批</button>
+        <span id="batchRotationStatus" class="batch-rotation-status" role="status" aria-live="polite"></span>
+        <label class="select-all-control"><input id="paymentConfirm" type="checkbox"><span>确认处理当前选中账号</span></label>
+        <button id="validateButton" class="secondary" type="button">检查输入</button>
+        <button id="fullFlowButton" type="button" disabled>1 提链 + 绑卡 + 提链 + 支付</button>
+        <button id="batchBindLinkButton" class="secondary" type="button" disabled>2 提链 + 绑卡</button>
+        <button id="linkPayButton" class="secondary" type="button" disabled>3 提链 + 支付</button>
+        <button id="linkOnlyButton" class="secondary" type="button" disabled>4 提链</button>
+        <button id="stopButton" class="secondary" type="button" disabled>停止</button>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress-meta"><span id="progressText">等待输入</span><span id="progressPercent">0%</span></div>
+        <div class="progress-track"><i id="progressBar"></i></div>
+      </div>
+
+      <section class="batch-section result-section">
+        <div class="section-title">
+          <div><b>账号列表</b><small>每个账号固定一套注册指纹；状态、错误和 Checkout 链接在同一行更新</small></div>
+          <div class="mini-actions account-list-actions">
+            <label class="select-all-control"><input id="selectAllAccounts" type="checkbox"><span>全选</span></label>
+            <button id="deleteSelectedButton" class="secondary small" type="button">删除选中</button>
+            <button id="exportCsvButton" class="small export-csv-button" type="button">导出 CSV</button>
+            <button id="clearButton" class="secondary small" type="button">清空列表</button>
+          </div>
+        </div>
+        <div id="taskRows" class="task-rows"></div>
+        <div id="accountEmpty" class="account-empty">尚未导入账号</div>
+      </section>
+      <div id="batchSummary" class="batch-summary" hidden></div>
+    </section>
+  </main>
+  <script src="static/direct-bind.js?v=20260805-rf6"></script>
+</body>
+</html>

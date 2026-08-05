@@ -64,6 +64,8 @@ def build_command(platform, args, account):
             cmd.append("--keep-on-fail")
         if getattr(args, "import_c2a", False):
             cmd.append("--import-c2a")  # 注册成功后即时导入 chatgpt2api
+        if getattr(args, "plus_subscription", False):
+            cmd.append("--plus-subscription")
         if getattr(args, "codex", False):
             cmd.append("--codex")  # 注册成功后走 Codex OAuth 提取 rt 导入 SUB2API
             if getattr(args, "codex_group", None):
@@ -234,6 +236,8 @@ async def main():
     parser.add_argument("--keep-on-fail", action="store_true")
     parser.add_argument("--import-c2a", action="store_true",
                         help="chatgpt 注册成功后即时把 token 导入 chatgpt2api（透传给 register_chatgpt.py）")
+    parser.add_argument("--plus-subscription", action="store_true",
+                        help="chatgpt 注册成功后加入本地 Plus 订阅工作台")
     parser.add_argument("--codex", action="store_true",
                         help="chatgpt 注册成功后走 Codex OAuth 提取 rt 导入 SUB2API（透传给 register_chatgpt.py）")
     parser.add_argument("--codex-group", default=None,

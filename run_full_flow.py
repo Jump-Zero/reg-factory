@@ -203,6 +203,8 @@ def stage_platforms(args, env, email, password, token="", client_id=""):
         cmd.append("--keep-on-fail")
     if args.import_c2a:
         cmd.append("--import-c2a")  # 透传给 register_three_platforms -> register_chatgpt
+    if getattr(args, "plus_subscription", False):
+        cmd.append("--plus-subscription")
     if args.codex:
         cmd.append("--codex")  # 透传给 register_three_platforms -> register_chatgpt
         if args.codex_group:
@@ -276,6 +278,8 @@ def main():
     ap.add_argument("--keep-on-fail", action="store_true")
     ap.add_argument("--import-c2a", action="store_true",
                     help="chatgpt 注册成功后即时把 token 导入 chatgpt2api（透传到底层 register_chatgpt.py）")
+    ap.add_argument("--plus-subscription", action="store_true",
+                    help="chatgpt 注册成功后加入本地 Plus 订阅工作台")
     ap.add_argument("--codex", action="store_true",
                     help="chatgpt 注册成功后走 Codex OAuth 提取 rt 导入 SUB2API（透传到底层 register_chatgpt.py）")
     ap.add_argument("--codex-group", default=None,

@@ -19,10 +19,14 @@ venv/
 .pytest_cache/
 .test-bundled-browser*/
 ruyipage-profiles/
+browser-profiles/
+browser-profiles.json
 
 # 运行期数据 / PII（账号、cookie、日志、截图）
 runtime/**
 !runtime/README.md
+vendor/chatgpt_plus/fingerprint_profiles.json
+vendor/chatgpt_plus/registration_queue.json
 cookies/**
 !cookies/.gitkeep
 !cookies/chatgpt/.gitkeep

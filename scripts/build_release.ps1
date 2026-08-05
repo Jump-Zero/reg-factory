@@ -56,12 +56,17 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot ".env.example") -Destination $Packag
 Copy-Item -LiteralPath (Join-Path $RepoRoot "VERSION") -Destination $PackageRoot
 Copy-Item -LiteralPath (Join-Path $RepoRoot "docs") -Destination $PackageRoot -Recurse
 
+Get-ChildItem -LiteralPath $PackageRoot -Recurse -Directory -Filter "__pycache__" |
+    Sort-Object FullName -Descending |
+    Remove-Item -Recurse -Force
+
 $PackagePrefix = $PackageRoot.TrimEnd('\') + '\'
 $forbidden = Get-ChildItem -LiteralPath $PackageRoot -Recurse -File | Where-Object {
     $relative = $_.FullName.Substring($PackagePrefix.Length).Replace('\', '/')
     $_.Name -eq ".env" -or
     $_.Name -eq "emails.txt" -or
     $_.Name -match '^emails_(used|error)' -or
+    $_.Name -in @("registration_queue.json", "fingerprint_profiles.json") -or
     $_.Extension -eq ".log" -or
     $relative -match '^(_internal/)?(cookies|tokens|runtime|outlook_accounts|unlock_results|codex_k12)/'
 }

@@ -63,6 +63,14 @@ PROXY_MODE=clash_fixed
 CLASH_FIXED_NODE=美国 01
 ```
 
+Plus 提链和绑卡/支付可以分别走两个固定 Clash 出口。这里填写两个独立的 Clash 代理入口（例如分别绑定固定节点的本地监听端口），不要在并发任务运行期间切换同一个 `GLOBAL` 选择器：
+```env
+REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE=http://127.0.0.1:7901
+REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE=http://127.0.0.1:7902
+```
+也可以在 WebUI 的 Plus 阶段下拉框中选择住宅 IP、Clash 当前节点或具体 Clash 节点；具体节点选择会通过 Clash 控制器锁定该阶段，两个阶段都选具体节点时会串行保护节点切换。
+未配置时，提链优先使用住宅 IP，绑卡/支付优先使用 `CLASH_PROXY`；缺少其中一种出口会自动回退到另一种。
+
 住宅代理支持 `http`、`https`、`socks4` 和 `socks5`；BitBrowser 窗口支持 `http`、`https` 和 `socks5`。代理池优先于单个代理；`.env` 中用逗号分隔，WebUI 中可每行填写一个：
 
 ```env

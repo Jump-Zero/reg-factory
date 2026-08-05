@@ -1,0 +1,14 @@
+{
+  "country": "PH",
+  "currency": "PHP",
+  "fingerprint_region": "US",
+  "bind_country": "US",
+  "bind_currency": "USD",
+  "promo_campaign": "plus-1-month-free",
+  "reject_nonzero": true,
+  "timeout": 90,
+  "preflight_cache_ttl": 600,
+  "coupon_diagnostic": false,
+  "fast_verify": false,
+  "billing": {}
+}

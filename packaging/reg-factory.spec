@@ -33,6 +33,7 @@ datas = [
     (str(ROOT / "webui" / "static"), "webui/static"),
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "common" / "bundled_browser_helper.py"), "common"),
+    (str(ROOT / "vendor" / "chatgpt_plus"), "vendor/chatgpt_plus"),
 ]
 datas.extend((str(ROOT / item), str(Path(item).parent)) for item in TASK_FILES)
 

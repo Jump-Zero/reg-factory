@@ -62,6 +62,7 @@ FIXED_REFRESH_TOKEN = None
 FIXED_CLIENT_ID = None
 EMAIL_PROVIDER = "pool"
 IMPORT_C2A = False  # 注册成功后即时把 token 导入 chatgpt2api（--import-c2a 开启）
+PLUS_SUBSCRIPTION = False  # 注册成功后加入本地 Plus 订阅工作台
 C2A_URL = None  # chatgpt2api host（默认取 config.CHATGPT2API_URL）
 C2A_KEY = None  # chatgpt2api admin key（默认取 config.CHATGPT2API_KEY）
 EXTRACT_CODEX = False  # 注册成功后顺手走 Codex OAuth 提取 rt 导入 SUB2API（--codex 开启）
@@ -1346,6 +1347,19 @@ async def register_one(index, total, p):
             print(f"  [WARN] 保存标准 token 失败: {e}")
             sess = None
 
+        if PLUS_SUBSCRIPTION:
+            if sess:
+                try:
+                    from common.chatgpt_plus import queue_registered_account
+
+                    queued = queue_registered_account(email)
+                    print(f"  [plus] 已加入本地批处理队列: {queued['email']}")
+                    print("  [plus] 工作台: 主 WebUI -> Plus 订阅")
+                except Exception as e:
+                    print(f"  [plus][WARN] 加入订阅队列失败: {e}")
+            else:
+                print("  [plus][WARN] 未抓到 accessToken，无法加入订阅队列")
+
         # 即时导入 chatgpt2api（--import-c2a；用刚抓到的 session 直接 POST，单号失败不影响注册成功）
         if IMPORT_C2A:
             import_chatgpt2api(sess, email)
@@ -2181,6 +2195,8 @@ async def main():
                         help="邮箱来源：pool=emails.txt，icloud=API 自动申请并取码")
     parser.add_argument("--import-c2a", action="store_true",
                         help="注册成功后即时把 token 导入 chatgpt2api (POST <host>/api/accounts)")
+    parser.add_argument("--plus-subscription", action="store_true",
+                        help="注册成功后加入本地 Plus 批处理工作台")
     parser.add_argument("--c2a-url", default=None, help="chatgpt2api host (默认取 config.CHATGPT2API_URL)")
     parser.add_argument("--c2a-key", default=None, help="chatgpt2api admin key (默认取 config.CHATGPT2API_KEY)")
     parser.add_argument("--codex", action="store_true",
@@ -2196,7 +2212,7 @@ async def main():
     args = parser.parse_args()
 
     global REGISTER_TIMEOUT, KEEP_ON_FAIL, FIXED_EMAIL, FIXED_PASSWORD, FIXED_REFRESH_TOKEN, FIXED_CLIENT_ID, EMAIL_PROVIDER
-    global IMPORT_C2A, C2A_URL, C2A_KEY
+    global IMPORT_C2A, PLUS_SUBSCRIPTION, C2A_URL, C2A_KEY
     global EXTRACT_CODEX, CODEX_GROUP, CODEX_MANUAL_PHONE, CODEX_SMS_PROVIDER, CODEX_TIMEOUT, CHATGPT_NODE
     REGISTER_TIMEOUT = args.timeout
     KEEP_ON_FAIL = args.keep_on_fail
@@ -2209,6 +2225,7 @@ async def main():
         print(f"  [config] CHATGPT_EMAIL_PROVIDER={EMAIL_PROVIDER!r} 无效，回退 pool")
         EMAIL_PROVIDER = "pool"
     IMPORT_C2A = args.import_c2a
+    PLUS_SUBSCRIPTION = args.plus_subscription
     C2A_URL = args.c2a_url
     C2A_KEY = args.c2a_key
     EXTRACT_CODEX = args.codex

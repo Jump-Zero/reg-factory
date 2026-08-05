@@ -21,7 +21,7 @@
       <span aria-hidden="true">↻</span><span id="update-label">更新</span>
     </button>
     <span id="update-message" class="update-message" role="status" aria-live="polite"></span>
-    <div class="health-summary" id="status" title="浏览器、网络出口与 Codex K12 服务状态">
+    <div class="health-summary" id="status" title="浏览器、网络出口、Codex K12 与 Plus 工作台状态">
       <span class="dot pending" id="health-dot"></span>
       <span id="health-label">服务检测中</span>
     </div>
@@ -44,12 +44,14 @@
       <button class="navbtn" data-view="network" data-guide="network-entry"><span class="nav-icon" aria-hidden="true">IP</span><span>网络出口</span></button>
       <button class="navbtn" data-view="env" data-guide="env-entry"><span class="nav-icon" aria-hidden="true">CFG</span><span>环境配置</span></button>
       <button class="navbtn navbtn-k12" data-view="k12"><span class="nav-icon" aria-hidden="true">K</span><span>Codex K12</span><span id="k12-nav-state" class="nav-state">检测中</span></button>
+      <button class="navbtn" data-view="plus"><span class="nav-icon" aria-hidden="true">P</span><span>Plus 订阅</span><span id="plus-nav-state" class="nav-state">检测中</span></button>
     </div>
     <div class="sidebar-footer">
       <div class="service-list" aria-label="服务状态">
         <span class="status-item"><span class="dot" id="dot-bb"></span><span id="browser-label">BitBrowser</span></span>
         <span class="status-item"><span class="dot" id="dot-clash"></span><span id="network-label">网络出口</span></span>
         <span class="status-item"><span class="dot pending" id="dot-k12"></span>Codex K12</span>
+        <span class="status-item"><span class="dot pending" id="dot-plus"></span>Plus 工作台</span>
       </div>
       <div class="instance-meta">
         <span class="version" id="version" title="当前 WebUI 提交版本">v--</span>
@@ -128,6 +130,28 @@
             <span id="k12-offline-detail">正在检查 Node.js、依赖和生产构建。</span>
             <button id="btn-k12-start" class="btn-run" type="button">启动服务</button>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ChatGPT Plus 本地工作台 -->
+    <section id="view-plus" style="display:none">
+      <div class="plus-workbench-panel">
+        <div class="plus-workbench-quick">
+          <div class="plus-workbench-quick-item">
+            <span class="plus-workbench-label">本地 AT</span>
+            <span id="plus-at-count">检测中...</span>
+            <button id="btn-import-ats" class="btn-plus-primary" type="button">批量导入 AT</button>
+            <button id="btn-copy-ats" class="btn-k12-secondary" type="button">复制本批 AT</button>
+          </div>
+          <div class="plus-workbench-quick-item">
+            <span class="plus-workbench-label">本地工作台</span>
+            <span id="plus-import-state" role="status" aria-live="polite">正在连接</span>
+            <a id="plus-open" href="/chatgpt-plus/" target="_blank" rel="noopener" class="embed-open">新标签页打开</a>
+          </div>
+        </div>
+        <div class="k12-frame-stage">
+          <iframe id="plus-frame" class="k12-frame" src="about:blank" title="ChatGPT Plus 本地工作台"></iframe>
         </div>
       </div>
     </section>
@@ -367,6 +391,16 @@
           </div>
         </div>
 
+        <div id="network-plus-fields" class="network-fields">
+          <div class="network-section-title">Plus 阶段出口（可选）</div>
+          <div class="network-grid">
+            <label class="network-field"><span>Plus 提链网络</span><select id="proxy-plus-link-route"><option value="residential">住宅 IP</option><option value="clash">Clash 当前节点</option></select></label>
+            <label class="network-field"><span>Plus 绑卡/支付网络</span><select id="proxy-plus-bind-route"><option value="clash">Clash 当前节点</option><option value="residential">住宅 IP</option></select></label>
+            <label class="network-field"><span>提链独立 Clash 入口（可选）</span><input id="proxy-plus-link-proxy" type="password" autocomplete="off" placeholder="两个固定节点可填不同监听端口"></label>
+            <label class="network-field"><span>绑卡/支付独立 Clash 入口（可选）</span><input id="proxy-plus-bind-proxy" type="password" autocomplete="off" placeholder="两个固定节点可填不同监听端口"></label>
+          </div>
+        </div>
+
         <div id="network-residential-fields" class="network-fields" style="display:none">
           <div class="network-section-title">住宅代理</div>
           <div class="network-grid">
@@ -449,6 +483,6 @@
 
 <div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
 
-<script src="/static/app.js?v=20260804-subcol-1"></script>
+<script src="/static/app.js?v=20260805-plus-local-sub2api-1"></script>
 </body>
 </html>

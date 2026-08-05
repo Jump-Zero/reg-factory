@@ -10,12 +10,15 @@ webui/server.py — reg-factory 本地 Web 面板后端(FastAPI)。
 启动：  python -m uvicorn webui.server:app --port 8799   (或用 start.bat)
 """
 import asyncio
+import base64
 import contextlib
 import hmac
+import importlib.util
 import json
 import os
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -24,7 +27,7 @@ import urllib.parse
 import urllib.request
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 # 启动前由系统显式提供的变量始终优先于 WebUI 保存的 .env。
@@ -44,6 +47,7 @@ K12_SERVER = os.path.join(K12_DIR, "server", "index.ts")
 K12_TSX_CLI = os.path.join(K12_DIR, "node_modules", "tsx", "dist", "cli.mjs")
 K12_DIST_INDEX = os.path.join(K12_DIR, "dist", "index.html")
 K12_LOG_PATH = os.path.join(K12_DIR, "server.log")
+PLUS_DIR = os.path.join(ROOT, "vendor", "chatgpt_plus")
 
 sys.path.insert(0, WEBUI)
 sys.path.insert(0, ROOT)
@@ -146,6 +150,14 @@ K12_LOG_HANDLE = None
 K12_START_TASK = None
 K12_LOCK = asyncio.Lock()
 
+# Plus 工作台使用内置 zkky 服务；网络出口优先住宅 IP，缺失时回退 Clash。
+PLUS_PORT = 5601
+PLUS_BATCH_SIZE = 27
+PLUS_HTTP_SERVER = None
+PLUS_SERVER_THREAD = None
+PLUS_SERVER_MODULE = None
+PLUS_SERVER_LOCK = threading.Lock()
+
 # 资产号池扫描在后台线程执行，WebUI 只保存无敏感字段的进度。
 ASSET_SCAN_TASK = None
 ASSET_SCAN_STATE = {
@@ -244,6 +256,47 @@ def _k12_status(message=""):
     else:
         detail = "服务已安装但尚未启动"
     return {"alive": alive, "ready": ready, "managed": managed, "url": _k12_url(), "message": detail}
+
+
+def _plus_health():
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{PLUS_PORT}/health", timeout=1.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if (
+            payload.get("service") == "reg-factory-chatgpt-plus"
+            and int(payload.get("max_concurrency") or 0) == PLUS_BATCH_SIZE
+        ):
+            return payload
+    except (OSError, ValueError, urllib.error.URLError):
+        pass
+    return {}
+
+
+def _plus_status(message=""):
+    health = _plus_health()
+    alive = bool(health)
+    required = (
+        os.path.join(PLUS_DIR, "server.py"),
+        os.path.join(PLUS_DIR, "standalone_flow.py"),
+        os.path.join(PLUS_DIR, "index.html"),
+    )
+    ready = all(os.path.isfile(path) for path in required)
+    managed = bool(PLUS_SERVER_THREAD and PLUS_SERVER_THREAD.is_alive())
+    detail = (
+        "本地工作台在线" if alive else
+        message if message else
+        "内置 zkky 文件不完整" if not ready else
+        "本地工作台尚未启动"
+    )
+    return {
+        "alive": alive,
+        "ready": ready,
+        "managed": managed,
+        "url": "/chatgpt-plus/",
+        "batch_size": PLUS_BATCH_SIZE,
+        "message": detail,
+    }
 
 
 def _update_script():
@@ -371,6 +424,197 @@ async def _stop_k12_service():
     if K12_LOG_HANDLE:
         K12_LOG_HANDLE.close()
         K12_LOG_HANDLE = None
+
+
+def _plus_proxy_url(env):
+    """Prefer a configured residential endpoint, then fall back to Clash."""
+    residential = _plus_residential_proxy_url(env)
+    if residential:
+        return residential
+    return str(env.get("CLASH_PROXY") or "http://127.0.0.1:7897").strip()
+
+
+def _plus_residential_proxy_url(env):
+    try:
+        from common import direct_proxy
+
+        residential = direct_proxy.configured_proxy(environ=env)
+        if residential:
+            return residential.url
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
+def _plus_route_proxy_url(env, route, fallback=""):
+    """Resolve a Plus stage route without exposing credentials to the UI."""
+    residential = _plus_residential_proxy_url(env)
+    clash = str(env.get("CLASH_PROXY") or "http://127.0.0.1:7897").strip()
+    value = str(route or "").strip().lower()
+    if value == "residential":
+        return residential or clash or fallback
+    if value == "clash" or value.startswith("clash:"):
+        return clash or residential or fallback
+    return fallback or residential or clash
+
+
+def _plus_route_node(route):
+    value = str(route or "").strip()
+    return value[6:].strip() if value.lower().startswith("clash:") else ""
+
+
+def _plus_bind_proxy_url(env, link_proxy=""):
+    """Use a separate card-network egress when Clash is available.
+
+    Checkout extraction talks to ChatGPT and prefers the configured residential
+    endpoint. Stripe card binding/payment is routed through Clash by default so
+    the two stages do not reuse the same public IP. Explicit overrides are kept
+    in the environment for installations with a dedicated card endpoint.
+    """
+    override = str(env.get("REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE") or "").strip()
+    if override:
+        return override
+    clash = str(env.get("CLASH_PROXY") or "http://127.0.0.1:7897").strip()
+    link = str(link_proxy or _plus_proxy_url(env)).strip()
+    if clash and clash != link:
+        return clash
+    return link or clash
+
+
+def _plus_runtime_environment():
+    env = _child_env("chatgpt")
+    data_root = os.path.abspath(os.environ.get("REG_FACTORY_DATA_DIR") or ROOT)
+    runtime_dir = os.path.join(data_root, "runtime", "chatgpt_plus")
+    os.makedirs(runtime_dir, exist_ok=True)
+    residential = _plus_residential_proxy_url(env)
+    clash = str(env.get("CLASH_PROXY") or "http://127.0.0.1:7897").strip()
+    link_route = str(
+        env.get("REG_FACTORY_PLUS_LINK_ROUTE")
+        or ("residential" if residential else "clash")
+    ).strip()
+    bind_route = str(
+        env.get("REG_FACTORY_PLUS_BIND_ROUTE")
+        or ("clash" if clash else "residential")
+    ).strip()
+    link_proxy = str(
+        env.get("REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE")
+        or _plus_route_proxy_url(env, link_route, _plus_proxy_url(env))
+    ).strip()
+    bind_proxy = str(
+        env.get("REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE")
+        or _plus_route_proxy_url(env, bind_route, _plus_bind_proxy_url(env, link_proxy))
+    ).strip()
+    link_node = "" if env.get("REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE") else _plus_route_node(link_route)
+    bind_node = "" if env.get("REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE") else _plus_route_node(bind_route)
+    values = {
+        "REG_FACTORY_DATA_DIR": data_root,
+        "REG_FACTORY_PLUS_QUEUE_FILE": os.path.join(runtime_dir, "registration_queue.json"),
+        "REG_FACTORY_PLUS_FINGERPRINT_STORE": os.path.join(runtime_dir, "fingerprint_profiles.json"),
+        "REG_FACTORY_PLUS_CONFIG": os.path.join(PLUS_DIR, "standalone_config.json"),
+        # Keep the legacy value for callers that only know one Plus proxy;
+        # stage-specific values are consumed by the vendored workbench.
+        "REG_FACTORY_PLUS_PROXY": link_proxy,
+        "REG_FACTORY_PLUS_LINK_PROXY": link_proxy,
+        "REG_FACTORY_PLUS_BIND_PROXY": bind_proxy,
+        "REG_FACTORY_PLUS_LINK_CLASH_NODE": link_node,
+        "REG_FACTORY_PLUS_BIND_CLASH_NODE": bind_node,
+    }
+    for key, value in values.items():
+        if value:
+            os.environ[key] = value
+        else:
+            os.environ.pop(key, None)
+    return values
+
+
+def _load_plus_server_module():
+    global PLUS_SERVER_MODULE
+    if PLUS_SERVER_MODULE is not None:
+        return PLUS_SERVER_MODULE
+    _plus_runtime_environment()
+    if PLUS_DIR not in sys.path:
+        sys.path.insert(0, PLUS_DIR)
+    module_path = os.path.join(PLUS_DIR, "server.py")
+    spec = importlib.util.spec_from_file_location("reg_factory_chatgpt_plus_server", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载内置 zkky 服务")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    PLUS_SERVER_MODULE = module
+    return module
+
+
+def _start_plus_service_sync():
+    global PLUS_HTTP_SERVER, PLUS_SERVER_THREAD, PLUS_PORT
+    _plus_runtime_environment()
+    with PLUS_SERVER_LOCK:
+        if _plus_health():
+            return _plus_status()
+        if not _plus_status()["ready"]:
+            return _plus_status("内置 zkky 文件不完整")
+        try:
+            from http.server import ThreadingHTTPServer
+
+            module = _load_plus_server_module()
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", PLUS_PORT), module.Handler)
+            except OSError:
+                # A stale manually started local workbench must not prevent the
+                # main WebUI from exposing the current embedded build.
+                candidate = None
+                for port in range(PLUS_PORT + 1, PLUS_PORT + 20):
+                    with socket.socket() as probe:
+                        try:
+                            probe.bind(("127.0.0.1", port))
+                        except OSError:
+                            continue
+                    candidate = port
+                    break
+                if candidate is None:
+                    raise
+                PLUS_PORT = candidate
+                server = ThreadingHTTPServer(("127.0.0.1", PLUS_PORT), module.Handler)
+            server.daemon_threads = True
+            thread = threading.Thread(
+                target=server.serve_forever,
+                name="reg-factory-chatgpt-plus",
+                daemon=True,
+            )
+            PLUS_HTTP_SERVER = server
+            PLUS_SERVER_THREAD = thread
+            thread.start()
+        except OSError as exc:
+            PLUS_HTTP_SERVER = None
+            PLUS_SERVER_THREAD = None
+            return _plus_status(f"本地端口 {PLUS_PORT} 启动失败: {str(exc)[:100]}")
+        except Exception as exc:
+            PLUS_HTTP_SERVER = None
+            PLUS_SERVER_THREAD = None
+            return _plus_status(f"内置 zkky 启动失败: {str(exc)[:120]}")
+    for _ in range(30):
+        if _plus_health():
+            return _plus_status()
+        time.sleep(0.05)
+    return _plus_status("本地工作台未能就绪")
+
+
+def _stop_plus_service_sync():
+    global PLUS_HTTP_SERVER, PLUS_SERVER_THREAD
+    with PLUS_SERVER_LOCK:
+        server = PLUS_HTTP_SERVER
+        thread = PLUS_SERVER_THREAD
+        PLUS_HTTP_SERVER = None
+        PLUS_SERVER_THREAD = None
+    if server is not None:
+        with contextlib.suppress(Exception):
+            server.shutdown()
+        with contextlib.suppress(Exception):
+            server.server_close()
+    if thread and thread.is_alive():
+        thread.join(timeout=3)
+
+
 
 
 # ============================================================ .env 读写(保留注释/顺序)
@@ -916,6 +1160,140 @@ def api_k12_status():
 @app.post("/api/k12/start")
 async def api_k12_start():
     return await _start_k12_service()
+
+
+@app.get("/api/chatgpt-plus/status")
+async def api_chatgpt_plus_status():
+    _plus_runtime_environment()
+    status = _plus_status()
+    if not status["alive"] and status["ready"]:
+        status = await asyncio.to_thread(_start_plus_service_sync)
+    return status
+
+
+@app.post("/api/chatgpt-plus/start")
+async def api_chatgpt_plus_start():
+    return await asyncio.to_thread(_start_plus_service_sync)
+
+
+def _decode_access_token_claims(token):
+    parts = str(token or "").split(".")
+    if len(parts) < 2:
+        raise ValueError("invalid JWT")
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+
+
+def _chatgpt_plus_free_ats(limit=PLUS_BATCH_SIZE):
+    data_root = os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or ROOT
+    tokens_dir = os.path.join(data_root, "tokens", "chatgpt")
+    accounts = []
+    seen = set()
+    if os.path.isdir(tokens_dir):
+        for name in os.listdir(tokens_dir):
+            if not name.endswith(".session.json"):
+                continue
+            path = os.path.join(tokens_dir, name)
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    session = json.load(handle)
+                account = session.get("account") or {}
+                if str(account.get("planType") or "").strip().lower() != "free":
+                    continue
+                token = str(session.get("accessToken") or "").strip()
+                claims = _decode_access_token_claims(token)
+                if float(claims.get("exp") or 0) <= time.time() or token in seen:
+                    continue
+                seen.add(token)
+                user = session.get("user") or {}
+                accounts.append({
+                    "access_token": token,
+                    "email": str(user.get("email") or claims.get("email") or ""),
+                    "modified_at": os.path.getmtime(path),
+                })
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+    accounts.sort(key=lambda item: item["modified_at"], reverse=True)
+    bounded_limit = max(1, min(500, int(limit or PLUS_BATCH_SIZE)))
+    return accounts[:bounded_limit], len(accounts)
+
+
+@app.get("/api/chatgpt-plus/export-ats")
+def api_chatgpt_plus_export_ats(limit: int = PLUS_BATCH_SIZE):
+    """Return a bounded batch of current free-account ATs to the local UI."""
+    accounts, available = _chatgpt_plus_free_ats(limit)
+    response = JSONResponse({
+        "ats": [item["access_token"] for item in accounts],
+        "count": len(accounts),
+        "available": available,
+        "batch_size": min(PLUS_BATCH_SIZE, available),
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+async def _proxy_local_plus(request: Request, upstream_path: str):
+    _plus_runtime_environment()
+    if not _plus_health():
+        await asyncio.to_thread(_start_plus_service_sync)
+    upstream_url = f"http://127.0.0.1:{PLUS_PORT}{upstream_path}"
+    if request.url.query:
+        upstream_url += f"?{request.url.query}"
+    fwd_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in (
+            "host", "connection", "transfer-encoding", "content-length",
+            "accept-encoding",
+        )
+    }
+    fwd_headers["Accept-Encoding"] = "identity"
+    body = await request.body()
+
+    def _do_proxy():
+        req = urllib.request.Request(
+            upstream_url,
+            data=body or None,
+            headers=fwd_headers,
+            method=request.method,
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(req, timeout=120) as resp:
+                data = resp.read()
+                ct = resp.headers.get("Content-Type", "application/octet-stream")
+                cache = resp.headers.get("Cache-Control", "no-store")
+                return resp.status, data, ct, cache
+        except urllib.error.HTTPError as exc:
+            data = exc.read()
+            ct = exc.headers.get("Content-Type", "application/octet-stream")
+            cache = exc.headers.get("Cache-Control", "no-store")
+            return exc.code, data, ct, cache
+
+    try:
+        code, data, content_type, cache_control = await asyncio.to_thread(_do_proxy)
+    except (OSError, urllib.error.URLError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"本地 Plus 工作台不可用: {str(exc)[:120]}"},
+            status_code=503,
+        )
+    return Response(
+        content=data,
+        status_code=code,
+        headers={"Content-Type": content_type, "Cache-Control": cache_control},
+    )
+
+
+@app.api_route("/chatgpt-plus/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+async def proxy_chatgpt_plus_page(request: Request, path: str):
+    return await _proxy_local_plus(request, f"/{path}")
+
+
+@app.api_route(
+    "/api/chatgpt-plus/workbench/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+)
+async def proxy_chatgpt_plus_api(request: Request, path: str):
+    return await _proxy_local_plus(request, f"/api/{path}")
 
 
 # ============================================================ 邮箱池批量导入
@@ -1877,6 +2255,7 @@ def api_status():
         "proxy_mode": mode,
         "direct_proxy": mode == "residential" and bool(proxy),
         "k12": _k12_alive(),
+        "chatgpt_plus": _plus_status()["alive"],
         "node": node,
         "running": sum(1 for r in RUNS.values() if not r["done"]),
         "update": _update_status(),
@@ -1895,6 +2274,10 @@ _PROXY_ENV_KEYS = (
     "CLASH_PROXY",
     "CLASH_GROUP",
     "CLASH_FIXED_NODE",
+    "REG_FACTORY_PLUS_LINK_ROUTE",
+    "REG_FACTORY_PLUS_BIND_ROUTE",
+    "REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE",
+    "REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE",
     "REG_FACTORY_PROXY",
     "REG_FACTORY_PROXY_POOL",
     "REG_FACTORY_PROXY_ROTATE_URL",
@@ -2003,6 +2386,13 @@ async def api_proxy_set(request: Request):
             direct_proxy.parse_proxy(updates["REG_FACTORY_PROXY"])
         for value in pool_values:
             direct_proxy.parse_proxy(value)
+        for key in ("REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE", "REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE"):
+            if updates[key]:
+                direct_proxy.parse_proxy(updates[key])
+        for key in ("REG_FACTORY_PLUS_LINK_ROUTE", "REG_FACTORY_PLUS_BIND_ROUTE"):
+            route = updates[key].lower()
+            if route and route != "residential" and route != "clash" and not route.startswith("clash:"):
+                raise ValueError(f"invalid Plus route: {updates[key]}")
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": f"住宅代理格式错误: {exc}"}, status_code=400)
     all_modes = {mode, *platform_modes.values()}
@@ -2199,9 +2589,18 @@ def _build_cmd(script, args):
 def _child_env(platform: str = ""):
     """构造新任务环境；保存后的 .env 无需重启 WebUI 即可生效。"""
     env = dict(os.environ)
-    for key, value in _parse_env_file(ENV_PATH).items():
+    saved_env = _parse_env_file(ENV_PATH)
+    managed_keys = set(saved_env)
+    if os.path.isfile(ENV_EXAMPLE):
+        managed_keys.update(_parse_env_file(ENV_EXAMPLE))
+    # Do not leak values loaded from an earlier .env after the active file
+    # changes or removes them. Explicit startup values keep precedence.
+    for key in managed_keys:
         if key not in BOOT_ENV:
-            env[key] = value
+            if key in saved_env:
+                env[key] = saved_env[key]
+            else:
+                env.pop(key, None)
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     # Child tasks can spawn other platform workers; retain this marker so Grok
@@ -2346,7 +2745,17 @@ async def api_run(request: Request):
     script = schema.script_by_id(sid)
     if not script:
         return JSONResponse({"error": f"未知脚本: {sid}"}, status_code=400)
+    selected_platforms = args.get("--platforms") or []
+    plus_requested = bool(args.get("--plus-subscription")) and (
+        sid == "register_chatgpt" or "chatgpt" in selected_platforms
+    )
     task_env = _child_env(script.get("platform", ""))
+    if plus_requested:
+        task_env.update({
+            key: value
+            for key, value in _plus_runtime_environment().items()
+            if key.startswith("REG_FACTORY_PLUS_") or key == "REG_FACTORY_DATA_DIR"
+        })
     try:
         from common import proxy_switch
         await asyncio.to_thread(proxy_switch.ensure_proxy_mode, task_env)
@@ -2474,15 +2883,16 @@ async def api_stop_all():
 
 
 @app.on_event("startup")
-async def startup_k12_channel():
+async def startup_local_services():
     global K12_START_TASK
     auto_start = _read_config_val("K12_AUTO_START", "1").strip().lower() not in {"0", "false", "no", "off"}
     if auto_start and not _k12_alive():
         K12_START_TASK = asyncio.create_task(_start_k12_service())
+    await asyncio.to_thread(_start_plus_service_sync)
 
 
 @app.on_event("shutdown")
-async def shutdown_k12_channel():
+async def shutdown_local_services():
     global K12_START_TASK
     if K12_START_TASK and not K12_START_TASK.done():
         K12_START_TASK.cancel()
@@ -2490,6 +2900,7 @@ async def shutdown_k12_channel():
             await K12_START_TASK
     K12_START_TASK = None
     await _stop_k12_service()
+    await asyncio.to_thread(_stop_plus_service_sync)
 
 
 _ensure_proxy_env()

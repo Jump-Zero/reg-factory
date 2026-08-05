@@ -100,6 +100,7 @@ macOS / Linux：
 - 网络出口：切换 Clash 自动轮换、固定节点或动态住宅 IP，并测试公网出口。
 - 环境配置：分组编辑 `.env` 并测试外部服务连通性。
 - Codex K12：管理 K12 workspace、邮箱资产、任务与 Codex 凭据。
+- Plus 订阅：ChatGPT 注册任务勾选订阅模式后，成功账号自动进入主 WebUI 的本地 `zkky` 工作台；支持一次导入最多 100 条 AT，按 1-27 的可调并发自动或手动轮换批处理，一次录入卡片后自动应用。提链和绑卡/支付可分别在网络页下拉选择住宅 IP、Clash 当前节点或具体 Clash 节点；缺少其中一种出口时自动回退。也可用 `REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE` 和 `REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE` 显式指定两个固定 Clash 入口。
 
 控制台只监听本机。Codex K12 的独立说明见 [codex_k12/README.md](codex_k12/README.md)。
 
@@ -146,6 +147,9 @@ python register.py --count 1 --node auto --provider yyds
 
 # ChatGPT 使用 iCloud 接码邮箱（先在 .env 配置 ICLOUD_MAIL_API_KEY）
 python register_chatgpt.py --count 1 --email-provider icloud
+
+# ChatGPT 注册成功后进入主 WebUI 的本地 Plus 批处理工作台
+python register_chatgpt.py --count 1 --plus-subscription
 
 # Grok 浏览器注册并导入 SUB2API
 python register_grok.py --count 1 --sub2api

@@ -7,6 +7,10 @@ let evtSrc = null;     // EventSource
 let smsTimer = null;   // 接码助手倒计时刷新
 let k12Url = 'http://127.0.0.1:8806/';
 let k12Starting = false;
+let plusUrl = '/chatgpt-plus/';
+const PLUS_BATCH_SIZE = 27;
+const PLUS_IMPORT_LIMIT = 100;
+let plusImporting = false;
 let proxyMode = 'clash_auto';
 let assetPickMode = 'sequence';
 let assetScanData = null;
@@ -142,6 +146,10 @@ async function pollStatus(){
     $('#dot-k12').classList.toggle('on', !!s.k12);
     $('#k12-nav-state').textContent = s.k12 ? '在线' : '离线';
     $('#k12-nav-state').classList.toggle('on', !!s.k12);
+    $('#dot-plus').classList.remove('pending');
+    $('#dot-plus').classList.toggle('on', !!s.chatgpt_plus);
+    $('#plus-nav-state').textContent = s.chatgpt_plus ? '在线' : '离线';
+    $('#plus-nav-state').classList.toggle('on', !!s.chatgpt_plus);
     $('#version').textContent = 'v' + (s.version || '--');
     if(updateRequested && currentWebVersion && s.version && s.version !== currentWebVersion){
       setUpdateMessage('更新完成，正在刷新…', 'ok');
@@ -149,11 +157,11 @@ async function pollStatus(){
     }
     renderUpdateState(s.update || {}, s.version || '');
     $('#node').textContent = '出口 ' + (s.node || '--');
-    const online = [s.bitbrowser, networkOnline, s.k12].filter(Boolean).length;
+    const online = [s.bitbrowser, networkOnline, s.k12, s.chatgpt_plus].filter(Boolean).length;
     $('#health-dot').classList.remove('pending', 'on', 'partial');
-    if(online === 3) $('#health-dot').classList.add('on');
+    if(online === 4) $('#health-dot').classList.add('on');
     else if(online) $('#health-dot').classList.add('partial');
-    $('#health-label').textContent = `${online}/3 服务在线`;
+    $('#health-label').textContent = `${online}/4 服务在线`;
     $('#running').textContent = s.running ? `${s.running} 个任务运行中` : '';
   }catch(e){
     if(updateRequested) setUpdateMessage('面板正在重启，等待重新连接…');
@@ -197,6 +205,7 @@ async function showView(v){
   $('#view-embed').style.display = v==='embed' ? 'block' : 'none';
   $('#view-mailpool').style.display = v==='mailpool' ? 'block' : 'none';
   $('#view-k12').style.display = v==='k12' ? 'block' : 'none';
+  $('#view-plus').style.display = v==='plus' ? 'block' : 'none';
   $$('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.view===v));
   if(v!=='run' && v!=='embed') $$('.scriptbtn').forEach(b=>b.classList.remove('active'));
   if(v==='env') return loadEnv();
@@ -204,6 +213,7 @@ async function showView(v){
   if(v==='network') return loadProxyPanel();
   if(v==='mailpool') return loadMailpool();
   if(v==='k12') return openK12Channel();
+  if(v==='plus'){ loadPlusAtCount(); return openPlusChannel(); }
   return Promise.resolve();
 }
 $$('.navbtn').forEach(b=> b.onclick = ()=> showView(b.dataset.view));
@@ -251,6 +261,29 @@ function renderProxyNodes(nodes, selected){
   });
 }
 
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>"']/g, char=>({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;',
+  }[char]));
+}
+
+function renderPlusRouteOptions(id, nodes, selected, fallback){
+  const select = $(id);
+  if(!select) return;
+  const values = [
+    {value:'residential', label:'住宅 IP'},
+    {value:'clash', label:'Clash 当前节点'},
+    ...(nodes || []).map(node=>({value:`clash:${node}`, label:`Clash：${node}`})),
+  ];
+  const known = new Set(values.map(item=>item.value));
+  if(selected && !known.has(selected) && selected.startsWith('clash:')){
+    values.push({value:selected, label:`Clash：${selected.slice(6)}`});
+  }
+  select.innerHTML = values.map(item=>`<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join('');
+  select.value = selected || fallback;
+  if(!select.value) select.value = fallback;
+}
+
 async function loadProxyPanel(includeNodes=false){
   setProxyMessage('读取中…');
   try{
@@ -263,6 +296,21 @@ async function loadProxyPanel(includeNodes=false){
     $('#proxy-clash-secret').value = config.CLASH_SECRET || '';
     $('#proxy-clash-proxy').value = config.CLASH_PROXY || '';
     $('#proxy-clash-group').value = config.CLASH_GROUP || '';
+    const residentialConfigured = Boolean(config.REG_FACTORY_PROXY || config.REG_FACTORY_PROXY_POOL);
+    renderPlusRouteOptions(
+      '#proxy-plus-link-route',
+      data.nodes,
+      config.REG_FACTORY_PLUS_LINK_ROUTE || (residentialConfigured ? 'residential' : 'clash'),
+      residentialConfigured ? 'residential' : 'clash',
+    );
+    renderPlusRouteOptions(
+      '#proxy-plus-bind-route',
+      data.nodes,
+      config.REG_FACTORY_PLUS_BIND_ROUTE || 'clash',
+      'clash',
+    );
+    $('#proxy-plus-link-proxy').value = config.REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE || '';
+    $('#proxy-plus-bind-proxy').value = config.REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE || '';
     $('#proxy-residential-url').value = config.REG_FACTORY_PROXY || '';
     $('#proxy-residential-pool').value = config.REG_FACTORY_PROXY_POOL || '';
     $('#proxy-rotate-url').value = config.REG_FACTORY_PROXY_ROTATE_URL || '';
@@ -297,6 +345,10 @@ function collectProxyConfig(){
     CLASH_PROXY: $('#proxy-clash-proxy').value.trim(),
     CLASH_GROUP: $('#proxy-clash-group').value.trim(),
     CLASH_FIXED_NODE: $('#proxy-fixed-node').value,
+    REG_FACTORY_PLUS_LINK_ROUTE: $('#proxy-plus-link-route').value,
+    REG_FACTORY_PLUS_BIND_ROUTE: $('#proxy-plus-bind-route').value,
+    REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE: $('#proxy-plus-link-proxy').value.trim(),
+    REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE: $('#proxy-plus-bind-proxy').value.trim(),
     REG_FACTORY_PROXY: $('#proxy-residential-url').value.trim(),
     REG_FACTORY_PROXY_POOL: $('#proxy-residential-pool').value.trim(),
     REG_FACTORY_PROXY_ROTATE_URL: $('#proxy-rotate-url').value.trim(),
@@ -1080,6 +1132,149 @@ async function openK12Channel(){
 $('#btn-k12-start').onclick = startK12Service;
 $('#btn-k12-retry').onclick = openK12Channel;
 
+// ---------------------------------------------------------------- ChatGPT Plus 本地工作台
+function setPlusImportState(text, kind=''){
+  const state = $('#plus-import-state');
+  if(!state) return;
+  state.textContent = text;
+  state.className = kind;
+}
+
+function renderPlusStatus(status){
+  const alive = !!status.alive;
+  $('#dot-plus').classList.remove('pending');
+  $('#dot-plus').classList.toggle('on', alive);
+  $('#plus-nav-state').textContent = alive ? '在线' : '离线';
+  $('#plus-nav-state').classList.toggle('on', alive);
+  if(status.url){
+    plusUrl = status.url;
+    $('#plus-open').href = plusUrl;
+  }
+}
+
+async function fetchPlusStatus(){
+  try{
+    const status = await (await fetch('/api/chatgpt-plus/status')).json();
+    renderPlusStatus(status);
+    return status;
+  }catch(e){
+    renderPlusStatus({alive:false});
+    return {alive:false};
+  }
+}
+
+async function openPlusChannel(){
+  let status = await fetchPlusStatus();
+  if(!status.alive && status.ready){
+    status = await (await fetch('/api/chatgpt-plus/start', {method:'POST'})).json();
+    renderPlusStatus(status);
+  }
+  if(!status.alive) throw new Error(status.message || '本地 Plus 工作台当前不可用');
+  if($('#plus-frame').getAttribute('src') === 'about:blank') $('#plus-frame').src = plusUrl;
+  await waitForPlusFrame();
+  setPlusImportState('本地工作台已就绪', 'ok');
+  return status;
+}
+
+async function waitForPlus(test, timeoutMs, timeoutMessage){
+  const deadline = Date.now() + timeoutMs;
+  while(Date.now() < deadline){
+    const result = test();
+    if(result) return result;
+    await new Promise(resolve=>setTimeout(resolve, 100));
+  }
+  throw new Error(timeoutMessage);
+}
+
+async function waitForPlusFrame(){
+  const frame = $('#plus-frame');
+  return waitForPlus(()=>{
+    try{
+      const doc = frame.contentDocument;
+      return doc && doc.getElementById('accountImportInput') ? {frame, doc, win:frame.contentWindow} : null;
+    }catch(e){ return null; }
+  }, 20000, '本地 Plus 工作台加载超时');
+}
+
+async function importLocalPlusAts(){
+  if(plusImporting) return;
+  const button = $('#btn-import-ats');
+  plusImporting = true;
+  button.disabled = true;
+  setPlusImportState('正在读取本地 free AT...');
+  try{
+    await openPlusChannel();
+    const response = await fetch(`/api/chatgpt-plus/export-ats?limit=${PLUS_IMPORT_LIMIT}`, {cache:'no-store'});
+    const data = await response.json();
+    if(!response.ok) throw new Error(data.error || `AT 读取失败 (${response.status})`);
+    if(!data.count) throw new Error('没有可导入的未过期 free AT');
+    const context = await waitForPlusFrame();
+    const importInput = context.doc.getElementById('accountImportInput');
+    const importButton = context.doc.getElementById('importAtButton');
+    if(!importInput || !importButton) throw new Error('本地工作台批量导入控件不可用');
+    const before = context.doc.querySelectorAll('.account-row').length;
+    importInput.value = data.ats.join('\n');
+    importInput.dispatchEvent(new context.win.Event('input', {bubbles:true}));
+    importButton.click();
+    await waitForPlus(()=> importInput.value === '' ? true : null, 30000, 'AT 批量导入未完成');
+    const total = context.doc.querySelectorAll('.account-row').length;
+    const imported = Math.max(0, total - before);
+    const selectAll = context.doc.getElementById('selectAllAccounts');
+    if(selectAll && !selectAll.checked){
+      selectAll.checked = true;
+      selectAll.dispatchEvent(new context.win.Event('change', {bubbles:true}));
+    }
+    const concurrency = context.doc.getElementById('batchConcurrency');
+    if(concurrency){
+      const current = Number(concurrency.value) || PLUS_BATCH_SIZE;
+      concurrency.value = String(Math.min(PLUS_BATCH_SIZE, Math.max(1, current)));
+      concurrency.dispatchEvent(new context.win.Event('input', {bubbles:true}));
+    }
+    setPlusImportState(
+      imported ? `已批量导入 ${imported} 条 AT，当前共 ${total} 个账号` : `这 ${data.count} 条 AT 已在工作台中`,
+      'ok'
+    );
+  }catch(error){
+    setPlusImportState(error.message || String(error), 'bad');
+  }finally{
+    plusImporting = false;
+    button.disabled = false;
+  }
+}
+
+async function copyLocalPlusAts(){
+  const btn = $('#btn-copy-ats');
+  btn.disabled = true;
+  btn.textContent = '加载中...';
+  try{
+    const data = await (await fetch(`/api/chatgpt-plus/export-ats?limit=${PLUS_IMPORT_LIMIT}`, {cache:'no-store'})).json();
+    if(!data.ats || !data.ats.length){
+      btn.textContent = '无可用 AT';
+      setTimeout(()=>{ btn.textContent = '复制本批 AT'; btn.disabled = false; }, 2000);
+      return;
+    }
+    await navigator.clipboard.writeText(data.ats.join('\n'));
+    btn.textContent = '已复制 ' + data.count + ' 条';
+    setTimeout(()=>{ btn.textContent = '复制本批 AT'; btn.disabled = false; }, 2000);
+  }catch(e){
+    btn.textContent = '复制失败';
+    setTimeout(()=>{ btn.textContent = '复制本批 AT'; btn.disabled = false; }, 2000);
+  }
+}
+
+async function loadPlusAtCount(){
+  try{
+    const data = await (await fetch(`/api/chatgpt-plus/export-ats?limit=${PLUS_IMPORT_LIMIT}`, {cache:'no-store'})).json();
+    $('#plus-at-count').textContent = `${data.available || 0} 个可用 · 可导入 ${data.count || 0}`;
+    $('#btn-import-ats').disabled = Number(data.count || 0) === 0;
+  }catch(e){
+    $('#plus-at-count').textContent = '无法读取';
+  }
+}
+
+$('#btn-copy-ats').onclick = copyLocalPlusAts;
+$('#btn-import-ats').onclick = importLocalPlusAts;
+
 // ---------------------------------------------------------------- 脚本导航
 function appendNavGroup(nav, title, items, renderItem, open=false){
   const group = document.createElement('details');
@@ -1245,6 +1440,9 @@ function setRunState(state, label){
 async function runScript(){
   if(curRun && evtSrc){ evtSrc.close(); evtSrc = null; }
   const args = collectArgs(curSrc);
+  const selectedPlatforms = args['--platforms'] || [];
+  const plusRequested = !!args['--plus-subscription']
+    && (curSrc.id === 'register_chatgpt' || selectedPlatforms.includes('chatgpt'));
   const log = $('#log'); log.textContent='';
   $('#log-title').textContent = `运行日志 — ${curSrc.title}`;
   setRunState('running', '运行中');
@@ -1278,6 +1476,9 @@ async function runScript(){
     if(evtSrc === stream){ evtSrc = null; curRun = null; }
     $('#btn-stop').disabled = true;
     pollStatus();
+    if(result.returncode===0 && plusRequested){
+      showView('plus').then(importLocalPlusAts).catch(error=>setPlusImportState(error.message, 'bad'));
+    }
   });
   stream.onerror = ()=>{
     stream.close();

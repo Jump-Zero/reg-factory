@@ -402,6 +402,11 @@ def _safe_email_name(email):
     return _sanitize_file_segment(email, fallback="account")
 
 
+def chatgpt_session_path(email):
+    """Return the canonical local session path for a ChatGPT account."""
+    return os.path.join(_platform_dir("chatgpt"), f"{_safe_email_name(email)}.session.json")
+
+
 def save_chatgpt_tokens(session, email=""):
     """落盘 ChatGPT 标准 token。返回 True/False。"""
     if not _is_obj(session) or not _s(session.get("accessToken")):
@@ -409,7 +414,7 @@ def save_chatgpt_tokens(session, email=""):
     pdir = _platform_dir("chatgpt")
     name = _safe_email_name(email or session.get("user", {}).get("email") or "account")
 
-    session_path = os.path.join(pdir, f"{name}.session.json")
+    session_path = chatgpt_session_path(name)
     with open(session_path, "w", encoding="utf-8") as f:
         json.dump(session, f, indent=2, ensure_ascii=False)
 

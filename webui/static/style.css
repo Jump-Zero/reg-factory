@@ -500,7 +500,7 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .network-message.bad{color:var(--red)}
 
 /* Embedded tools */
-#view-embed,#view-k12{height:100%}
+#view-embed,#view-k12,#view-plus{height:100%}
 .k12-channel,.embed-frame-box{
   height:100%;min-width:0;display:flex;flex-direction:column;overflow:hidden;
   border:1px solid var(--line);border-radius:8px;background:var(--surface)
@@ -519,6 +519,29 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 }
 .k12-frame-stage{position:relative;flex:1;min-height:480px;background:#f4f6f8}
 .k12-frame{display:block;width:100%;height:100%;border:0;background:#f4f6f8}
+
+/* ChatGPT Plus 本地工作台 */
+.plus-workbench-panel{height:100%;display:flex;flex-direction:column;overflow:hidden}
+.plus-workbench-quick{
+  display:flex;flex-wrap:wrap;gap:10px;padding:12px 14px;
+  border-bottom:1px solid var(--line);background:var(--surface)
+}
+.plus-workbench-quick-item{
+  display:flex;align-items:center;gap:8px;padding:6px 10px;
+  border:1px solid var(--line);border-radius:6px;background:var(--surface-raised);font-size:12px
+}
+.plus-workbench-label{color:var(--muted);font-size:11px;font-weight:600;white-space:nowrap}
+.plus-workbench-quick-item code{font:11.5px/1 var(--mono);color:var(--text);user-select:all}
+.btn-plus-primary{
+  min-height:28px;padding:4px 10px;border:1px solid var(--accent);border-radius:6px;
+  background:var(--accent);color:#fff;font-size:11px;font-weight:650;white-space:nowrap;cursor:pointer
+}
+.btn-plus-primary:hover:not(:disabled){background:#619afb}
+.btn-plus-primary:disabled{opacity:.5;cursor:wait}
+#plus-import-state{max-width:340px;color:var(--muted);font-size:11.5px;overflow-wrap:anywhere}
+#plus-import-state.ok{color:var(--green)}
+#plus-import-state.bad{color:var(--red)}
+
 .k12-offline{
   position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
   gap:10px;padding:24px;background:var(--surface);color:var(--text);text-align:center
