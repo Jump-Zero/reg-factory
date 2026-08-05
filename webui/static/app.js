@@ -404,13 +404,6 @@ function assetHeaders(json=false){
 }
 
 function setAssetMessage(target, text, ok=null){
-  // 同时写内联元素（保持兼容）和悬浮通知
-  const message = $(target);
-  if(message){
-    message.textContent = text || '';
-    message.classList.toggle('ok', ok===true);
-    message.classList.toggle('bad', ok===false);
-  }
   // 悬浮通知：只对扫描/导入/删除/分裂相关消息弹出
   if(target === '#asset-scan-msg' && text){
     const type = ok===true ? 'ok' : ok===false ? 'bad' : 'info';
@@ -500,7 +493,10 @@ function filteredAssetScanItems(){
   const source = $('#asset-scan-source') ? $('#asset-scan-source').value : 'all';
   return (assetScanData.items || []).filter(item=>
     (platform === 'all' || item.platform === platform) &&
-    (status === 'all' || item.status === status) &&
+    (status === 'all' ||
+     (status === 'sub_imported' && item.sub2api_uploaded) ||
+     (status === 'sub_not_imported' && !item.sub2api_uploaded) ||
+     (status !== 'sub_imported' && status !== 'sub_not_imported' && item.status === status)) &&
     (source === 'all' || item.mail_source === source)
   );
 }
@@ -600,6 +596,21 @@ function renderAssetScanTable(){
     // 检测结果
     const detail = appendAssetScanCell(row, item.detail || '尚未扫描', 'asset-scan-detail');
     detail.title = `${item.evidence || 'none'} · ${item.source || ''}`;
+    // Sub2API 导入状态
+    const subCell = document.createElement('td');
+    subCell.className = 'asset-sub-cell';
+    const subBadge = document.createElement('span');
+    if(item.sub2api_uploaded){
+      subBadge.className = 'asset-sub-badge imported';
+      subBadge.textContent = '已导入';
+      subBadge.title = '已导入 Sub2API';
+    } else {
+      subBadge.className = 'asset-sub-badge not-imported';
+      subBadge.textContent = '未导入';
+      subBadge.title = '未导入 Sub2API';
+    }
+    subCell.appendChild(subBadge);
+    row.appendChild(subCell);
     // 检测时间
     appendAssetScanCell(row, formatAssetScanTime(item.checked_at), 'asset-scan-checked');
     return row;
@@ -642,6 +653,9 @@ function renderAssetScan(data){
   Object.keys(ASSET_SCAN_STATUS_LABELS).forEach(status=>{
     $(`#asset-status-${status}`).textContent = statuses[status] || 0;
   });
+  const sub2apiCounts = data.sub2api_counts || {};
+  $('#asset-status-sub_imported').textContent = sub2apiCounts.imported || 0;
+  $('#asset-status-sub_not_imported').textContent = sub2apiCounts.not_imported || 0;
   const scan = data.scan || {};
   const progress = scan.progress || {};
   const completed = progress.completed || 0;
@@ -850,8 +864,11 @@ function updateScanSelectAllState(){
   }
   const omniBtn = $('#btn-omni-import');
   if(omniBtn){
+    const curPlatform = $('#asset-scan-platform')?.value || '';
+    const isGrok = curPlatform === 'grok';
+    const label = isGrok ? '导入 Sub2API' : '导入 OmniRoute';
     omniBtn.disabled = checked.length === 0;
-    omniBtn.textContent = checked.length > 0 ? `导入 OmniRoute(${checked.length})` : '导入 OmniRoute';
+    omniBtn.textContent = checked.length > 0 ? `${label}(${checked.length})` : label;
   }
 }
 
@@ -939,37 +956,74 @@ $('#btn-split-selected').onclick = async ()=>{
   await Promise.all([refreshAssetSummary(), loadAssetScan(), loadMailpool()]);
 };
 
-// ---------------------------------------------------------------- Kiro → OmniRoute 导入
+// ---------------------------------------------------------------- 导入按钮：Grok→Sub2API / 其他→OmniRoute
 $('#btn-omni-import').onclick = async ()=>{
   const emails = getCheckedScanEmails();
   if(!emails.length) return;
-  if(!confirm(`确认将选中的 ${emails.length} 个账号导入到 OmniRoute？\n（需先在环境配置中填写 OMNIROUTE_URL 和密码）`)) return;
+  const platform = $('#asset-scan-platform').value;
+  const isGrok = platform === 'grok';
   const btn = $('#btn-omni-import');
-  btn.disabled = true;
-  btn.textContent = '导入中…';
-  const toastEl = showPersistentToast('正在导入 OmniRoute…', 'info');
-  try{
-    const r = await (await fetch('/api/kiro/omni-import',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({emails})})).json();
-    if(r.ok){
-      let msg = r.msg;
-      if(r.skipped && r.skipped.length > 0){
-        msg += `（跳过 ${r.skipped.length} 个: ${r.skipped.join('; ')}）`;
+
+  if(isGrok){
+    // ── Grok → Sub2API 导入 ──
+    if(!confirm(`确认将选中的 ${emails.length} 个 Grok 账号导入到 Sub2API？\n（需先在环境配置中填写 SUB2API_URL/EMAIL/PASSWORD）`)) return;
+    btn.disabled = true;
+    const origText = btn.textContent;
+    btn.textContent = '导入中…';
+    const toastEl = showPersistentToast('正在导入 Sub2API…', 'info');
+    try{
+      const r = await (await fetch('/api/assets/sub2api-import',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({emails, platform:'grok'})})).json();
+      if(r.ok){
+        let msg = r.msg;
+        if(r.skipped && r.skipped.length > 0){
+          msg += `（跳过 ${r.skipped.length} 个: ${r.skipped.join('; ')}）`;
+        }
+        updatePersistentToast(toastEl, msg, 'ok');
+        setTimeout(()=>{ const e=toastEl; if(e){e.classList.add('removing');setTimeout(()=>e.remove(),200);} }, 5000);
+      } else {
+        let msg = r.msg || '导入失败';
+        if(r.skipped && r.skipped.length > 0){
+          msg += `（跳过: ${r.skipped.join('; ')}）`;
+        }
+        updatePersistentToast(toastEl, msg, 'bad');
       }
-      updatePersistentToast(toastEl, msg, 'ok');
-      setTimeout(()=>{ const e=toastEl; if(e){e.classList.add('removing');setTimeout(()=>e.remove(),200);} }, 5000);
-    } else {
-      let msg = r.msg || '导入失败';
-      if(r.skipped && r.skipped.length > 0){
-        msg += `（跳过: ${r.skipped.join('; ')}）`;
-      }
-      updatePersistentToast(toastEl, msg, 'bad');
+    }catch(e){
+      updatePersistentToast(toastEl, '导入请求失败: '+e, 'bad');
+    }finally{
+      btn.disabled = false;
+      btn.textContent = origText;
     }
-  }catch(e){
-    updatePersistentToast(toastEl, '导入请求失败: '+e, 'bad');
-  }finally{
-    btn.disabled = false;
-    btn.textContent = '导入 OmniRoute';
+  } else {
+    // ── OmniRoute 导入（Kiro 等）──
+    if(!confirm(`确认将选中的 ${emails.length} 个账号导入到 OmniRoute？\n（需先在环境配置中填写 OMNIROUTE_URL 和密码）`)) return;
+    btn.disabled = true;
+    const origText = btn.textContent;
+    btn.textContent = '导入中…';
+    const toastEl = showPersistentToast('正在导入 OmniRoute…', 'info');
+    try{
+      const r = await (await fetch('/api/kiro/omni-import',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({emails})})).json();
+      if(r.ok){
+        let msg = r.msg;
+        if(r.skipped && r.skipped.length > 0){
+          msg += `（跳过 ${r.skipped.length} 个: ${r.skipped.join('; ')}）`;
+        }
+        updatePersistentToast(toastEl, msg, 'ok');
+        setTimeout(()=>{ const e=toastEl; if(e){e.classList.add('removing');setTimeout(()=>e.remove(),200);} }, 5000);
+      } else {
+        let msg = r.msg || '导入失败';
+        if(r.skipped && r.skipped.length > 0){
+          msg += `（跳过: ${r.skipped.join('; ')}）`;
+        }
+        updatePersistentToast(toastEl, msg, 'bad');
+      }
+    }catch(e){
+      updatePersistentToast(toastEl, '导入请求失败: '+e, 'bad');
+    }finally{
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
   }
 };
 

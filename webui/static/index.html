@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
-<link rel="stylesheet" href="/static/style.css?v=20260804-toast-1">
+<link rel="stylesheet" href="/static/style.css?v=20260804-subcol-1">
 </head>
 <body>
 <header class="topbar">
@@ -200,6 +200,9 @@
             <button type="button" data-scan-status="invalid"><span>凭据异常</span><strong id="asset-status-invalid">0</strong></button>
             <button type="button" data-scan-status="unknown"><span>未知</span><strong id="asset-status-unknown">0</strong></button>
             <button type="button" data-scan-status="error"><span>检测异常</span><strong id="asset-status-error">0</strong></button>
+            <span class="asset-status-divider"></span>
+            <button type="button" data-scan-status="sub_imported"><span>已导入Sub</span><strong id="asset-status-sub_imported">0</strong></button>
+            <button type="button" data-scan-status="sub_not_imported"><span>未导入Sub</span><strong id="asset-status-sub_not_imported">0</strong></button>
           </div>
 
           <div class="asset-scan-toolbar">
@@ -226,6 +229,8 @@
               <option value="invalid">凭据异常</option>
               <option value="unknown">未知</option>
               <option value="error">检测异常</option>
+              <option value="sub_imported">已导入Sub</option>
+              <option value="sub_not_imported">未导入Sub</option>
             </select></label>
             <span id="asset-scan-result-count" class="asset-scan-result-count">0 条</span>
             <button id="btn-scan-selected" class="btn-secondary" type="button" disabled>扫描选中</button>
@@ -248,7 +253,7 @@
             <table class="asset-scan-table">
               <thead><tr>
                 <th class="col-check"><input type="checkbox" id="asset-scan-check-all"></th>
-                <th>类型</th><th>账号</th><th>分类</th><th>状态</th><th>检测结果</th><th>检测时间</th>
+                <th>类型</th><th>账号</th><th>分类</th><th>状态</th><th>检测结果</th><th>Sub2API</th><th>检测时间</th>
               </tr></thead>
               <tbody id="asset-scan-rows"></tbody>
             </table>
@@ -444,6 +449,6 @@
 
 <div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
 
-<script src="/static/app.js?v=20260804-toast-1"></script>
+<script src="/static/app.js?v=20260804-subcol-1"></script>
 </body>
 </html>

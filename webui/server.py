@@ -1530,6 +1530,147 @@ async def api_kiro_omni_import(request: Request):
         })
 
 
+# ============================================================ Grok → Sub2API 导入
+@app.post("/api/assets/sub2api-import")
+async def api_assets_sub2api_import(request: Request):
+    """把选中的 Grok 账号导入到 Sub2API。
+    读取 sso.json → upload_sub2api_grok (sso-to-oauth)
+    body: {"emails": [...], "platform": "grok"}
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    emails = (data or {}).get("emails") or []
+    platform = str((data or {}).get("platform", "")).strip().lower()
+    if not emails:
+        return JSONResponse({"ok": False, "msg": "未选择任何账号"})
+    if platform != "grok":
+        return JSONResponse({"ok": False, "msg": f"仅支持 grok 平台, 收到: {platform}"})
+
+    sub2api_url = _read_config_val("SUB2API_URL", "").strip()
+    sub2api_email = _read_config_val("SUB2API_EMAIL", "").strip()
+    sub2api_password = _read_config_val("SUB2API_PASSWORD", "").strip()
+    if not sub2api_url:
+        return JSONResponse({"ok": False, "msg": "未配置 SUB2API_URL，请到环境配置页填写"})
+
+    token_dir = os.path.join(
+        ROOT, _read_config_val("TOKEN_OUTPUT_DIR", "tokens"), platform
+    )
+
+    import glob as _glob
+    accounts = []
+    skipped = []
+    for email in emails:
+        token_path = os.path.join(token_dir, f"{email}.sso.json")
+        if not os.path.isfile(token_path):
+            local = email.split("@")[0].split("+")[0]
+            matches = _glob.glob(os.path.join(token_dir, f"{local}*.sso.json"))
+            if matches:
+                token_path = matches[0]
+            else:
+                skipped.append(f"{email}: sso 文件不存在")
+                continue
+        try:
+            with open(token_path, encoding="utf-8") as f:
+                token_data = json.load(f)
+            sso = str(token_data.get("sso", "")).strip()
+            if not sso:
+                skipped.append(f"{email}: 缺少 sso")
+                continue
+            accounts.append({"email": email, "sso": sso})
+        except Exception as e:
+            skipped.append(f"{email}: {e}")
+
+    if not accounts:
+        return JSONResponse({"ok": False, "msg": "没有可导入的账号", "skipped": skipped})
+
+    try:
+        from common.uploaders import upload_sub2api_grok
+
+        sub2api_grok_group = _read_config_val("SUB2API_GROK_GROUP", "grok").strip()
+        sub2api_grok_proxy_id_raw = _read_config_val("SUB2API_GROK_PROXY_ID", "0").strip()
+        try:
+            sub2api_grok_proxy_id = int(sub2api_grok_proxy_id_raw) if sub2api_grok_proxy_id_raw else 0
+        except ValueError:
+            sub2api_grok_proxy_id = 0
+
+        # 参照 register_grok_http.py：导入前先找一个能过 grok CF 的干净 Clash 节点
+        local_proxy = ""
+        try:
+            from common import proxy_switch
+            proxy_mode = proxy_switch.proxy_mode()
+            if proxy_mode in ("clash_auto", "clash_fixed"):
+                node = proxy_switch.find_working_node(
+                    test_url="https://accounts.x.ai/sign-up?redirect=grok-com",
+                    warmup_url="https://console.x.ai/home",
+                    required_markers=("/_next/static/chunks/", "self.__next_f.push"),
+                    verbose=False,
+                )
+                if node:
+                    local_proxy = proxy_switch.effective_proxy_url().strip()
+                else:
+                    return JSONResponse({
+                        "ok": False,
+                        "msg": "没有可用的 Clash 节点能通过 grok.com Cloudflare 校验，请切换节点后重试",
+                        "skipped": skipped,
+                    })
+            else:
+                local_proxy = proxy_switch.effective_proxy_url().strip()
+        except Exception:
+            local_proxy = ""
+            try:
+                from common.proxy_switch import effective_proxy_url
+                local_proxy = effective_proxy_url().strip()
+            except Exception:
+                pass
+
+        success_count = 0
+        errors = []
+        for acc in accounts:
+            ok, msg = upload_sub2api_grok(
+                sub2api_url, sub2api_email, sub2api_password,
+                sub2api_grok_group, acc["sso"], account_email=acc["email"],
+                proxy_id=sub2api_grok_proxy_id or None,
+                local_proxy=local_proxy,
+            )
+            if ok:
+                success_count += 1
+                try:
+                    from common.token_upload_state import mark_uploaded
+                    mark_uploaded("grok", "sub2api", acc["email"])
+                except Exception:
+                    pass
+            else:
+                errors.append(f"{acc['email']}: {msg}")
+
+        if success_count > 0:
+            msg = f"成功导入 {success_count}/{len(accounts)} 个账号到 Sub2API"
+            if errors:
+                msg += f"（{len(errors)} 个失败: {'; '.join(errors)}）"
+            return JSONResponse({
+                "ok": True,
+                "msg": msg,
+                "created": success_count,
+                "total": len(accounts),
+                "skipped": skipped,
+                "errors": errors,
+            })
+        else:
+            return JSONResponse({
+                "ok": False,
+                "msg": f"导入全部失败: {'; '.join(errors)}",
+                "skipped": skipped,
+                "errors": errors,
+            })
+    except Exception as e:
+        return JSONResponse({
+            "ok": False,
+            "msg": f"请求 Sub2API 失败: {e}",
+            "skipped": skipped,
+        })
+
+
 # ============================================================ sms-man 接码助手
 def _gmail_service_default():
     return _read_config_val("SMSMAN_APP_ID_GMAIL", "") or "google"

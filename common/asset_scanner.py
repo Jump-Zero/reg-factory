@@ -15,8 +15,11 @@ import requests
 
 from common import asset_store
 
-
 PLATFORMS = ("outlook", "chatgpt", "claude", "grok", "kiro")
+
+# 缓存 Sub2API 账号列表（60 秒过期），避免每次 get_report 都登录查询
+_sub2api_cache: dict = {"data": None, "ts": 0.0}
+_SUB2API_CACHE_TTL = 60
 STATUSES = (
     "normal",
     "unlock",
@@ -205,6 +208,82 @@ def _status_summary(items: list[dict]) -> dict:
     return {"total": len(items), "statuses": statuses, "platforms": platforms}
 
 
+def _load_sub2api_uploaded() -> dict[str, set[str]]:
+    """Return {platform: set(emails)} that exist in the Sub2API database.
+    
+    Queries the Sub2API admin API for real account data. Falls back to the
+    local uploaded_sub2api.txt marker file when the API is unreachable.
+    Results are cached for _SUB2API_CACHE_TTL seconds.
+    """
+    now = time.time()
+    if _sub2api_cache["data"] is not None and now - _sub2api_cache["ts"] < _SUB2API_CACHE_TTL:
+        return _sub2api_cache["data"]
+
+    result: dict[str, set[str]] = {}
+    
+    # 读取 Sub2API 配置
+    try:
+        import config
+        sub2api_url = (getattr(config, "SUB2API_URL", "") or "").strip()
+        sub2api_email = (getattr(config, "SUB2API_EMAIL", "") or "").strip()
+        sub2api_password = (getattr(config, "SUB2API_PASSWORD", "") or "").strip()
+    except Exception:
+        sub2api_url = sub2api_email = sub2api_password = ""
+
+    if sub2api_url and sub2api_email and sub2api_password:
+        try:
+            from common.uploaders import _sub2api_login, _sub2api_request, _origin
+            from urllib.parse import urlparse
+
+            origin = _origin(sub2api_url)
+            token = _sub2api_login(origin, sub2api_email, sub2api_password, timeout=10)
+            
+            # 查询所有平台的账号（分页获取）
+            for platform in ("grok", "chatgpt", "claude"):
+                all_names: set[str] = set()
+                page = 1
+                while True:
+                    resp = _sub2api_request(
+                        origin,
+                        f"/api/v1/admin/accounts?page={page}&page_size=200&platform={platform}",
+                        token=token,
+                        timeout=15,
+                        retries=1,
+                        use_env_proxy=False,
+                    )
+                    items = resp.get("items", []) if isinstance(resp, dict) else []
+                    for item in items:
+                        name = str(item.get("name") or "").strip().lower()
+                        if name:
+                            all_names.add(name)
+                    total_pages = resp.get("pages", 1) if isinstance(resp, dict) else 1
+                    if page >= total_pages or not items:
+                        break
+                    page += 1
+                if all_names:
+                    result[platform] = all_names
+            
+            _sub2api_cache["data"] = result
+            _sub2api_cache["ts"] = now
+            return result
+        except Exception:
+            pass  # API 失败时回退到本地标记
+
+    # 回退：读取本地 uploaded_sub2api.txt 标记文件
+    token_root = asset_store._token_root()
+    for platform in ("chatgpt", "claude", "grok", "kiro"):
+        path = token_root / platform / "uploaded_sub2api.txt"
+        if path.is_file():
+            result[platform] = {
+                line.strip().lower()
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                if line.strip()
+            }
+    _sub2api_cache["data"] = result
+    _sub2api_cache["ts"] = now
+    return result
+
+
 def get_report() -> dict:
     cache = _read_cache()
     cached_items = {
@@ -212,6 +291,7 @@ def get_report() -> dict:
         for item in cache.get("items", [])
         if isinstance(item, dict) and item.get("id")
     }
+    sub2api_map = _load_sub2api_uploaded()
     items = []
     for record in _inventory_records():
         public = _public_record(record)
@@ -223,12 +303,20 @@ def get_report() -> dict:
         public.setdefault("detail", "尚未扫描")
         public.setdefault("evidence", "none")
         public.setdefault("checked_at", "")
+        platform = public.get("platform", "")
+        email = str(public.get("email", "")).strip().lower()
+        uploaded_set = sub2api_map.get(platform)
+        public["sub2api_uploaded"] = bool(uploaded_set and email in uploaded_set)
         items.append(public)
     return {
         "schema_version": 1,
         "last_scan_at": cache.get("finished_at", ""),
         "items": items,
         "summary": _status_summary(items),
+        "sub2api_counts": {
+            "imported": sum(1 for item in items if item.get("sub2api_uploaded")),
+            "not_imported": sum(1 for item in items if not item.get("sub2api_uploaded")),
+        },
     }
 
 
