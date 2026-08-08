@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ STATUSES = (
     "unknown",
     "error",
 )
+PLUS_TRIAL_STATUSES = ("eligible", "ineligible", "active", "unknown", "disabled")
 
 _BANNED_MARKERS = (
     "account_deactivated",
@@ -195,6 +197,7 @@ def _public_record(record: dict) -> dict:
 
 def _status_summary(items: list[dict]) -> dict:
     statuses = {status: 0 for status in STATUSES}
+    plus_trial = {status: 0 for status in PLUS_TRIAL_STATUSES}
     platforms = {}
     for item in items:
         status = item.get("status", "unknown")
@@ -205,7 +208,15 @@ def _status_summary(items: list[dict]) -> dict:
         entry = platforms.setdefault(platform, {"total": 0, **{name: 0 for name in STATUSES}})
         entry["total"] += 1
         entry[status] += 1
-    return {"total": len(items), "statuses": statuses, "platforms": platforms}
+        if platform == "chatgpt":
+            trial_status = str(item.get("plus_trial") or "unknown")
+            plus_trial[trial_status if trial_status in plus_trial else "unknown"] += 1
+    return {
+        "total": len(items),
+        "statuses": statuses,
+        "platforms": platforms,
+        "plus_trial": plus_trial,
+    }
 
 
 def _load_sub2api_uploaded() -> dict[str, set[str]]:
@@ -296,7 +307,10 @@ def get_report() -> dict:
     for record in _inventory_records():
         public = _public_record(record)
         cached = cached_items.get(public["id"], {})
-        for key in ("status", "detail", "evidence", "checked_at", "latency_ms"):
+        for key in (
+            "status", "detail", "evidence", "checked_at", "latency_ms",
+            "plus_trial", "plus_trial_detail", "plus_trial_evidence",
+        ):
             if key in cached:
                 public[key] = cached[key]
         public.setdefault("status", "unknown")
@@ -307,9 +321,13 @@ def get_report() -> dict:
         email = str(public.get("email", "")).strip().lower()
         uploaded_set = sub2api_map.get(platform)
         public["sub2api_uploaded"] = bool(uploaded_set and email in uploaded_set)
+        if public.get("platform") == "chatgpt":
+            public.setdefault("plus_trial", "unknown")
+            public.setdefault("plus_trial_detail", "尚未检测 Plus 试用资格")
+            public.setdefault("plus_trial_evidence", "none")
         items.append(public)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "last_scan_at": cache.get("finished_at", ""),
         "items": items,
         "summary": _status_summary(items),
@@ -521,7 +539,12 @@ def _scan_chatgpt(record: dict, timeout: int) -> dict:
             except Exception:
                 payload = {}
             if payload.get("accessToken"):
-                return {"status": "normal", "detail": "ChatGPT 登录会话正常", "evidence": "chatgpt_session:200"}
+                return {
+                    "status": "normal",
+                    "detail": "ChatGPT 登录会话正常",
+                    "evidence": "chatgpt_session:200",
+                    "_access_token": str(payload["accessToken"]),
+                }
             return {"status": "expired", "detail": "ChatGPT 会话未返回 accessToken", "evidence": "chatgpt_session:empty"}
         return {"status": "unknown", "detail": f"ChatGPT HTTP {response.status_code}", "evidence": f"chatgpt_session:{response.status_code}"}
 
@@ -539,8 +562,110 @@ def _scan_chatgpt(record: dict, timeout: int) -> dict:
     if classified:
         return classified
     if response.status_code == 200:
-        return {"status": "normal", "detail": "ChatGPT accessToken 正常", "evidence": "chatgpt_token:200"}
+        return {
+            "status": "normal",
+            "detail": "ChatGPT accessToken 正常",
+            "evidence": "chatgpt_token:200",
+            "_access_token": access_token,
+        }
     return {"status": "unknown", "detail": f"ChatGPT token HTTP {response.status_code}", "evidence": f"chatgpt_token:{response.status_code}"}
+
+
+def _chatgpt_plan_type(record: dict) -> str:
+    token = record.get("_token") if isinstance(record.get("_token"), dict) else {}
+    account = token.get("account") if isinstance(token.get("account"), dict) else {}
+    return str(account.get("planType") or token.get("planType") or "").strip().lower()
+
+
+def _scan_chatgpt_plus_trial(record: dict, access_token: str, timeout: int) -> dict:
+    enabled = str(os.environ.get("ASSET_SCAN_CHATGPT_PLUS_TRIAL", "true")).strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return {
+            "plus_trial": "disabled",
+            "plus_trial_detail": "Plus 试用资格检测已关闭",
+            "plus_trial_evidence": "config:disabled",
+        }
+
+    plan_type = _chatgpt_plan_type(record)
+    if plan_type and plan_type not in {"free", "unknown"}:
+        return {
+            "plus_trial": "active",
+            "plus_trial_detail": f"账号已有 {plan_type} 套餐",
+            "plus_trial_evidence": f"session:plan:{plan_type}",
+        }
+    token = str(access_token or "").strip()
+    if not token:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": "缺少 accessToken，未检测 Plus 试用资格",
+            "plus_trial_evidence": "local:missing_access_token",
+        }
+
+    campaign = str(
+        os.environ.get("ASSET_SCAN_CHATGPT_PLUS_CAMPAIGN", "plus-1-month-free")
+    ).strip() or "plus-1-month-free"
+    identity = str(record.get("email") or hashlib.sha256(token.encode("utf-8")).hexdigest())
+    device_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"reg-factory-plus-trial:{identity.lower()}"))
+    try:
+        with _web_session("chatgpt") as session:
+            response = session.get(
+                "https://chatgpt.com/backend-api/promo_campaign/check_coupon",
+                params={"coupon": campaign, "is_coupon_from_query_param": "true"},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Origin": "https://chatgpt.com",
+                    "Referer": "https://chatgpt.com/",
+                    "oai-device-id": device_id,
+                    "x-openai-target-path": "/backend-api/promo_campaign/check_coupon",
+                    "x-openai-target-route": "/backend-api/promo_campaign/check_coupon",
+                },
+                timeout=timeout,
+            )
+        try:
+            payload = response.json() if response.status_code < 500 else {}
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        state = str(payload.get("state") or "").strip().lower()
+        redemption = payload.get("redemption") if isinstance(payload.get("redemption"), dict) else {}
+        redeemed_by_user = redemption.get("redeemed_by_user") is True
+        evidence = f"promo_campaign:{response.status_code}:{state or 'none'}"
+        if response.status_code == 200 and state == "eligible" and not redeemed_by_user:
+            return {
+                "plus_trial": "eligible",
+                "plus_trial_detail": "命中 Plus 免费试用资格",
+                "plus_trial_evidence": evidence,
+            }
+        if response.status_code == 200 and (state in {"ineligible", "redeemed", "expired"} or redeemed_by_user):
+            return {
+                "plus_trial": "ineligible",
+                "plus_trial_detail": "当前没有可用的 Plus 免费试用资格",
+                "plus_trial_evidence": evidence,
+            }
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": f"Plus 资格接口未返回明确结果（HTTP {response.status_code}）",
+            "plus_trial_evidence": evidence,
+        }
+    except requests.Timeout:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": "Plus 试用资格检测超时",
+            "plus_trial_evidence": "promo_campaign:timeout",
+        }
+    except requests.RequestException as exc:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": f"Plus 试用资格网络检测失败：{type(exc).__name__}",
+            "plus_trial_evidence": "promo_campaign:network_error",
+        }
+    except Exception as exc:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": f"Plus 试用资格检测异常：{type(exc).__name__}",
+            "plus_trial_evidence": "promo_campaign:error",
+        }
 
 
 def _scan_claude(record: dict, timeout: int) -> dict:
@@ -662,6 +787,16 @@ def _scan_record(record: dict, timeout: int) -> dict:
         outcome = {"status": "error", "detail": f"检测异常：{str(exc)[:120]}", "evidence": "scanner:error"}
     if outcome.get("status") not in STATUSES:
         outcome["status"] = "unknown"
+    access_token = str(outcome.pop("_access_token", "") or "")
+    if record.get("platform") == "chatgpt" and "plus_trial" not in outcome:
+        if outcome.get("status") == "normal":
+            outcome.update(_scan_chatgpt_plus_trial(record, access_token, timeout))
+        else:
+            outcome.update({
+                "plus_trial": "unknown",
+                "plus_trial_detail": "账号状态异常，未检测 Plus 试用资格",
+                "plus_trial_evidence": "health:not_normal",
+            })
     public.update(outcome)
     public["checked_at"] = outcome.get("checked_at") or _now_iso()
     public["latency_ms"] = round((time.monotonic() - started) * 1000)
@@ -756,15 +891,22 @@ def scan_pool(
         if result:
             public.update({
                 key: result[key]
-                for key in ("status", "detail", "evidence", "checked_at", "latency_ms")
+                for key in (
+                    "status", "detail", "evidence", "checked_at", "latency_ms",
+                    "plus_trial", "plus_trial_detail", "plus_trial_evidence",
+                )
                 if key in result
             })
         else:
             public.update({"status": "unknown", "detail": "尚未扫描", "evidence": "none", "checked_at": ""})
+        if public.get("platform") == "chatgpt":
+            public.setdefault("plus_trial", "unknown")
+            public.setdefault("plus_trial_detail", "尚未检测 Plus 试用资格")
+            public.setdefault("plus_trial_evidence", "none")
         items.append(public)
     finished_at = _now_iso()
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "started_at": started_at,
         "finished_at": finished_at,
         "platforms_scanned": sorted(requested),

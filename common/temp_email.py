@@ -29,7 +29,7 @@ import re
 import string
 import sys
 import time
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -528,18 +528,32 @@ def _icloud_error(response, action):
     return RuntimeError(f"iCloud Mail {action} {response.status_code}: {message}")
 
 
+def _icloud_base_and_query(base_url):
+    """Normalize either the API root or a pasted /api/user/email URL."""
+    raw = _norm_base(base_url, ICLOUD_MAIL_API_BASE)
+    parsed = urlsplit(raw)
+    path = parsed.path.rstrip("/")
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    for endpoint in ("/api/user/email", "/api/user/mail"):
+        if path.lower().endswith(endpoint):
+            path = path[: -len(endpoint)].rstrip("/")
+            break
+    root = urlunsplit((parsed.scheme or "https", parsed.netloc, path, "", "")).rstrip("/")
+    return root, query
+
+
 def _icloud_create(name, domain, expiry_ms, api_key, base_url, sess):
     """Allocate an iCloud address from the provider's GET-only API."""
-    key = (api_key or ICLOUD_MAIL_API_KEY or "").strip()
+    base, pasted_query = _icloud_base_and_query(base_url)
+    key = (api_key or pasted_query.get("apikey") or ICLOUD_MAIL_API_KEY or "").strip()
     if not key:
         raise ValueError("iCloud Mail 需要 API key（ICLOUD_MAIL_API_KEY）")
-    base = _norm_base(base_url, ICLOUD_MAIL_API_BASE)
-    kind = (ICLOUD_MAIL_TYPE or "icloud-code").strip().lower()
+    kind = (pasted_query.get("type") or ICLOUD_MAIL_TYPE or "icloud-code").strip().lower()
     if kind not in {"icloud", "icloud-code"}:
         raise ValueError("ICLOUD_MAIL_TYPE 只能是 icloud 或 icloud-code")
     params = {"type": kind, "apikey": key}
     if kind == "icloud-code":
-        service = (ICLOUD_MAIL_SERVICE or "openai").strip().lower()
+        service = (pasted_query.get("service") or ICLOUD_MAIL_SERVICE or "openai").strip().lower()
         if not service:
             raise ValueError("icloud-code 需要 ICLOUD_MAIL_SERVICE")
         params["service"] = service
@@ -562,11 +576,11 @@ def _icloud_create(name, domain, expiry_ms, api_key, base_url, sess):
 
 def _icloud_fetch(mailbox_id, email, token, api_key, base_url, sess):
     """Query the latest message; an empty success response means no mail yet."""
-    key = (api_key or ICLOUD_MAIL_API_KEY or "").strip()
+    base, pasted_query = _icloud_base_and_query(base_url)
+    key = (api_key or pasted_query.get("apikey") or ICLOUD_MAIL_API_KEY or "").strip()
     address = (email or mailbox_id or "").strip()
     if not key or "@" not in address:
         return []
-    base = _norm_base(base_url, ICLOUD_MAIL_API_BASE)
     response = sess.get(
         f"{base}/api/user/mail",
         params={"email": address, "apikey": key},
@@ -915,6 +929,29 @@ async def poll_verification_code(mailbox_id, provider, email=None, token=None,
     return None
 
 
+def poll_verification_code_blocking(mailbox_id, provider, email=None, token=None,
+                                    api_key=None, base_url=None,
+                                    max_wait=120, poll_interval=5,
+                                    sender_hint=(), subject_hint=(), code_regex=None,
+                                    exclude_codes=()):
+    """Synchronous companion for HTTP-only flows such as Outlook Graph OAuth."""
+    start = time.time()
+    while time.time() - start < max_wait:
+        code = _scan_once(
+            mailbox_id, provider, email, token, api_key, base_url,
+            tuple(sender_hint), tuple(subject_hint), code_regex,
+            tuple(exclude_codes),
+        )
+        if code:
+            print(f"  [temp-email] code found: {code}")
+            return code
+        elapsed = int(time.time() - start)
+        print(f"  [temp-email] waiting for code... ({elapsed}s/{max_wait}s)")
+        time.sleep(poll_interval)
+    print("  [temp-email] timeout, no code")
+    return None
+
+
 def _provider_config(prov):
     """返回某 provider 的 (base_url, key_present, key_source)，供 doctor 展示。"""
     if prov == "moemail":
@@ -924,7 +961,10 @@ def _provider_config(prov):
     if prov == "gptmail":
         return GPTMAIL_BASE_URL, True, "GPTMAIL_API_KEY(或公共 gpt-test)"
     if prov == "icloud":
-        return ICLOUD_MAIL_API_BASE, bool(ICLOUD_MAIL_API_KEY), "ICLOUD_MAIL_API_KEY"
+        # A complete endpoint may carry apikey in its query string.  Return
+        # only the normalized root so doctor output never prints that secret.
+        base, query = _icloud_base_and_query(ICLOUD_MAIL_API_BASE)
+        return base, bool(ICLOUD_MAIL_API_KEY or query.get("apikey")), "ICLOUD_MAIL_API_KEY 或 ICLOUD_MAIL_API_BASE"
     if prov == "cfmail":
         return CFMAIL_BASE_URL, bool(CFMAIL_ADMIN_PASSWORD), "CFMAIL_ADMIN_PASSWORD"
     if prov == "custom":

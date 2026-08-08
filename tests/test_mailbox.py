@@ -6,6 +6,69 @@ from common import mailbox
 
 
 class MailboxTests(unittest.TestCase):
+    def test_parse_outlook_recovery_mailbox_record(self):
+        result = mailbox.parse_outlook_recovery_mailbox(
+            "helper@outlook.com----password----refresh-token----client-id"
+        )
+
+        self.assertEqual(result["email"], "helper@outlook.com")
+        self.assertEqual(result["password"], "password")
+        self.assertEqual(result["refresh_token"], "refresh-token")
+        self.assertEqual(result["client_id"], "client-id")
+        self.assertEqual(result["provider"], "outlook")
+
+    def test_create_outlook_recovery_mailbox_validates_graph_api(self):
+        with patch.object(
+            mailbox,
+            "check_refresh_token",
+            return_value={"ok": True, "access_token": "access"},
+        ) as validator:
+            result = mailbox.create_graph_recovery_mailbox(
+                "outlook",
+                "helper@outlook.com----password----refresh-token----client-id",
+            )
+
+        validator.assert_called_once_with("refresh-token", "client-id")
+        self.assertEqual(result["email"], "helper@outlook.com")
+        self.assertEqual(result["refresh_token"], "refresh-token")
+
+    def test_create_outlook_recovery_mailbox_rejects_invalid_graph_api(self):
+        with patch.object(
+            mailbox,
+            "check_refresh_token",
+            return_value={"ok": False, "reason": "invalid_grant"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "validation failed"):
+                mailbox.create_graph_recovery_mailbox(
+                    "outlook",
+                    "helper@outlook.com----password----refresh-token----client-id",
+                )
+
+    def test_poll_outlook_recovery_code_uses_microsoft_graph_filters(self):
+        with patch.object(
+            mailbox,
+            "get_code_by_token",
+            return_value="123456",
+        ) as reader:
+            result = mailbox.poll_graph_recovery_code(
+                {
+                    "provider": "outlook",
+                    "email": "helper@outlook.com",
+                    "refresh_token": "refresh-token",
+                    "client_id": "client-id",
+                },
+                max_wait=30,
+                poll_interval=2,
+                received_after=123.0,
+            )
+
+        self.assertEqual(result, "123456")
+        self.assertEqual(reader.call_args.args[:2], ("helper@outlook.com", "refresh-token"))
+        self.assertEqual(reader.call_args.kwargs["client_id"], "client-id")
+        self.assertEqual(reader.call_args.kwargs["max_wait"], 30)
+        self.assertEqual(reader.call_args.kwargs["received_after"], 123.0)
+        self.assertIn("microsoft.com", reader.call_args.kwargs["sender_contains"])
+
     def test_refresh_token_classifies_service_abuse_without_echoing_response(self):
         response = MagicMock(status_code=400)
         response.json.return_value = {

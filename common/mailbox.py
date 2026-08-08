@@ -23,6 +23,18 @@ import requests
 
 DEFAULT_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 GRAPH_FOLDERS = ["inbox", "junkemail"]
+OUTLOOK_RECOVERY_PROVIDER = "outlook"
+MICROSOFT_RECOVERY_SENDERS = (
+    "accountprotection.microsoft.com",
+    "microsoft.com",
+    "microsoftonline.com",
+)
+MICROSOFT_RECOVERY_SUBJECTS = (
+    "security code",
+    "verification code",
+    "verify",
+    "code",
+)
 
 # Microsoft 端点(login.microsoftonline.com / graph.microsoft.com)不像 ChatGPT 受地域封锁，
 # 不需要走代理；而 Clash 出口节点对 MS 的 TLS 握手常 SSLEOFError(冷连接闪断)。故取码/换 token
@@ -116,6 +128,98 @@ def check_refresh_token(refresh_token, client_id=DEFAULT_CLIENT_ID,
 def _get_access_token(refresh_token, client_id=DEFAULT_CLIENT_ID,
                       scope="https://graph.microsoft.com/Mail.Read"):
     return check_refresh_token(refresh_token, client_id, scope)["access_token"] or None
+
+
+def parse_outlook_recovery_mailbox(record):
+    """Parse a user-supplied Graph mailbox without logging its credentials."""
+    parts = [part.strip() for part in str(record or "").strip().split("----")]
+    if len(parts) < 4:
+        raise ValueError(
+            "OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX must be "
+            "email----password----refresh_token----client_id"
+        )
+    email, password, refresh_token, client_id = parts[:4]
+    missing = [
+        name for name, value in (
+            ("email", email),
+            ("password", password),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
+        ) if not value
+    ]
+    if missing or "@" not in email:
+        detail = ", ".join(missing) if missing else "email"
+        raise ValueError(f"invalid Outlook recovery mailbox record: missing {detail}")
+    return {
+        "id": email,
+        "email": email,
+        "password": password,
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+        "provider": OUTLOOK_RECOVERY_PROVIDER,
+    }
+
+
+def create_graph_recovery_mailbox(provider, outlook_record=""):
+    """Create a recovery mailbox from a temp provider or a configured Outlook inbox.
+
+    An Outlook inbox is usable only after its Graph refresh token has been
+    verified.  This prevents a registration run from getting stuck after it
+    submits an address whose API credentials cannot receive the security code.
+    """
+    providers = [part.strip().lower() for part in str(provider or "").split(",") if part.strip()]
+    if not providers:
+        providers = ["yyds"]
+    errors = []
+    for candidate in providers:
+        if candidate in {OUTLOOK_RECOVERY_PROVIDER, "graph", "microsoft"}:
+            try:
+                mailbox = parse_outlook_recovery_mailbox(outlook_record)
+                validation = check_refresh_token(
+                    mailbox["refresh_token"], mailbox["client_id"]
+                )
+                if not validation.get("ok"):
+                    raise RuntimeError(
+                        "Graph API validation failed: "
+                        f"{validation.get('reason') or 'unknown_error'}"
+                    )
+                print(f"  [mail] Outlook recovery mailbox Graph API verified: {mailbox['email']}")
+                return mailbox
+            except Exception as exc:
+                errors.append(f"outlook: {str(exc)[:160]}")
+                continue
+        try:
+            from common.temp_email import create_mailbox
+
+            return create_mailbox(provider=candidate)
+        except Exception as exc:
+            errors.append(f"{candidate}: {str(exc)[:160]}")
+    raise RuntimeError("no configured Graph recovery mailbox is usable: " + "; ".join(errors))
+
+
+def poll_graph_recovery_code(mailbox, max_wait=120, poll_interval=5,
+                             received_after=None):
+    """Read a Microsoft security code from either Graph or a temp mailbox API."""
+    provider = str((mailbox or {}).get("provider") or "").strip().lower()
+    if provider == OUTLOOK_RECOVERY_PROVIDER:
+        return get_code_by_token(
+            mailbox["email"],
+            mailbox["refresh_token"],
+            client_id=mailbox["client_id"],
+            sender_contains=MICROSOFT_RECOVERY_SENDERS,
+            subject_contains=MICROSOFT_RECOVERY_SUBJECTS,
+            max_wait=max_wait,
+            poll=poll_interval,
+            received_after=received_after,
+        )
+
+    from common.temp_email import poll_verification_code_blocking
+
+    return poll_verification_code_blocking(
+        mailbox["id"], provider, email=mailbox["email"],
+        token=mailbox.get("token"), max_wait=max_wait,
+        poll_interval=poll_interval,
+    )
 
 
 def fetch_messages(access_token, folder, top=10):

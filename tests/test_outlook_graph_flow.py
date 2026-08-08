@@ -39,6 +39,22 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(max_press["default"], "5")
 
+    def test_outlook_recovery_config_is_prominent_and_supports_owned_mailbox(self):
+        group = next(
+            item for item in webui_scripts.ENV_SCHEMA
+            if item["group"] == "Outlook 自注册"
+        )
+        self.assertEqual(group["notice_level"], "warning")
+        self.assertIn("Graph RT", group["notice"])
+        self.assertIn("outlook-recovery", {test["target"] for test in group["tests"]})
+        recovery = {
+            item["key"]: item for item in group["items"]
+        }
+        self.assertEqual(recovery["OUTLOOK_GRAPH_RECOVERY_EMAIL"]["type"], "bool")
+        self.assertEqual(recovery["OUTLOOK_GRAPH_RECOVERY_EMAIL"]["default"], "true")
+        self.assertIn("outlook", recovery["OUTLOOK_GRAPH_RECOVERY_PROVIDER"]["choices"])
+        self.assertTrue(recovery["OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX"]["secret"])
+
     async def test_optional_recovery_email_is_skipped(self):
         page = MagicMock()
         body = MagicMock()
@@ -329,6 +345,66 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forms[0]["inputs"]["canary"], "canary-token")
         self.assertEqual(inputs["ucaction"], "Yes")
 
+    def test_http_graph_recovery_form_binds_temp_email(self):
+        response = MagicMock(
+            url="https://account.live.com/proofs/Add",
+            text=(
+                "<form method='post' action='/proofs/Add'>"
+                "<input type='hidden' name='canary' value='csrf'>"
+                "<input type='email' id='EmailAddress' name='EmailAddress'>"
+                "</form>"
+            ),
+        )
+        posted = MagicMock(status_code=200, url="https://account.live.com/proofs/Add", text="")
+        session = MagicMock()
+        session.post.return_value = posted
+        mailbox = {
+            "id": "box-1", "email": "alias@example.test", "token": "box-token",
+            "provider": "custom",
+        }
+        with (
+            patch.object(extract_graph_tokens, "_create_graph_recovery_mailbox", return_value=mailbox),
+            patch.object(extract_graph_tokens, "_graph_recovery_settings",
+                         return_value=(True, "custom", 30, 1)),
+        ):
+            next_response, state = extract_graph_tokens._advance_recovery_email(
+                session, response, {}, "[#1]"
+            )
+
+        self.assertIs(next_response, posted)
+        self.assertEqual(state, "email")
+        self.assertEqual(session.post.call_args.kwargs["data"]["EmailAddress"], mailbox["email"])
+
+    def test_http_graph_recovery_form_submits_mailbox_code(self):
+        response = MagicMock(
+            url="https://account.live.com/proofs/Verify",
+            text=(
+                "<form method='post' action='/proofs/Verify'>"
+                "<input type='hidden' name='canary' value='csrf'>"
+                "<input type='text' id='iOttText' name='iOttText'>"
+                "</form>"
+            ),
+        )
+        posted = MagicMock(status_code=302, url="https://login.live.com/oauth20_authorize.srf", text="")
+        session = MagicMock()
+        session.post.return_value = posted
+        mailbox = {
+            "id": "box-1", "email": "alias@example.test", "token": "box-token",
+            "provider": "custom",
+        }
+        with (
+            patch.object(extract_graph_tokens, "_poll_graph_recovery_code", return_value="123456"),
+            patch.object(extract_graph_tokens, "_graph_recovery_settings",
+                         return_value=(True, "custom", 30, 1)),
+        ):
+            next_response, state = extract_graph_tokens._advance_recovery_email(
+                session, response, {"mailbox": mailbox}, "[#1]"
+            )
+
+        self.assertIs(next_response, posted)
+        self.assertEqual(state, "code")
+        self.assertEqual(session.post.call_args.kwargs["data"]["iOttText"], "123456")
+
     def test_http_graph_redirect_resolves_relative_location(self):
         response = MagicMock()
         response.url = "https://login.live.com/oauth20_authorize.srf"
@@ -499,6 +575,56 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
         http_extract.assert_not_called()
         self.assertEqual(results[0]["status"], "OK")
         self.assertEqual(results[0]["graph"]["refresh_token"], "refresh-token")
+
+    async def test_browser_registration_profile_is_reused_for_graph(self):
+        bb = MagicMock()
+        results = []
+        with (
+            patch.object(
+                register_outlook_standalone,
+                "_register_one_browser",
+                AsyncMock(
+                    return_value=(
+                        "user@outlook.com",
+                        "password",
+                        "registration-profile",
+                        "ws://registration",
+                    )
+                ),
+            ) as browser_register,
+            patch.object(
+                register_outlook_standalone,
+                "extract_graph_token_browser",
+                AsyncMock(
+                    return_value={
+                        "refresh_token": "refresh-token",
+                        "client_id": "browser-client-id",
+                    }
+                ),
+            ) as browser_extract,
+        ):
+            await register_outlook_standalone.register_one(
+                bb,
+                1,
+                None,
+                results,
+                __import__("asyncio").Lock(),
+                mode="browser",
+            )
+
+        browser_register.assert_awaited_once_with(
+            bb, 1, None, keep_profile=True
+        )
+        browser_extract.assert_awaited_once_with(
+            bb,
+            "user@outlook.com",
+            "password",
+            1,
+            None,
+            profile_id="registration-profile",
+            ws="ws://registration",
+        )
+        self.assertEqual(results[0]["status"], "OK")
 
 
 if __name__ == "__main__":

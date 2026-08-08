@@ -1,5 +1,26 @@
 ﻿# 更新日志
 
+## 2026-08-09 - 1.2.27
+
+**资产 API 一次性领取与 Plus 资格标注**
+- 资产 API 每次输出前在线扫描，只允许本次状态为 `normal` 的账号进入可领取范围；封禁、过期、受限、凭据异常、未知和检测异常账号不再输出。
+- 新增按“平台 + 账号”持久化的一次性领取账本；同一账号被 API 返回后，切换 Cookie、session、SUB2API、CPA 等格式也不会再次返回，并支持手动重置领取记录。
+- ChatGPT 健康扫描增加 Plus 免费试用资格标注，区分可试用、暂无试用、已有套餐和资格未知；资格检测失败不改变账号健康状态。
+- WebUI 新手教程新增 Outlook Graph 辅助邮箱配置步骤，环境配置中的辅助邮箱开关改为默认勾选的复选框。
+- 资产页更新一次性领取说明、剩余账号提示和 ChatGPT Plus 试用资格列。
+
+---
+
+## 2026-08-08 - 1.2.26
+
+**Outlook Graph 辅助邮箱与 RT 提取提醒**
+- Outlook Graph `proofs/Add` 安全信息页支持使用用户自有 Outlook 辅助邮箱。
+- 新增 `email----password----refresh_token----client_id` 配置格式；提交前通过 Graph API 验证 refresh token，并从 Inbox/Junk 轮询 Microsoft 安全码。
+- `yyds`、`custom`、`outlook` 支持按逗号顺序配置故障转移；WebUI 增加醒目的 RT 前置配置提醒和辅助邮箱 API 验证按钮。
+- 注册浏览器 profile 在 Graph 授权完成前保持复用，避免注册成功后提前关闭窗口。
+
+---
+
 ## 2026-08-05 - 1.2.25
 
 **Plus 提链协议更新**

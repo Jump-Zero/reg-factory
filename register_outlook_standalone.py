@@ -946,6 +946,163 @@ async def _skip_optional_recovery_email(page, idx=0):
     return True, False
 
 
+def _graph_recovery_settings():
+    try:
+        import config as _config
+    except Exception:
+        _config = None
+    enabled = getattr(_config, "OUTLOOK_GRAPH_RECOVERY_EMAIL", None)
+    if enabled is None:
+        enabled = os.environ.get("OUTLOOK_GRAPH_RECOVERY_EMAIL", "true")
+        enabled = str(enabled).strip().lower() in {"1", "true", "yes", "on"}
+    provider = getattr(_config, "OUTLOOK_GRAPH_RECOVERY_PROVIDER", "") or os.environ.get(
+        "OUTLOOK_GRAPH_RECOVERY_PROVIDER", "yyds"
+    )
+    timeout = getattr(_config, "OUTLOOK_GRAPH_RECOVERY_TIMEOUT", None)
+    interval = getattr(_config, "OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL", None)
+    try:
+        timeout = max(10, int(timeout if timeout is not None else os.environ.get(
+            "OUTLOOK_GRAPH_RECOVERY_TIMEOUT", "120"
+        )))
+    except (TypeError, ValueError):
+        timeout = 120
+    try:
+        interval = max(1, int(interval if interval is not None else os.environ.get(
+            "OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL", "5"
+        )))
+    except (TypeError, ValueError):
+        interval = 5
+    return bool(enabled), str(provider).strip() or "yyds", timeout, interval
+
+
+def _graph_recovery_outlook_mailbox():
+    """Return the configured user-owned Outlook inbox record without logging it."""
+    try:
+        import config as _config
+    except Exception:
+        _config = None
+    return str(
+        getattr(_config, "OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX", "")
+        or os.environ.get("OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX", "")
+    ).strip()
+
+
+async def _bind_required_recovery_email(page, state, idx=0):
+    """Fill Microsoft's security-info email form and submit its mailbox code."""
+    tag = f"[#{idx}]"
+    enabled, provider, timeout, interval = _graph_recovery_settings()
+    if not enabled:
+        return False, False
+    try:
+        current_url = (page.url or "").lower()
+        body = " ".join((await page.locator("body").inner_text(timeout=3000)).split()).lower()
+    except Exception:
+        return False, False
+    markers = (
+        "/proofs/add", "recovery email", "alternate email", "add an email address",
+        "security info", "help us protect your account", "security information",
+        "杈呭姪閭", "鎭㈠閭", "澶囩敤閭", "娣诲姞鐢靛瓙閭欢",
+    )
+    if not (
+        state.get("email_submitted") or state.get("code_task")
+        or any(marker in current_url or marker in body for marker in markers)
+    ):
+        return False, False
+    state.setdefault("code_submitted", False)
+    if state.get("code_submitted"):
+        return True, True
+
+    email_input = page.locator(
+        'input[type="email"], input[name*="email" i], input[id*="email" i], '
+        'input[name*="address" i], input[id*="address" i]'
+    ).first
+    try:
+        has_email = await email_input.count() > 0 and await email_input.is_visible()
+    except Exception:
+        has_email = False
+    if has_email and not state.get("email_submitted"):
+        if not state.get("mailbox"):
+            try:
+                from common.mailbox import create_graph_recovery_mailbox
+                state["mailbox"] = await asyncio.to_thread(
+                    create_graph_recovery_mailbox,
+                    provider,
+                    _graph_recovery_outlook_mailbox(),
+                )
+                print(f"  {tag} [graph] binding recovery email via {state['mailbox']['provider']}: "
+                      f"{state['mailbox']['email']}")
+            except Exception as exc:
+                print(f"  {tag} [graph] recovery mailbox create failed: {str(exc)[:140]}")
+                return True, False
+        try:
+            await email_input.fill(state["mailbox"]["email"])
+            clicked = await _click_microsoft_action(
+                page, preferred_ids=(
+                    "iNext", "idSubmit_SAOTCSend", "idBtn_SAOTCSend",
+                    "idSubmit_SAOTC", "idBtn_SAOTC", "continueButton",
+                )
+            )
+            if not clicked:
+                await email_input.press("Enter")
+            state["email_submitted"] = True
+            state["code_requested_at"] = time.time()
+            await asyncio.sleep(2)
+            return True, True
+        except Exception as exc:
+            print(f"  {tag} [graph] recovery email submit failed: {str(exc)[:120]}")
+            return True, False
+
+    code_input = page.locator(
+        'input[autocomplete="one-time-code"], input[name*="otc" i], input[id*="otc" i], '
+        'input[name*="code" i], input[id*="code" i], input[name*="ott" i], input[id*="ott" i]'
+    ).first
+    try:
+        has_code = await code_input.count() > 0 and await code_input.is_visible()
+    except Exception:
+        has_code = False
+    if not has_code:
+        return True, False
+    if not state.get("code_task"):
+        from common.mailbox import poll_graph_recovery_code
+        mailbox = state.get("mailbox")
+        if not mailbox:
+            print(f"  {tag} [graph] recovery code page has no mailbox state")
+            return True, False
+        state["code_task"] = asyncio.create_task(asyncio.to_thread(
+            poll_graph_recovery_code,
+            mailbox,
+            max_wait=timeout,
+            poll_interval=interval,
+            received_after=state.get("code_requested_at"),
+        ))
+        return True, True
+    task = state["code_task"]
+    if not task.done():
+        return True, True
+    try:
+        code = task.result()
+    except Exception as exc:
+        print(f"  {tag} [graph] recovery code poll failed: {str(exc)[:120]}")
+        return True, False
+    if not code:
+        print(f"  {tag} [graph] recovery code timed out")
+        return True, False
+    try:
+        await code_input.fill(str(code))
+        clicked = await _click_microsoft_action(
+            page, preferred_ids=("iNext", "idSubmit_SAOTC", "idBtn_SAOTC", "continueButton")
+        )
+        if not clicked:
+            await code_input.press("Enter")
+        state["code_submitted"] = True
+        print(f"  {tag} [graph] recovery email verified")
+        await asyncio.sleep(2)
+        return True, True
+    except Exception as exc:
+        print(f"  {tag} [graph] recovery code submit failed: {str(exc)[:120]}")
+        return True, False
+
+
 async def _skip_optional_passkey(page, idx=0):
     """Cancel optional Microsoft passkey enrollment without opening native UI."""
     tag = f"[#{idx}]"
@@ -1102,9 +1259,11 @@ async def _extract_graph_token_device(page, email, password, idx=0):
     except Exception as e:
         print(f"  {tag} [graph] device page navigation warning: {str(e)[:100]}")
 
+    _, _, recovery_timeout, _ = _graph_recovery_settings()
     code_submitted = False
+    recovery_state = {}
     idle_rounds = 0
-    for _ in range(30):
+    for _ in range(max(30, recovery_timeout // 2 + 15)):
         state, token_data = await asyncio.to_thread(
             _exchange_graph_device_code, device["device_code"]
         )
@@ -1126,12 +1285,18 @@ async def _extract_graph_token_device(page, email, password, idx=0):
         passkey_page = passkey_skipped = False
         if not kmsi_page and not consent_page:
             passkey_page, passkey_skipped = await _skip_optional_passkey(page, idx)
-        recovery_page = recovery_skipped = False
+        recovery_page = recovery_bound = False
         if not kmsi_page and not consent_page and not passkey_page:
-            recovery_page, recovery_skipped = await _skip_optional_recovery_email(
-                page, idx
-            )
-        acted = kmsi_accepted or consent_accepted or passkey_skipped or recovery_skipped
+            recovery_enabled, _, _, _ = _graph_recovery_settings()
+            if recovery_enabled:
+                recovery_page, recovery_bound = await _bind_required_recovery_email(
+                    page, recovery_state, idx
+                )
+            if not recovery_page:
+                recovery_page, recovery_bound = await _skip_optional_recovery_email(
+                    page, idx
+                )
+        acted = kmsi_accepted or consent_accepted or passkey_skipped or recovery_bound
         optional_setup_page = kmsi_page or consent_page or passkey_page or recovery_page
         if not acted and not optional_setup_page:
             email_input = page.locator('input[type="email"], input[name="loginfmt"]').first
@@ -2441,13 +2606,20 @@ async def _register_one_headless(idx, proxy_str):
 
 # ======================== Browser Mode (BitBrowser, full GUI) ========================
 
-async def _register_one_browser(bb, idx, proxy_str):
+async def _register_one_browser(bb, idx, proxy_str, keep_profile=False):
     """
     Register via BitBrowser full browser (highest traffic, most reliable).
-    Returns (email, password) or (None, None).
+    Returns (email, password) or (email, password, profile_id, ws) when
+    keep_profile=True.
     """
     tag = f"[#{idx}][browser]"
     profile_id = None
+    ws = ""
+
+    def _result(email, password, retained_id=None, retained_ws=""):
+        if keep_profile:
+            return email, password, retained_id, retained_ws
+        return email, password
     try:
         ts = datetime.now().strftime("%m%d_%H%M%S")
         name = f"outlook_{ts}_{idx}"
@@ -2476,13 +2648,13 @@ async def _register_one_browser(bb, idx, proxy_str):
 
         if not profile_id:
             print(f"  {tag} create browser failed")
-            return None, None
+            return _result(None, None)
 
         info = bb.open_browser(profile_id)
         ws = info.get("ws", "")
         if not ws:
             print(f"  {tag} no WebSocket URL")
-            return None, None
+            return _result(None, None)
 
         print(f"  {tag} BitBrowser connected")
         async with async_playwright() as p:
@@ -2494,11 +2666,16 @@ async def _register_one_browser(bb, idx, proxy_str):
             # Bandwidth saving via resource blocking only applies in headless mode.
             email, password = await register_outlook(page, context, idx)
 
-        return email, password
+        if keep_profile and email and password:
+            retained_id = profile_id
+            profile_id = None
+            print(f"  {tag} keeping browser profile for Graph authorization")
+            return _result(email, password, retained_id, ws)
+        return _result(email, password)
 
     except Exception as e:
         print(f"  {tag} error: {e}")
-        return None, None
+        return _result(None, None)
     finally:
         if profile_id:
             try:
@@ -2510,29 +2687,33 @@ async def _register_one_browser(bb, idx, proxy_str):
                 pass
 
 
-async def extract_graph_token_browser(bb, email, password, idx=0, proxy_str=None):
-    """Authorize Graph in a disposable BitBrowser profile via Device Code."""
+async def extract_graph_token_browser(
+    bb, email, password, idx=0, proxy_str=None, profile_id=None, ws=""
+):
+    """Authorize Graph via Device Code, reusing a live registration profile when supplied."""
     tag = f"[#{idx}][graph-browser]"
-    profile_id = None
+    reused_profile = bool(profile_id)
     try:
-        name = f"outlook_graph_{datetime.now().strftime('%m%d_%H%M%S')}_{idx}"
-        for attempt in range(3):
-            try:
-                profile_id = bb.create_browser(name=name, proxy_str=proxy_str)
-                break
-            except Exception as e:
-                if attempt >= 2:
-                    raise
-                print(f"  {tag} create retry {attempt + 1}/3: {str(e)[:80]}")
-                await asyncio.sleep(3 + attempt)
         if not profile_id:
-            return None
-
-        info = bb.open_browser(profile_id)
-        ws = info.get("ws", "")
+            name = f"outlook_graph_{datetime.now().strftime('%m%d_%H%M%S')}_{idx}"
+            for attempt in range(3):
+                try:
+                    profile_id = bb.create_browser(name=name, proxy_str=proxy_str)
+                    break
+                except Exception as e:
+                    if attempt >= 2:
+                        raise
+                    print(f"  {tag} create retry {attempt + 1}/3: {str(e)[:80]}")
+                    await asyncio.sleep(3 + attempt)
+            if not profile_id:
+                return None
+        if not ws:
+            info = bb.open_browser(profile_id)
+            ws = info.get("ws", "")
         if not ws:
             print(f"  {tag} no WebSocket URL")
             return None
+        print(f"  {tag} using {'registration' if reused_profile else 'new'} browser profile for Graph")
         async with async_playwright() as p:
             browser = await p.chromium.connect_over_cdp(ws)
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
@@ -2565,6 +2746,8 @@ async def register_one(bb, idx, proxy_str, results, results_lock, live_fh=None, 
     tag = f"[#{idx}]"
     email, password = None, None
     used_mode = None
+    registration_profile_id = None
+    registration_ws = ""
 
     try:
         # ── 1. Protocol mode (pure HTTP, ~50KB) ──────────────────
@@ -2596,10 +2779,11 @@ async def register_one(bb, idx, proxy_str, results, results_lock, live_fh=None, 
         if not email and mode in ("auto", "browser"):
             print(f"  {tag} [3/3] browser mode (BitBrowser)...")
             try:
-                email, password = await asyncio.wait_for(
-                    _register_one_browser(bb, idx, proxy_str),
+                browser_result = await asyncio.wait_for(
+                    _register_one_browser(bb, idx, proxy_str, keep_profile=True),
                     timeout=REGISTER_TIMEOUT,
                 )
+                email, password, registration_profile_id, registration_ws = browser_result
             except asyncio.TimeoutError:
                 print(f"  {tag} browser timeout")
             if email:
@@ -2611,9 +2795,13 @@ async def register_one(bb, idx, proxy_str, results, results_lock, live_fh=None, 
     graph = None
     if email:
         print(f"  {tag} [graph] extracting refresh_token via Device Code...")
-        graph = await extract_graph_token_browser(
-            bb, email, password, idx, proxy_str
-        )
+        if registration_profile_id:
+            graph = await extract_graph_token_browser(
+                bb, email, password, idx, proxy_str,
+                profile_id=registration_profile_id, ws=registration_ws,
+            )
+        else:
+            graph = await extract_graph_token_browser(bb, email, password, idx, proxy_str)
         if not graph or not graph.get("refresh_token"):
             print(f"  {tag} [graph] browser authorization failed; trying HTTP fallback")
             loop = asyncio.get_event_loop()

@@ -869,6 +869,26 @@ def _test_yyds():
         return False, detail
 
 
+def _test_outlook_recovery_mailbox():
+    record = _read_config_val("OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX", "").strip()
+    if not record:
+        return False, "请先填写 OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX"
+    try:
+        from common.mailbox import check_refresh_token, parse_outlook_recovery_mailbox
+
+        mailbox = parse_outlook_recovery_mailbox(record)
+        validation = check_refresh_token(
+            mailbox["refresh_token"], mailbox["client_id"]
+        )
+        if not validation.get("ok"):
+            return False, "Graph API 验证失败: " + str(
+                validation.get("reason") or "unknown_error"
+            )
+        return True, f"Graph API 验证成功：{mailbox['email']}"
+    except Exception as exc:
+        return False, str(exc)[:180]
+
+
 def _test_k12():
     status = _k12_status()
     return status["alive"], status["message"] + f"（{status['url']}）"
@@ -881,6 +901,7 @@ _TESTERS = {
     "smsman": _test_smsman,
     "firefox": _test_firefox,
     "yyds": _test_yyds,
+    "outlook-recovery": _test_outlook_recovery_mailbox,
 }
 
 
@@ -2533,7 +2554,13 @@ def api_env_get():
                 "type": it.get("type", "str"),
                 "choices": it.get("choices", []),
             })
-        groups.append({"group": g["group"], "tests": g.get("tests", []), "items": items})
+        groups.append({
+            "group": g["group"],
+            "notice": g.get("notice", ""),
+            "notice_level": g.get("notice_level", ""),
+            "tests": g.get("tests", []),
+            "items": items,
+        })
     return {"groups": groups, "env_exists": os.path.isfile(ENV_PATH)}
 
 

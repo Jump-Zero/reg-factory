@@ -445,6 +445,9 @@ const ASSET_SCAN_STATUS_LABELS = {
 const ASSET_SCAN_PLATFORM_LABELS = {
   outlook:'Outlook', chatgpt:'ChatGPT', claude:'Claude', grok:'Grok', kiro:'Kiro',
 };
+const ASSET_PLUS_TRIAL_LABELS = {
+  eligible:'可试用', ineligible:'暂无试用', active:'已有套餐', unknown:'资格未知', disabled:'检测关闭',
+};
 const ASSET_SCAN_PAGE_SIZE = 25;
 
 function assetHeaders(json=false){
@@ -645,7 +648,17 @@ function renderAssetScanTable(){
     badge.textContent = ASSET_SCAN_STATUS_LABELS[item.status] || item.status || '未知';
     statusCell.appendChild(badge);
     row.appendChild(statusCell);
-    // 检测结果
+    const trialCell = document.createElement('td');
+    if(item.platform === 'chatgpt'){
+      const trial = document.createElement('span');
+      trial.className = `asset-trial-badge ${item.plus_trial || 'unknown'}`;
+      trial.textContent = ASSET_PLUS_TRIAL_LABELS[item.plus_trial] || '资格未知';
+      trial.title = `${item.plus_trial_detail || '尚未检测'} · ${item.plus_trial_evidence || 'none'}`;
+      trialCell.appendChild(trial);
+    }else{
+      trialCell.textContent = '--';
+    }
+    row.appendChild(trialCell);
     const detail = appendAssetScanCell(row, item.detail || '尚未扫描', 'asset-scan-detail');
     detail.title = `${item.evidence || 'none'} · ${item.source || ''}`;
     // Sub2API 导入状态
@@ -837,8 +850,8 @@ async function callAssetApi(){
     const response = await fetch(request.relative, {headers:assetHeaders()});
     const data = await readAssetResponse(response);
     $('#asset-response').textContent = JSON.stringify(data, null, 2);
-    const progress = data.total === undefined ? '' : `，index ${data.index}/${Math.max(0, data.total-1)}`;
-    setAssetMessage('#asset-call-msg', `在线校验通过并调用成功${progress}`, true);
+    const progress = data.remaining === undefined ? '' : `，剩余 ${data.remaining} 个未领取正常账号`;
+    setAssetMessage('#asset-call-msg', `在线校验通过并完成一次性领取${progress}`, true);
     await refreshAssetSummary(true);
   }catch(error){
     $('#asset-response').textContent = JSON.stringify({error:error.message || String(error)}, null, 2);
@@ -852,12 +865,12 @@ async function resetAssetCursor(){
   const request = buildAssetRequest();
   const scope = $('#asset-reset-scope').value === 'all'
     ? 'all'
-    : (request.resource === 'emails' ? 'verified:email' : `verified:cookie:${request.resource}:${request.format}`);
+    : (request.resource === 'emails' ? 'outlook' : request.resource);
   try{
     const response = await fetch('/api/assets/cursors/reset', {method:'POST', headers:assetHeaders(true), body:JSON.stringify({scope})});
     const data = await readAssetResponse(response);
     $('#asset-response').textContent = JSON.stringify(data, null, 2);
-    setAssetMessage('#asset-call-msg', scope === 'all' ? '全部游标已重置' : '当前游标已重置', true);
+    setAssetMessage('#asset-call-msg', scope === 'all' ? '全部领取记录已重置' : '当前资产领取记录已重置', true);
   }catch(error){ setAssetMessage('#asset-call-msg', error.message || String(error), false); }
   finally{ button.disabled = false; }
 }
@@ -1527,6 +1540,10 @@ $('#btn-stop-all').onclick = async ()=>{
 };
 
 // ---------------------------------------------------------------- 配置页
+function envControlValue(control){
+  return control.type === 'checkbox' ? (control.checked ? 'true' : 'false') : control.value;
+}
+
 async function loadEnv(){
   const data = await (await fetch('/api/env')).json();
   const wrap = $('#env-groups'); wrap.innerHTML='';
@@ -1534,23 +1551,36 @@ async function loadEnv(){
     const box = document.createElement('div'); box.className='env-group';
     const itemKeys = new Set((g.items||[]).map(item=>item.key));
     if(itemKeys.has('FINGERPRINT_BROWSER')) box.dataset.guideGroup = 'browser';
+    else if(itemKeys.has('OUTLOOK_GRAPH_RECOVERY_EMAIL')) box.dataset.guideGroup = 'outlook-recovery';
     else if(itemKeys.has('CHATGPT_EMAIL_PROVIDER')) box.dataset.guideGroup = 'chatgpt-email';
     else if(itemKeys.has('TEMP_EMAIL_PROVIDER')) box.dataset.guideGroup = 'temp-email';
     else if(itemKeys.has('SMSMAN_TOKEN')) box.dataset.guideGroup = 'sms';
     const tests = (g.tests||[]).map(t=>
       `<button class="btn-test" data-test="${t.target}">${t.label}</button>`).join('');
+    const notice = g.notice
+      ? `<div class="env-notice ${g.notice_level==='warning'?'warning':''}" role="alert">${g.notice}</div>`
+      : '';
     box.innerHTML = `<div class="env-group-title">
         <span>${g.group}</span>
         <span class="test-area">${tests}<span class="test-result" data-result-for="${g.group}"></span></span>
-      </div>`;
+      </div>${notice}`;
     g.items.forEach(it=>{
       const row = document.createElement('div'); row.className='env-item';
       const type = it.secret ? 'password':'text';
       const value = it.value || it.default || '';
-      const control = it.type === 'choice'
-        ? `<select data-env="${it.key}">${(it.choices||[]).map(c=>`<option value="${c}" ${c===value?'selected':''}>${c}</option>`).join('')}</select>`
-        : `<input type="${type}" data-env="${it.key}" value="${(it.value||'').replace(/"/g,'&quot;')}"
+      let control;
+      if(it.type === 'bool'){
+        const checked = ['1','true','yes','on'].includes(String(value).toLowerCase());
+        control = `<label class="env-checkbox">
+          <input type="checkbox" data-env="${it.key}" ${checked?'checked':''}>
+          <span>启用</span>
+        </label>`;
+      }else if(it.type === 'choice'){
+        control = `<select data-env="${it.key}">${(it.choices||[]).map(c=>`<option value="${c}" ${c===value?'selected':''}>${c}</option>`).join('')}</select>`;
+      }else{
+        control = `<input type="${type}" data-env="${it.key}" value="${(it.value||'').replace(/"/g,'&quot;')}"
                  placeholder="${it.default? '默认 '+it.default : ''}">`;
+      }
       row.innerHTML = `
         <div class="k">${it.key}${it.required?'<span class="req">*</span>':''}</div>
         <div class="v">
@@ -1570,7 +1600,10 @@ async function loadEnv(){
 // 连通测试：把当前页面所有 .env 输入(含未保存的)一起发过去，用最新值测
 async function runTest(target, btn){
   const env = {};
-  $$('input[data-env],select[data-env]').forEach(i=>{ if(i.value!=='') env[i.dataset.env]=i.value; });
+  $$('input[data-env],select[data-env]').forEach(i=>{
+    const value = envControlValue(i);
+    if(value!=='') env[i.dataset.env]=value;
+  });
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = '测试中…';
   const res = btn.closest('.env-group').querySelector('.test-result');
@@ -1589,7 +1622,7 @@ async function runTest(target, btn){
 
 $('#btn-save-env').onclick = async ()=>{
   const env = {};
-  $$('input[data-env],select[data-env]').forEach(i=>{ env[i.dataset.env] = i.value; });
+  $$('input[data-env],select[data-env]').forEach(i=>{ env[i.dataset.env] = envControlValue(i); });
   const r = await (await fetch('/api/env',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({env})})).json();
   const msg = $('#env-msg');
@@ -1696,7 +1729,7 @@ async function releaseNum(pkey){
 }
 
 // ---------------------------------------------------------------- 新手指南
-const GUIDE_STORAGE_KEY = 'reg-factory-guide-v1';
+const GUIDE_STORAGE_KEY = 'reg-factory-guide-v2';
 const GUIDE_STEPS = [
   {
     id:'welcome', section:'开始', title:'先认识工作台', target:'.brand', placement:'bottom',
@@ -1761,6 +1794,7 @@ const GUIDE_STEPS = [
     body:`<p>环境配置会保存到本机 <code>.env</code>，新任务立即读取，无需重启服务。</p>
       <ul class="tour-list">
         <li>指纹浏览器决定 Chrome、内置浏览器或 BitBrowser 的启动方式。</li>
+        <li>Outlook 提取 Graph RT 时必须启用辅助邮箱，并配置可接收 Microsoft 验证码的 provider。</li>
         <li>邮箱和临时邮箱组用于收取网页验证码。</li>
         <li>短信接码和打码平台只在需要手机号或验证码挑战时配置。</li>
         <li>SUB2API、CPA、chatgpt2api 等组只在注册后自动导入时配置。</li>
@@ -1770,11 +1804,19 @@ const GUIDE_STEPS = [
   {
     id:'browser', section:'浏览器', title:'选择浏览器方式', target:'[data-guide-group="browser"]', placement:'left',
     prepare:async()=>ensureGuideView('env'),
-    skipLabel:'跳过浏览器配置', skipTo:'env-test',
+    skipLabel:'跳过浏览器配置', skipTo:'outlook-recovery',
     body:`<p><strong>ruyipage</strong> 是默认值，使用 Firefox WebDriver BiDi 指纹内核。首次使用先在任务库运行“安装 RuyiPage Firefox”，再点本组连通测试。</p>
       <p><strong>bundled</strong> 使用程序自带或系统可用的 Chromium；Claude、Grok 和 Outlook 等仍依赖 Chromium CDP 的旧流程会自动回退到它。</p>
       <p><strong>custom</strong> 使用普通 Chrome，填写 <code>CUSTOM_BROWSER_PATH</code>。Windows 常见路径是 <code>C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe</code>。</p>
       <p><strong>bitbrowser</strong> 需要先启动比特浏览器，并确认本地 API 通常为 <code>http://127.0.0.1:54345</code>。填写后使用本组的连通测试。</p>`,
+  },
+  {
+    id:'outlook-recovery', section:'Outlook', title:'提取 RT 前配置辅助邮箱', target:'[data-guide-group="outlook-recovery"]', placement:'left',
+    prepare:async()=>ensureGuideView('env'),
+    skipLabel:'跳过 Outlook 辅助邮箱', skipTo:'env-test',
+    body:`<p>需要提取 Graph refresh token 时，保持“启用”复选框勾选。Microsoft 出现 <code>proofs/Add</code> 安全信息页后，程序会自动绑定辅助邮箱并接收验证码。</p>
+      <p>临时邮箱可选择 <code>yyds</code> 或 <code>custom</code>。使用自有 Outlook 辅助邮箱时选择 <code>outlook</code>，并填写 <code>email----password----refresh_token----client_id</code> 四段凭据。</p>
+      <p>填写自有 Outlook 邮箱后，先点击组标题右侧的“验证 Outlook 辅助邮箱 RT”。验证通过再保存配置；取消勾选后不能保证成功提取 RT。</p>`,
   },
   {
     id:'env-test', section:'环境配置', title:'每组都可以一键测试', target:()=>$('[data-guide-group="browser"] .btn-test'), placement:'left',
@@ -1790,14 +1832,16 @@ const GUIDE_STEPS = [
     skipLabel:'跳过资产 API', skipTo:'chatgpt-email',
     body:`<p>资产 API 用于向本地程序或下游服务读取邮箱、Cookie 和登录凭据。先在号池状态区选择类型，再运行“扫描当前类型”或“一键扫描全部”。</p>
       <p>扫描会将资产分为正常、待解锁、封禁、过期、受限、凭据异常和检测异常。网络错误或目标站风控会显示为受限或检测异常，不会误判为封禁。</p>
+      <p>正常 ChatGPT 账号会额外标注 Plus 免费试用资格。资格接口失败只显示“资格未知”，不会改变账号健康状态。</p>
       <p>API 不会输出未验证、封禁、过期、受限或凭据异常资产。</p>`,
   },
   {
     id:'asset-call', section:'资产 API', title:'每次输出前都会在线校验', target:'[data-guide="asset-call"]', placement:'top',
     prepare:async()=>ensureGuideView('assets'),
     skipLabel:'跳过资产 API', skipTo:'chatgpt-email',
-    body:`<p>选择资产、输出格式和取用方式后，点击“在线校验并调用 API”。顺序取用只会在健康资产池中推进，指定 index 也以健康资产池为准。</p>
-      <p>接口会先扫描对应平台，再只返回状态为“正常”的记录。响应中的 verification 字段包含本次检测时间和依据。</p>
+    body:`<p>选择资产、输出格式和取用方式后，点击“在线校验并调用 API”。顺序取用和指定 index 都只面向未领取的健康账号。</p>
+      <p>接口会先扫描对应平台，只返回状态为“正常”的记录，并立即写入领取账本。同一平台账号即使切换输出格式也不会再次返回；只有手动重置领取记录后才可重新领取。</p>
+      <p>响应中的 <code>verification</code> 是本次检测依据，<code>remaining</code> 是该平台剩余未领取正常账号数。</p>
       <p>这代表账号在本次检测时可用，不代表后续不会被目标服务限制。读取地址和 API key 仅应提供给受信任的本地服务。</p>`,
   },
   {

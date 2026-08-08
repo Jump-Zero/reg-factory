@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,9 +36,9 @@ if sys.platform == "win32":
 import requests
 
 try:
-    import config  # noqa: F401  # load project .env for OUTLOOK_UI_LOCALE
+    import config  # load project .env and Graph recovery settings
 except Exception:
-    pass
+    config = None
 
 # Thunderbird client — public, supports personal accounts.
 # 用 Graph Mail.Read 资源域：下游 common/mailbox.get_code_by_token 走 Graph REST
@@ -68,6 +69,7 @@ class _MicrosoftFormParser(HTMLParser):
                 "action": attributes.get("action", ""),
                 "method": attributes.get("method", "post").lower(),
                 "inputs": {},
+                "input_attrs": {},
             }
         elif tag.lower() == "input":
             name = attributes.get("name", "")
@@ -77,6 +79,7 @@ class _MicrosoftFormParser(HTMLParser):
             self.inputs[name.lower()] = value
             if self._form is not None:
                 self._form["inputs"][name] = value
+                self._form["input_attrs"][name] = attributes
 
     def handle_endtag(self, tag):
         if tag.lower() == "form" and self._form is not None:
@@ -108,9 +111,122 @@ def _redirect_url(response, location):
     return urllib.parse.urljoin(getattr(response, "url", ""), html.unescape(location or ""))
 
 
+def _graph_recovery_settings():
+    """Read the optional security-info binding settings without exposing keys."""
+    enabled = getattr(config, "OUTLOOK_GRAPH_RECOVERY_EMAIL", None)
+    if enabled is None:
+        enabled = os.environ.get("OUTLOOK_GRAPH_RECOVERY_EMAIL", "true")
+        enabled = str(enabled).strip().lower() in {"1", "true", "yes", "on"}
+    provider = getattr(config, "OUTLOOK_GRAPH_RECOVERY_PROVIDER", "") or os.environ.get(
+        "OUTLOOK_GRAPH_RECOVERY_PROVIDER", "yyds"
+    )
+    timeout = getattr(config, "OUTLOOK_GRAPH_RECOVERY_TIMEOUT", None)
+    if timeout is None:
+        timeout = os.environ.get("OUTLOOK_GRAPH_RECOVERY_TIMEOUT", "120")
+    interval = getattr(config, "OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL", None)
+    if interval is None:
+        interval = os.environ.get("OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL", "5")
+    try:
+        timeout = max(10, int(timeout))
+    except (TypeError, ValueError):
+        timeout = 120
+    try:
+        interval = max(1, int(interval))
+    except (TypeError, ValueError):
+        interval = 5
+    return bool(enabled), str(provider).strip() or "yyds", timeout, interval
+
+
+def _graph_recovery_outlook_mailbox():
+    """Return the user-owned Outlook recovery record without exposing its secrets."""
+    return str(
+        getattr(config, "OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX", "")
+        or os.environ.get("OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX", "")
+    ).strip()
+
+
+def _find_form_input(form, kinds):
+    """Return the visible input name matching one of the Microsoft field hints."""
+    wanted = tuple(kinds)
+    for name, attrs in (form.get("input_attrs") or {}).items():
+        input_type = (attrs.get("type") or "").lower()
+        if input_type in {"hidden", "submit", "button", "checkbox", "radio"}:
+            continue
+        hint = " ".join((
+            name, attrs.get("id", ""), attrs.get("name", ""),
+            attrs.get("autocomplete", ""), attrs.get("aria-label", ""),
+            attrs.get("placeholder", ""),
+        )).lower()
+        if input_type == "email" and "email" in wanted:
+            return name
+        if any(token in hint for token in wanted):
+            return name
+    return None
+
+
+def _create_graph_recovery_mailbox(provider):
+    from common.mailbox import create_graph_recovery_mailbox
+
+    return create_graph_recovery_mailbox(provider, _graph_recovery_outlook_mailbox())
+
+
+def _poll_graph_recovery_code(mailbox, timeout, interval, received_after=None):
+    from common.mailbox import poll_graph_recovery_code
+
+    return poll_graph_recovery_code(
+        mailbox, max_wait=timeout, poll_interval=interval,
+        received_after=received_after,
+    )
+
+
+def _advance_recovery_email(session, response, recovery, tag):
+    """Submit a security email or its Microsoft verification code, if present."""
+    enabled, provider, timeout, interval = _graph_recovery_settings()
+    if not enabled:
+        return None, "disabled"
+
+    forms, _ = _parse_microsoft_forms(response.text or "", response.url)
+    for form in forms:
+        email_field = _find_form_input(form, ("email", "mail", "address"))
+        if not email_field:
+            continue
+        if not recovery.get("mailbox"):
+            recovery["mailbox"] = _create_graph_recovery_mailbox(provider)
+            mailbox = recovery["mailbox"]
+            print(f"  {tag} binding recovery email via {mailbox['provider']}: {mailbox['email']}")
+        data = dict(form["inputs"])
+        data[email_field] = recovery["mailbox"]["email"]
+        if "action" in data and str(data["action"]).lower() == "skip":
+            data["action"] = "Add"
+        recovery["code_requested_at"] = time.time()
+        return session.post(form["action"], data=data, timeout=30, allow_redirects=False), "email"
+
+    for form in forms:
+        code_field = _find_form_input(
+            form, ("code", "otc", "ott", "verification", "onetime")
+        )
+        if not code_field:
+            continue
+        mailbox = recovery.get("mailbox")
+        if not mailbox:
+            return None, "missing-mailbox"
+        code = _poll_graph_recovery_code(
+            mailbox, timeout, interval,
+            received_after=recovery.get("code_requested_at"),
+        )
+        if not code:
+            return None, "code-timeout"
+        data = dict(form["inputs"])
+        data[code_field] = code
+        print(f"  {tag} submitting recovery-email verification code")
+        return session.post(form["action"], data=data, timeout=30, allow_redirects=False), "code"
+    return None, "no-field"
+
+
 def get_graph_token(email, password, idx=0):
     """Get refresh_token via pure HTTP OAuth flow (no browser)."""
     tag = f"[#{idx}]"
+    recovery = {}
     session = requests.Session()
     session.trust_env = True  # Use system proxy (Clash) — avoids rate-limiting on account.live.com
     session.headers.update({
@@ -260,17 +376,30 @@ def get_graph_token(email, password, idx=0):
 
             # proofs/Add — Microsoft asking to add security info.
             # Skip by setting action="Skip" and submitting the form (mirrors JS: jQuery("#action").val("Skip"))
-            if "proofs/add" in url.lower():
-                proof_forms, _ = _parse_microsoft_forms(text, url)
-                if proof_forms:
-                    proof_form = proof_forms[0]
-                    form_action2 = proof_form["action"]
-                    form_data2 = dict(proof_form["inputs"])
-                    form_data2["action"] = "Skip"  # simulate Skip button click
-                    print(f"  {tag} skipping proofs/Add (action=Skip) -> {form_action2[:80]}...")
-                    resp2 = session.post(form_action2, data=form_data2, timeout=30, allow_redirects=False)
+            # proofs/Add: Microsoft asking to add security info; bind the
+            # configured temporary recovery mailbox and verify its code.
+            recovery_page = "proofs/add" in url.lower() or any(
+                marker in text.lower()
+                for marker in ("recovery email", "alternate email", "security information", "add an email address")
+            )
+            if not recovery_page and recovery.get("mailbox"):
+                recovery_page = any(
+                    marker in text.lower()
+                    for marker in ("verification code", "one-time code", "enter code", "iott", "otc", "ott")
+                )
+            if recovery_page:
+                next_response, state = _advance_recovery_email(session, resp2, recovery, tag)
+                if next_response is not None:
+                    resp2 = next_response
                     continue
-                print(f"  {tag} FAIL: proofs/Add with no form")
+                if state == "disabled":
+                    print(f"  {tag} FAIL: proofs/Add requires a recovery email; enable OUTLOOK_GRAPH_RECOVERY_EMAIL")
+                elif state == "code-timeout":
+                    print(f"  {tag} FAIL: recovery-email verification code timed out")
+                elif state == "missing-mailbox":
+                    print(f"  {tag} FAIL: recovery-code form arrived before a mailbox was created")
+                else:
+                    print(f"  {tag} FAIL: proofs/Add has no recognized recovery email/code field")
                 return None
 
             # Find and submit any form on the page (consent, redirect, etc.)

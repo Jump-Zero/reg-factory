@@ -127,6 +127,64 @@ class AssetStoreTests(unittest.TestCase):
             with self.assertRaises(asset_store.AssetUnverified):
                 asset_store.get_platform_asset("chatgpt", "raw", index=0, verified_only=True)
 
+    def test_verified_email_claims_are_one_time_and_resettable(self):
+        (self.root / "emails.txt").write_text(
+            "first@example.com----pw1----rt1----cid1\n"
+            "second@example.com----pw2----rt2----cid2\n"
+            "banned@example.com----pw3----rt3----cid3\n",
+            encoding="utf-8",
+        )
+        from common import asset_scanner
+
+        report = {
+            "items": [
+                {"platform": "outlook", "email": "first@example.com", "status": "normal"},
+                {"platform": "outlook", "email": "second@example.com", "status": "normal"},
+                {"platform": "outlook", "email": "banned@example.com", "status": "banned"},
+            ],
+        }
+        with patch.object(asset_scanner, "get_report", return_value=report):
+            first = asset_store.get_email(verified_only=True)
+            second = asset_store.get_email(verified_only=True)
+            with self.assertRaises(asset_store.AssetExhausted):
+                asset_store.get_email(verified_only=True)
+            reset = asset_store.reset_cursor("outlook")
+            repeated = asset_store.get_email(verified_only=True)
+
+        self.assertEqual(first["data"]["email"], "first@example.com")
+        self.assertEqual(first["remaining"], 1)
+        self.assertEqual(second["data"]["email"], "second@example.com")
+        self.assertEqual(second["remaining"], 0)
+        self.assertEqual(reset["claims_removed"], 2)
+        self.assertEqual(repeated["data"]["email"], "first@example.com")
+
+    def test_verified_claim_is_shared_across_platform_output_formats(self):
+        self._write_chatgpt_assets()
+        from common import asset_scanner
+
+        report = {
+            "items": [{
+                "platform": "chatgpt",
+                "email": "user@example.com",
+                "source": "full_profile_20260101_000000.json,user@example.com.session.json",
+                "status": "normal",
+                "checked_at": "2026-08-09T00:00:00Z",
+            }],
+        }
+        with patch.object(asset_scanner, "get_report", return_value=report):
+            raw = asset_store.get_platform_asset("chatgpt", "raw", verified_only=True)
+            with self.assertRaises(asset_store.AssetExhausted):
+                asset_store.get_platform_asset("chatgpt", "sub2api", verified_only=True)
+            reset = asset_store.reset_cursor("verified:cookie:chatgpt:raw")
+            converted = asset_store.get_platform_asset(
+                "chatgpt", "sub2api", verified_only=True
+            )
+
+        self.assertTrue(raw["claim_recorded"])
+        self.assertEqual(raw["claim_scope"], "chatgpt")
+        self.assertEqual(reset["claim_scopes_removed"], ["chatgpt"])
+        self.assertEqual(converted["email"], "user@example.com")
+
     def test_grok_sub2api_and_summary(self):
         token_dir = self.root / "tokens" / "grok"
         token_dir.mkdir(parents=True)

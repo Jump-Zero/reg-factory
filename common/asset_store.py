@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -75,6 +76,10 @@ def _cursor_path() -> Path:
     return _data_root() / "runtime" / "state" / "asset_api_cursors.json"
 
 
+def _claim_path() -> Path:
+    return _data_root() / "runtime" / "state" / "asset_api_claims.json"
+
+
 def _read_json(path: Path):
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
@@ -98,6 +103,82 @@ def _write_cursors(value: dict[str, int]) -> None:
     temporary.replace(path)
 
 
+def _read_claims() -> dict[str, set[str]]:
+    try:
+        value = _read_json(_claim_path())
+        scopes = value.get("scopes", {}) if isinstance(value, dict) else {}
+        if isinstance(scopes, dict):
+            return {
+                str(scope): {str(claim) for claim in claims if str(claim)}
+                for scope, claims in scopes.items()
+                if isinstance(claims, list)
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def _write_claims(value: dict[str, set[str]]) -> None:
+    path = _claim_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    payload = {
+        "version": 1,
+        "scopes": {
+            scope: sorted(claims)
+            for scope, claims in sorted(value.items())
+            if claims
+        },
+    }
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _claim_id(scope: str, identity: str) -> str:
+    value = f"{scope}\0{str(identity or '').strip().lower()}".encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
+
+
+def _asset_identity(email: str, source: str) -> str:
+    normalized_email = str(email or "").strip().lower()
+    if normalized_email:
+        return f"email:{normalized_email}"
+    return f"source:{str(source or '').strip().lower()}"
+
+
+def _claim_record(
+    records: list[dict],
+    scope: str,
+    identity_for,
+    index: int | None,
+) -> tuple[int, dict, int, int, bool]:
+    """Atomically select and claim one healthy account across all output formats."""
+    with _CURSOR_LOCK:
+        claims = _read_claims()
+        claimed = set(claims.get(scope, set()))
+        candidates = []
+        seen = set(claimed)
+        for record in records:
+            claim = _claim_id(scope, identity_for(record))
+            if claim in seen:
+                continue
+            seen.add(claim)
+            candidates.append((record, claim))
+
+        total = len(candidates)
+        if total <= 0:
+            raise AssetExhausted("没有未领取的正常资产；如需重新使用，请重置领取记录")
+        selected = 0 if index is None else index
+        if selected < 0 or selected >= total:
+            raise AssetNotFound(f"index 超出未领取正常资产范围：{selected}，可用范围 0-{total - 1}")
+
+        record, claim = candidates[selected]
+        claimed.add(claim)
+        claims[scope] = claimed
+        _write_claims(claims)
+    return selected, record, total, total - 1, index is None
+
+
 def _select_index(total: int, cursor_key: str, index: int | None) -> tuple[int, int, bool]:
     if total <= 0:
         raise AssetNotFound("没有可读取的资产")
@@ -115,18 +196,45 @@ def _select_index(total: int, cursor_key: str, index: int | None) -> tuple[int, 
     return selected, selected + 1, True
 
 
+def _claim_scope(scope: str) -> str:
+    if scope in {"outlook", *_PLATFORMS}:
+        return scope
+    if scope in {"email", "verified:email"}:
+        return "outlook"
+    parts = scope.split(":")
+    for platform in _PLATFORMS:
+        if platform in parts:
+            return platform
+    return ""
+
+
 def reset_cursor(scope: str = "all") -> dict:
     normalized = str(scope or "all").strip().lower()
     with _CURSOR_LOCK:
         cursors = _read_cursors()
+        claims = _read_claims()
         if normalized == "all":
             removed = sorted(cursors)
             cursors = {}
+            claims_removed = sum(len(items) for items in claims.values())
+            claim_scopes_removed = sorted(claims)
+            claims = {}
         else:
             removed = [normalized] if normalized in cursors else []
             cursors.pop(normalized, None)
+            claim_scope = _claim_scope(normalized)
+            claim_scopes_removed = [claim_scope] if claim_scope in claims else []
+            claims_removed = len(claims.pop(claim_scope, set())) if claim_scope else 0
         _write_cursors(cursors)
-    return {"scope": normalized, "removed": removed, "remaining": cursors}
+        _write_claims(claims)
+    return {
+        "scope": normalized,
+        "removed": removed,
+        "remaining": cursors,
+        "claim_scopes_removed": claim_scopes_removed,
+        "claims_removed": claims_removed,
+        "remaining_claims": {key: len(value) for key, value in sorted(claims.items())},
+    }
 
 
 def _mailboxes() -> list[dict]:
@@ -167,18 +275,32 @@ def _verification_for(platform: str, email: str, source: str) -> dict | None:
             continue
         item_email = str(item.get("email") or "").strip().lower()
         if normalized_email and item_email == normalized_email:
-            return {
+            verification = {
                 "status": "normal",
                 "checked_at": str(item.get("checked_at") or ""),
                 "evidence": str(item.get("evidence") or ""),
             }
+            if platform == "chatgpt":
+                verification.update({
+                    "plus_trial": str(item.get("plus_trial") or "unknown"),
+                    "plus_trial_detail": str(item.get("plus_trial_detail") or ""),
+                    "plus_trial_evidence": str(item.get("plus_trial_evidence") or ""),
+                })
+            return verification
         sources = {part.strip() for part in str(item.get("source") or "").split(",")}
         if normalized_source and normalized_source in sources:
-            return {
+            verification = {
                 "status": "normal",
                 "checked_at": str(item.get("checked_at") or ""),
                 "evidence": str(item.get("evidence") or ""),
             }
+            if platform == "chatgpt":
+                verification.update({
+                    "plus_trial": str(item.get("plus_trial") or "unknown"),
+                    "plus_trial_detail": str(item.get("plus_trial_detail") or ""),
+                    "plus_trial_evidence": str(item.get("plus_trial_evidence") or ""),
+                })
+            return verification
     return None
 
 
@@ -207,9 +329,17 @@ def get_email(
     ]
     if verified_only:
         records = _verified_records("outlook", records, lambda record: record["_asset_source"])
-    cursor_key = "verified:email" if verified_only else "email"
-    selected, next_index, advanced = _select_index(len(records), cursor_key, index)
-    record = records[selected]
+        selected, record, total, remaining, advanced = _claim_record(
+            records,
+            "outlook",
+            lambda record: _asset_identity(record.get("email", ""), record["_asset_source"]),
+            index,
+        )
+        next_index = 0 if remaining else None
+    else:
+        selected, next_index, advanced = _select_index(len(records), "email", index)
+        record = records[selected]
+        total = len(records)
     data = record["line"] if output_format == "line" else {
         key: value for key, value in record.items() if key != "line" and not key.startswith("_")
     }
@@ -217,13 +347,18 @@ def get_email(
         "kind": "email",
         "format": output_format,
         "index": selected,
-        "total": len(records),
+        "total": total,
         "next_index": next_index,
         "cursor_advanced": advanced,
         "data": data,
     }
     if verified_only:
         result["verification"] = record["_verification"]
+        result.update({
+            "claim_recorded": True,
+            "claim_scope": "outlook",
+            "remaining": remaining,
+        })
     return result
 
 
@@ -371,10 +506,18 @@ def get_platform_asset(
         records = _cookie_records(platform)
         if verified_only:
             records = _verified_records(platform, records, lambda record: record["path"].name)
-        cursor_prefix = "verified:cookie" if verified_only else "cookie"
-        cursor_key = f"{cursor_prefix}:{platform}:{output_format}"
-        selected, next_index, advanced = _select_index(len(records), cursor_key, index)
-        record = records[selected]
+            selected, record, total, remaining, advanced = _claim_record(
+                records,
+                platform,
+                lambda record: _asset_identity(record.get("email", ""), record["path"].name),
+                index,
+            )
+            next_index = 0 if remaining else None
+        else:
+            cursor_key = f"cookie:{platform}:{output_format}"
+            selected, next_index, advanced = _select_index(len(records), cursor_key, index)
+            record = records[selected]
+            total = len(records)
         if output_format == "raw":
             data = record["cookies"]
         elif output_format == "cookies":
@@ -396,10 +539,23 @@ def get_platform_asset(
                 records,
                 lambda record: record["path"].name,
             )
-        cursor_prefix = "verified:cookie" if verified_only else "cookie"
-        cursor_key = f"{cursor_prefix}:{platform}:{output_format}"
-        selected, next_index, advanced = _select_index(len(records), cursor_key, index)
-        record = records[selected]
+            selected, record, total, remaining, advanced = _claim_record(
+                records,
+                platform,
+                lambda record: _asset_identity(
+                    _email_from_session(
+                        record["data"], record["path"].stem.replace(".session", "")
+                    ),
+                    record["path"].name,
+                ),
+                index,
+            )
+            next_index = 0 if remaining else None
+        else:
+            cursor_key = f"cookie:{platform}:{output_format}"
+            selected, next_index, advanced = _select_index(len(records), cursor_key, index)
+            record = records[selected]
+            total = len(records)
         session = record["data"]
         source = record["path"].name
         email = _email_from_session(session, record["path"].stem.replace(".session", ""))
@@ -429,7 +585,7 @@ def get_platform_asset(
         "platform": platform,
         "format": output_format,
         "index": selected,
-        "total": len(records),
+        "total": total,
         "next_index": next_index,
         "cursor_advanced": advanced,
         "email": email,
@@ -439,10 +595,16 @@ def get_platform_asset(
     }
     if verified_only:
         result["verification"] = record["_verification"]
+        result.update({
+            "claim_recorded": True,
+            "claim_scope": platform,
+            "remaining": remaining,
+        })
     return result
 
 
 def summary() -> dict:
+    claims = _read_claims()
     return {
         "emails": len(_mailboxes()),
         "platforms": {
@@ -453,4 +615,5 @@ def summary() -> dict:
             for platform in _PLATFORMS
         },
         "cursors": _read_cursors(),
+        "claims": {scope: len(items) for scope, items in sorted(claims.items())},
     }

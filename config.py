@@ -95,6 +95,26 @@ CLAUDE_USE_TEMP_EMAIL = _env("CLAUDE_USE_TEMP_EMAIL", "false").strip().lower() i
 # provider: moemail | yyds | gptmail | cfmail | icloud（默认 gptmail，带公共测试 key 开箱即用）
 TEMP_EMAIL_PROVIDER = _env("TEMP_EMAIL_PROVIDER", "gptmail").strip().lower() or "gptmail"
 
+# Outlook Graph OAuth 遇到安全信息页时，绑定临时辅助邮箱并自动轮询验证码。
+# provider 可设为 yyds | custom | outlook，也支持 yyds,outlook 这种指定备援的写法。
+OUTLOOK_GRAPH_RECOVERY_EMAIL = _env(
+    "OUTLOOK_GRAPH_RECOVERY_EMAIL", "true"
+).strip().lower() in ("1", "true", "yes", "on")
+OUTLOOK_GRAPH_RECOVERY_PROVIDER = _env(
+    "OUTLOOK_GRAPH_RECOVERY_PROVIDER", "yyds"
+).strip().lower() or "yyds"
+# provider=outlook 时必填，格式：email----password----refresh_token----client_id。
+# 密码仅保留作邮箱记录兼容；验证码读取和凭据校验均通过 Graph API。
+OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX = _env(
+    "OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX", ""
+).strip()
+OUTLOOK_GRAPH_RECOVERY_TIMEOUT = _env_int(
+    "OUTLOOK_GRAPH_RECOVERY_TIMEOUT", 120
+)
+OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL = _env_int(
+    "OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL", 5
+)
+
 # ChatGPT 邮箱来源：pool=emails.txt Outlook 池；icloud=自动申请 iCloud 地址并通过 API 取码。
 CHATGPT_EMAIL_PROVIDER = _env("CHATGPT_EMAIL_PROVIDER", "pool").strip().lower() or "pool"
 

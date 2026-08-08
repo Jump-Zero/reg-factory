@@ -156,6 +156,38 @@ class YydsMailTests(unittest.TestCase):
 
 
 class ICloudMailTests(unittest.TestCase):
+    def test_provider_config_redacts_key_from_full_endpoint(self):
+        with patch.object(
+            temp_email, "ICLOUD_MAIL_API_BASE",
+            "https://mail.no-replyca.xyz/api/user/email?type=icloud&apikey=secret-key",
+        ), patch.object(temp_email, "ICLOUD_MAIL_API_KEY", ""):
+            base, ready, source = temp_email._provider_config("icloud")
+
+        self.assertEqual(base, "https://mail.no-replyca.xyz")
+        self.assertTrue(ready)
+        self.assertNotIn("secret-key", base)
+        self.assertIn("ICLOUD_MAIL_API_BASE", source)
+
+    def test_create_accepts_full_icloud_submail_endpoint(self):
+        sess = FakeSession([
+            FakeResponse(data={"code": 0, "message": "success", "data": {
+                "type": "icloud", "email": "alias@example.com"
+            }}),
+        ])
+        with patch.object(temp_email, "ICLOUD_MAIL_TYPE", "icloud-code"):
+            mailbox = temp_email._icloud_create(
+                None, None, None, None,
+                "https://mail.no-replyca.xyz/api/user/email?type=icloud&apikey=alias-key",
+                sess,
+            )
+
+        self.assertEqual(mailbox["email"], "alias@example.com")
+        self.assertEqual(sess.calls[0][1], "https://mail.no-replyca.xyz/api/user/email")
+        self.assertEqual(
+            sess.calls[0][2]["params"],
+            {"type": "icloud", "apikey": "alias-key"},
+        )
+
     def test_create_uses_icloud_code_service_query(self):
         sess = FakeSession([
             FakeResponse(data={"code": 0, "message": "success", "data": {

@@ -182,7 +182,7 @@
         <div class="asset-head">
           <div>
             <h2>资产 API</h2>
-            <p>按顺序或指定下标读取邮箱与已注册平台凭据，并转换为下游需要的格式。</p>
+            <p>在线筛选健康账号并一次性领取邮箱或平台凭据，再转换为下游需要的格式。</p>
           </div>
           <button id="btn-refresh-assets" class="icon-button" type="button" title="刷新资产统计" aria-label="刷新资产统计">↻</button>
         </div>
@@ -199,7 +199,7 @@
           <div class="asset-section-head asset-pool-head">
             <div>
               <h3 id="asset-pool-title">号池状态</h3>
-              <p>在线校验邮箱与平台登录凭据；API 输出前会再次校验，只返回本次检测正常的资产。</p>
+              <p>在线校验邮箱与平台登录凭据；异常资产不会进入 API 输出范围。</p>
             </div>
             <div class="asset-scan-actions">
               <label class="asset-scan-concurrency"><span>并发</span>
@@ -277,7 +277,7 @@
             <table class="asset-scan-table">
               <thead><tr>
                 <th class="col-check"><input type="checkbox" id="asset-scan-check-all"></th>
-                <th>类型</th><th>账号</th><th>分类</th><th>状态</th><th>检测结果</th><th>Sub2API</th><th>检测时间</th>
+                <th>类型</th><th>账号</th><th>分类</th><th>状态</th><th>Plus 试用</th><th>检测结果</th><th>Sub2API</th><th>检测时间</th>
               </tr></thead>
               <tbody id="asset-scan-rows"></tbody>
             </table>
@@ -304,7 +304,7 @@
 
         <section class="asset-section" aria-labelledby="asset-call-title" data-guide="asset-call">
           <div class="asset-section-head">
-            <div><h3 id="asset-call-title">调用与输出</h3><p>每次输出前会在线校验，只返回正常资产；默认顺序取下一条，指定 index 不推进游标。</p></div>
+            <div><h3 id="asset-call-title">调用与输出</h3><p>每次输出前会在线校验，只返回正常且未领取的账号；领取后跨输出格式排除，指定 index 同样只领取一次。</p></div>
           </div>
           <div class="asset-builder-grid">
             <label class="asset-field"><span>资产</span>
@@ -337,7 +337,7 @@
 
           <div class="asset-actions">
             <button id="btn-call-asset" class="btn-run" type="button">在线校验并调用 API</button>
-            <select id="asset-reset-scope" aria-label="游标重置范围"><option value="current">重置当前游标</option><option value="all">重置全部游标</option></select>
+            <select id="asset-reset-scope" aria-label="领取记录重置范围"><option value="current">重置当前资产领取记录</option><option value="all">重置全部领取记录</option></select>
             <button id="btn-reset-asset" class="btn-secondary" type="button">重置</button>
             <span id="asset-call-msg" class="asset-message" role="status" aria-live="polite"></span>
           </div>
@@ -483,6 +483,6 @@
 
 <div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
 
-<script src="/static/app.js?v=20260805-plus-local-sub2api-1"></script>
+<script src="/static/app.js?v=20260809-asset-claims-sub2api-1"></script>
 </body>
 </html>

@@ -91,12 +91,12 @@ macOS / Linux：
 
 主控制台默认监听 `http://127.0.0.1:8799/`，提供以下入口：
 
-- 新手指南：首次打开自动引导 Clash External Controller、控制密码、住宅代理、继承全局、浏览器、接码、资产 API 和任务勾选配置；支持按阶段跳过并从顶栏重新打开。
+- 新手指南：首次打开自动引导 Clash External Controller、控制密码、住宅代理、继承全局、浏览器、Outlook Graph 辅助邮箱、接码、资产 API 和任务勾选配置；支持按阶段跳过并从顶栏重新打开。
 - 任务库：按流程分类选择任务，只展示常用参数，低频参数收进“更多设置”。
 - 运行日志：实时查看输出和结果状态；可停止当前任务树，或一键清理新旧版本遗留的全部注册任务。
 - 邮箱池：批量导入已有 Outlook 邮箱。
-- 资产 API：每次输出前在线校验，只读取本次检测正常的邮箱或平台凭据，并提供顺序/index 取用和下游格式转换。
-- 号池扫描：一键校验 Outlook、ChatGPT、Claude、Grok 和 Kiro，查看正常、待解锁、封禁、过期、受限及检测异常明细。
+- 资产 API：每次输出前在线校验，只领取本次检测正常且尚未领取的邮箱或平台账号；同一账号跨输出格式只返回一次。
+- 号池扫描：一键校验 Outlook、ChatGPT、Claude、Grok 和 Kiro，查看正常、待解锁、封禁、过期、受限及检测异常明细，并标注 ChatGPT Plus 免费试用资格。
 - 网络出口：切换 Clash 自动轮换、固定节点或动态住宅 IP，并测试公网出口。
 - 环境配置：分组编辑 `.env` 并测试外部服务连通性。
 - Codex K12：管理 K12 workspace、邮箱资产、任务与 Codex 凭据。
@@ -108,13 +108,13 @@ macOS / Linux：
 
 ## 本地资产 API
 
-本地接口支持按顺序或指定 `index` 读取邮箱、Claude/ChatGPT/Grok Cookie 和 Kiro Builder ID 账号；`format=cookies` 输出浏览器扩展可导入的标准 JSON，并可把 ChatGPT 会话转换为 SUB2API、CPA 或 chatgpt2api 格式。每个读取请求都会先在线校验对应平台，只从本次检测正常的健康资产池返回数据，并在响应中附带 `verification`。这只证明检测时刻可用，不代表账号之后不会被目标服务限制。控制台左侧打开“资产 API”即可配置访问密钥、生成调用命令和查看状态。默认仅允许本机访问，可配置 `REG_FACTORY_ASSET_API_KEY`。
+本地接口支持按顺序或指定 `index` 领取邮箱、Claude/ChatGPT/Grok Cookie 和 Kiro Builder ID 账号；`format=cookies` 输出浏览器扩展可导入的标准 JSON，并可把 ChatGPT 会话转换为 SUB2API、CPA 或 chatgpt2api 格式。每个读取请求都会先在线校验对应平台，只从本次检测正常且尚未领取的资产池返回数据，并在响应中附带 `verification`。账号成功返回后会按平台写入领取账本，切换输出格式也不会再次返回；需要复用时必须显式重置领取记录。这只证明检测时刻可用，不代表账号之后不会被目标服务限制。控制台左侧打开“资产 API”即可配置访问密钥、生成调用命令和查看状态。默认仅允许本机访问，可配置 `REG_FACTORY_ASSET_API_KEY`。
 
 ```bash
 # 按顺序取下一个邮箱
 curl "http://127.0.0.1:8799/api/assets/emails?format=json"
 
-# 指定第 3 个 ChatGPT 凭据，输出 SUB2API 格式，不推进顺序游标
+# 领取当前未领取健康池中的第 3 个 ChatGPT 账号，输出 SUB2API 格式
 curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=sub2api&index=2"
 
 # 指定第 1 个 Claude 账号，输出标准浏览器 Cookie JSON
@@ -125,7 +125,7 @@ curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=cpa" \
   -H "X-API-Key: your-key"
 ```
 
-省略 `index` 时按独立游标顺序取用，指定 `index` 时只读取该条。完整平台格式、响应字段和游标重置方式见 [本地资产 API](docs/api.md)。
+省略 `index` 时领取当前健康池中的第一条；指定 `index` 时从“正常且未领取”的当前范围选择。两种方式都会记录领取，同一平台账号跨格式不重复返回。完整平台格式、响应字段和领取记录重置方式见 [本地资产 API](docs/api.md)。
 
 ## 常用命令
 
@@ -139,6 +139,13 @@ python register_three_platforms.py --from-pool
 # 常驻注册 Outlook
 python outlook_reg_loop.py
 
+# [重要] Graph RT 提取必须配置可接收验证码的辅助邮箱，否则 proofs/Add 安全信息页无法完成授权
+# 默认使用 YYDS 辅助邮箱并自动接码
+python tools/extract_graph_tokens.py --email user@outlook.com --password 'password'
+# 自定义临时邮箱：.env 设置 OUTLOOK_GRAPH_RECOVERY_PROVIDER=custom，并填好 CUSTOM_MAIL_*
+# 自有 Outlook 辅助邮箱：设置 provider=outlook，并填
+# OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX=email@outlook.com----password----refresh_token----client_id
+
 # Claude 使用最新 Outlook refresh token
 python register.py --count 1 --node auto --latest-rt
 
@@ -147,6 +154,9 @@ python register.py --count 1 --node auto --provider yyds
 
 # ChatGPT 使用 iCloud 接码邮箱（先在 .env 配置 ICLOUD_MAIL_API_KEY）
 python register_chatgpt.py --count 1 --email-provider icloud
+
+# 使用普通 iCloud 子邮箱接口（/api/user/email?type=icloud&apikey=...）
+# 先在 .env 设置 ICLOUD_MAIL_TYPE=icloud
 
 # ChatGPT 注册成功后进入主 WebUI 的本地 Plus 批处理工作台
 python register_chatgpt.py --count 1 --plus-subscription

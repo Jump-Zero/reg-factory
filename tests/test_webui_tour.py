@@ -25,6 +25,7 @@ class WebUiTourTests(unittest.TestCase):
             "network-test",
             "env-overview",
             "browser",
+            "outlook-recovery",
             "env-test",
             "asset-scan",
             "asset-call",
@@ -43,6 +44,9 @@ class WebUiTourTests(unittest.TestCase):
         self.assertIn("控制密码", APP)
         self.assertIn("住宅代理填写方法", APP)
         self.assertIn("继承全局", APP)
+        self.assertIn("提取 RT 前配置辅助邮箱", APP)
+        self.assertIn("同一平台账号即使切换输出格式也不会再次返回", APP)
+        self.assertIn("Plus 免费试用资格", APP)
         self.assertIn("每次输出前都会在线校验", APP)
         self.assertIn("跳过网络配置", APP)
         self.assertIn("跳过浏览器配置", APP)
@@ -52,6 +56,7 @@ class WebUiTourTests(unittest.TestCase):
     def test_dynamic_controls_have_stable_tour_targets(self):
         self.assertIn("f.dataset.argFlag = a.flag", APP)
         self.assertIn("box.dataset.guideGroup = 'browser'", APP)
+        self.assertIn("box.dataset.guideGroup = 'outlook-recovery'", APP)
         self.assertIn("box.dataset.guideGroup = 'chatgpt-email'", APP)
         self.assertIn("box.dataset.guideGroup = 'temp-email'", APP)
         self.assertIn("box.dataset.guideGroup = 'sms'", APP)

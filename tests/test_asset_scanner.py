@@ -157,6 +157,33 @@ class AssetScannerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "banned")
 
+    def test_chatgpt_plus_trial_eligible_signal_is_labeled(self):
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "state": "eligible",
+            "redemption": {"redeemed": False, "redeemed_by_user": False},
+        }
+        session = MagicMock()
+        session.get.return_value = response
+        session.__enter__.return_value = session
+        session.__exit__.return_value = False
+        record = {"email": "trial@example.com", "_token": {"account": {"planType": "free"}}}
+
+        with patch.object(asset_scanner, "_web_session", return_value=session):
+            result = asset_scanner._scan_chatgpt_plus_trial(record, "access-token", 10)
+
+        self.assertEqual(result["plus_trial"], "eligible")
+        self.assertIn("免费试用", result["plus_trial_detail"])
+        self.assertEqual(session.get.call_args.kwargs["params"]["coupon"], "plus-1-month-free")
+
+    def test_chatgpt_existing_paid_plan_skips_trial_request(self):
+        record = {"email": "plus@example.com", "_token": {"account": {"planType": "plus"}}}
+        with patch.object(asset_scanner, "_web_session") as session:
+            result = asset_scanner._scan_chatgpt_plus_trial(record, "access-token", 10)
+
+        self.assertEqual(result["plus_trial"], "active")
+        session.assert_not_called()
+
     def test_outlook_service_abuse_is_reported_as_banned(self):
         response = MagicMock(status_code=400)
         response.json.return_value = {

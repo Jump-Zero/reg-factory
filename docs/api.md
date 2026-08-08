@@ -1,8 +1,8 @@
 # 本地资产 API
 
-主 WebUI 提供只读资产接口，用于按顺序或指定下标读取邮箱与已注册平台凭据。默认地址为 `http://127.0.0.1:8799`。每个读取请求都会在返回前在线扫描对应平台，只会从本次检测为 `normal` 的健康资产池输出数据。
+主 WebUI 提供资产领取接口，用于按顺序或指定下标读取邮箱与已注册平台凭据。默认地址为 `http://127.0.0.1:8799`。每个读取请求都会在返回前在线扫描对应平台，只会从本次检测为 `normal` 且尚未领取的健康资产池输出数据。接口不修改原始邮箱、Cookie 或 Token 文件，只持久化领取标识。
 
-控制台左侧打开“资产 API”，可以配置 API Key、选择平台和输出格式、生成 `curl` 命令、在线调用并重置游标；下面的接口也可供其他本地程序直接调用。
+控制台左侧打开“资产 API”，可以配置 API Key、选择平台和输出格式、生成 `curl` 命令、在线调用并重置领取记录；下面的接口也可供其他本地程序直接调用。
 
 ## 鉴权
 
@@ -18,10 +18,10 @@ Authorization: Bearer your-key
 ## 邮箱
 
 ```bash
-# 按 emails.txt 顺序取下一个，并推进邮箱游标
+# 领取下一个正常且未领取的邮箱
 curl http://127.0.0.1:8799/api/assets/emails
 
-# 精确读取第 3 条，不推进游标
+# 领取当前未领取健康池中的第 3 条
 curl "http://127.0.0.1:8799/api/assets/emails?index=2"
 
 # 返回原始四段文本
@@ -69,7 +69,21 @@ curl "http://127.0.0.1:8799/api/assets/cookies/kiro?format=session"
 
 `cookies` 是浏览器扩展通用导入数组，包含 `domain`、`hostOnly`、`httpOnly`、`name`、`path`、`sameSite`、`secure`、`session`、`storeId`、`value`，持久 Cookie 额外包含 `expirationDate`。`raw` 保留注册脚本保存的原始字段，供旧调用兼容。
 
-响应中的 `index` 是本次下标，`total` 是当前健康资产池总数，`next_index` 是下一下标。省略 `index` 会推进对应的独立游标；指定 `index` 只读取该条，不改变游标。封禁、过期、受限、凭据异常和未验证资产会被拦截。在线检测只能说明检测时刻可用，不能保证目标服务之后不会限制账号。
+响应中的 `index` 是本次在未领取健康池中的下标，`total` 是领取前可用总数，`remaining` 是领取后的剩余数量，`claim_recorded=true` 表示领取记录已持久化。省略 `index` 时选择第一条；指定 `index` 时从当前未领取健康池中选择。两种方式都会记录领取。同一平台账号按邮箱或来源文件识别，切换 `raw`、`cookies`、`session`、`sub2api`、`cpa`、`chatgpt2api` 等格式也不会重复返回。封禁、过期、受限、凭据异常、未知、检测异常和未验证资产都会被拦截。在线检测只能说明检测时刻可用，不能保证目标服务之后不会限制账号。
+
+## ChatGPT Plus 试用资格
+
+正常 ChatGPT 账号会额外调用优惠资格接口，并在号池扫描结果和资产响应的 `verification` 中写入 `plus_trial`、`plus_trial_detail`、`plus_trial_evidence`。该检测不绑卡、不扣款；失败只标记为 `unknown`，不会改变账号的健康状态。
+
+| `plus_trial` | 含义 |
+|---|---|
+| `eligible` | 活动接口明确返回可使用 Plus 免费试用 |
+| `ineligible` | 活动接口明确返回不符合、已领取或已过期 |
+| `active` | 本地会话表明账号已有 Plus 或其他付费套餐 |
+| `unknown` | 缺少 AT、网络失败或接口没有返回明确资格 |
+| `disabled` | 已通过配置关闭资格检测 |
+
+默认检测活动为 `plus-1-month-free`。可通过 `ASSET_SCAN_CHATGPT_PLUS_TRIAL=false` 关闭，或用 `ASSET_SCAN_CHATGPT_PLUS_CAMPAIGN` 修改活动标识。
 
 ## 号池状态扫描
 
@@ -112,13 +126,13 @@ GET 响应中的 `summary` 是全号池统计，`items` 是逐条结果，`scan.
 ```bash
 curl http://127.0.0.1:8799/api/assets/summary
 
-# 重置全部顺序游标
+# 重置全部领取记录和兼容游标
 curl -X POST http://127.0.0.1:8799/api/assets/cursors/reset \
   -H "Content-Type: application/json" -d '{"scope":"all"}'
 
-# 只重置 ChatGPT CPA 健康资产游标
+# 只重置 ChatGPT 账号领取记录
 curl -X POST http://127.0.0.1:8799/api/assets/cursors/reset \
-  -H "Content-Type: application/json" -d '{"scope":"verified:cookie:chatgpt:cpa"}'
+  -H "Content-Type: application/json" -d '{"scope":"chatgpt"}'
 ```
 
-游标保存在 `runtime/state/asset_api_cursors.json`；它不会修改 `emails.txt`、Cookie 或 Token 文件。
+领取账本保存在 `runtime/state/asset_api_claims.json`，只包含不可逆的 SHA-256 标识和平台范围，不保存邮箱或凭据。旧版兼容游标仍保存在 `runtime/state/asset_api_cursors.json`。重置不会修改 `emails.txt`、Cookie 或 Token 文件。

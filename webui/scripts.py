@@ -368,6 +368,10 @@ ENV_SCHEMA = [
     {"group": "本地资产 API", "items": [
         {"key": "REG_FACTORY_ASSET_API_KEY", "secret": True,
          "help": "可选；配置后调用邮箱/Cookie 读取 API 必须提供 X-API-Key 或 Bearer Token。留空时仅允许本机访问。"},
+        {"key": "ASSET_SCAN_CHATGPT_PLUS_TRIAL", "type": "bool", "default": "true",
+         "help": "扫描正常 ChatGPT 账号时调用优惠资格接口，标注 Plus 免费试用资格；失败仅标为未知，不影响账号健康状态。"},
+        {"key": "ASSET_SCAN_CHATGPT_PLUS_CAMPAIGN", "default": "plus-1-month-free",
+         "help": "ChatGPT Plus 试用资格检测使用的活动标识。"},
     ]},
     {"group": "网络出口", "tests": [{"target": "clash", "label": "测试 Clash 连通"}], "items": [
         {"key": "PROXY_MODE", "type": "choice", "choices": ["clash_auto", "clash_fixed", "residential"],
@@ -470,8 +474,20 @@ ENV_SCHEMA = [
         {"key": "EZCAPTCHA_API_KEY", "secret": True, "help": "EZ-Captcha 打码 key(解锁 Outlook 用)"},
         {"key": "YESCAPTCHA_API_KEY", "secret": True, "help": "YesCaptcha key (Claude hCaptcha / Grok Turnstile / GitHub Arkose)"},
     ]},
-    {"group": "Outlook 自注册", "items": [
+    {"group": "Outlook 自注册",
+     "notice": "需要提取 Graph RT 时，必须配置可接收验证码的辅助邮箱。请选择 YYDS/custom，或选择 outlook 并填入下方四段凭据；未配置时 Microsoft 安全信息页无法完成授权。",
+     "notice_level": "warning",
+     "tests": [{"target": "outlook-recovery", "label": "验证 Outlook 辅助邮箱 RT"}],
+     "items": [
         {"key": "OUTLOOK_PROXIES", "help": "Outlook 自注册住宅代理池(换行/逗号分隔)"},
+        {"key": "OUTLOOK_GRAPH_RECOVERY_EMAIL", "type": "bool",
+         "default": "true", "help": "启用 Graph proofs/Add 辅助邮箱自动绑定和接码；关闭后无法保证 RT 可提取"},
+        {"key": "OUTLOOK_GRAPH_RECOVERY_PROVIDER", "type": "choice", "choices": ["yyds", "custom", "outlook"],
+         "default": "yyds", "help": "Graph 辅助邮箱提供方；outlook 使用下方用户自有邮箱并通过 Graph API 收码"},
+        {"key": "OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX", "secret": True,
+         "help": "provider=outlook 时必填：email@outlook.com----password----refresh_token----client_id。保存前可点本组验证按钮检查 Graph API。"},
+        {"key": "OUTLOOK_GRAPH_RECOVERY_TIMEOUT", "default": "120", "help": "Graph 辅助邮箱验证码最大等待秒数"},
+        {"key": "OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL", "default": "5", "help": "Graph 辅助邮箱轮询间隔秒数"},
     ]},
     {"group": "ChatGPT 邮箱", "items": [
         {"key": "CHATGPT_EMAIL_PROVIDER", "type": "choice", "choices": ["pool", "icloud"],
