@@ -33,7 +33,7 @@ import requests
 from config import (
     SMS_API_BASE, SMS_TOKEN,
     HERO_SMS_API_BASE, HERO_SMS_API_KEY, HERO_SMS_COUNTRY_PREFER,
-    HERO_SMS_MAXPRICE_OPENAI,
+    HERO_SMS_MAXPRICE_OPENAI, HERO_SMS_MINPRICE_OPENAI,
     SMSMAN_API_BASE, SMSMAN_TOKEN,
 )
 
@@ -155,18 +155,25 @@ def _hero_get_phone(service):
         max_cost = _mp if _mp > 0 else 999
     except (TypeError, ValueError):
         max_cost = 1.0  # 兜底默认
+    # 解析价格下限：留空或0=不限，否则过滤掉低于此价的垃圾号段
+    try:
+        _minp = float(HERO_SMS_MINPRICE_OPENAI)
+        min_cost = _minp if _minp > 0 else 0
+    except (TypeError, ValueError):
+        min_cost = 0
     try:
         r = requests.get(HERO_SMS_API_BASE, params={"api_key": HERO_SMS_API_KEY, "action": "getPrices", "service": service}, timeout=15)
         prices = r.json()
         ranked = []
         for cid, svc in prices.items():
             info = svc.get(service, {})
-            if info.get("count", 0) > 0 and info.get("cost", 999) < max_cost:
-                ranked.append((info["cost"], -info["count"], int(cid)))
+            cost = info.get("cost", 999)
+            if info.get("count", 0) > 0 and min_cost <= cost < max_cost:
+                ranked.append((cost, -info["count"], int(cid)))
         ranked.sort()
         if ranked:
             countries = [c for _, _, c in ranked]
-            print(f"  [hero-sms] {len(countries)} countries (cheapest ${ranked[0][0]} id={ranked[0][2]}, max=${max_cost})")
+            print(f"  [hero-sms] {len(countries)} countries (cheapest ${ranked[0][0]} id={ranked[0][2]}, range=${min_cost}-${max_cost})")
     except Exception as e:
         print(f"  [hero-sms] getPrices failed: {e}")
     for country in countries:

@@ -404,7 +404,7 @@ ENV_SCHEMA = [
          "help": "ChatGPT 遇到 Cloudflare 拦截时最多轮换住宅 IP 的次数。"},
     ]},
     {"group": "指纹浏览器", "tests": [{"target": "bitbrowser", "label": "测试 指纹浏览器连通"}], "items": [
-        {"key": "FINGERPRINT_BROWSER", "type": "choice", "choices": ["ruyipage", "bundled", "custom", "bitbrowser", "adspower", "custom_api"],
+        {"key": "FINGERPRINT_BROWSER", "type": "choice", "choices": ["ruyipage", "bundled", "custom", "bitbrowser", "adspower", "custom_api"], "label": "浏览器内核 / 指纹浏览器",
          "default": "ruyipage", "help": "ruyipage=默认 Firefox BiDi；旧 Chromium 专用流程会自动使用 bundled。"},
         {"key": "RUYIPAGE_BROWSER_PATH", "help": "可选的 RuyiPage Firefox 可执行文件；留空使用一键安装的 runtime。"},
         {"key": "REG_FACTORY_BROWSER_PATH", "help": "内置 Chromium 可执行文件路径"},
@@ -462,6 +462,7 @@ ENV_SCHEMA = [
     {"group": "hero-sms 价格与服务", "items": [
         {"key": "HERO_SMS_SERVICE_OPENAI", "default": "dr", "help": "hero-sms OpenAI 服务码(dr=sms-activate 兼容)"},
         {"key": "HERO_SMS_MAXPRICE_OPENAI", "default": "1.0", "help": "hero-sms 价格上限(USD)；0或留空=不限"},
+        {"key": "HERO_SMS_MINPRICE_OPENAI", "default": "0", "help": "hero-sms 价格下限(USD)；0或留空=不限，过滤太便宜的垃圾号段"},
         {"key": "SMS_MAXPRICE_OPENAI", "default": "20", "help": "firefox.fun 价格上限(0=只取最便宜)"},
     ]},
     {"group": "打码平台(可选)", "items": [
