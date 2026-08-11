@@ -7,10 +7,8 @@ let evtSrc = null;     // EventSource
 let smsTimer = null;   // 接码助手倒计时刷新
 let k12Url = 'http://127.0.0.1:8806/';
 let k12Starting = false;
-let plusUrl = '/chatgpt-plus/';
-const PLUS_BATCH_SIZE = 27;
-const PLUS_IMPORT_LIMIT = 100;
-let plusImporting = false;
+let plusRun = null;
+let plusEventSource = null;
 let proxyMode = 'clash_auto';
 let assetPickMode = 'sequence';
 let assetScanData = null;
@@ -110,11 +108,12 @@ function renderUpdateState(update, version){
     return;
   }
   if(updateRequested && update && update.status === 'completed'){
+    updateRequested = false;
     button.classList.remove('running');
-    button.disabled = true;
-    label.textContent = '更新完成';
-    setUpdateMessage('面板正在重启…', 'ok');
-    setTimeout(()=>location.reload(), 900);
+    button.disabled = false;
+    const message = update.message || '更新检查完成';
+    label.textContent = message.includes('已是最新') ? '已是最新' : '更新完成';
+    setUpdateMessage(message, 'ok');
     return;
   }
   button.disabled = updateRequested || !available;
@@ -134,10 +133,15 @@ function renderUpdateState(update, version){
 async function pollStatus(){
   try{
     const s = await (await fetch('/api/status')).json();
+    const browserRuntime = s.browser_runtime || {};
+    $('#dot-bb').classList.toggle('pending', browserRuntime.state === 'installing');
     $('#dot-bb').classList.toggle('on', s.bitbrowser);
     const browserLabels = {ruyipage:'RuyiPage Firefox', adspower:'AdsPower', bundled:'内置浏览器', custom:'自定义 Chrome', custom_api:'自定义指纹浏览器'};
-    const label = browserLabels[s.browser_provider] || 'BitBrowser';
+    let label = browserLabels[s.browser_provider] || 'BitBrowser';
+    if(s.browser_provider === 'ruyipage' && browserRuntime.state === 'installing') label = 'RuyiPage 安装中';
+    else if(s.browser_provider === 'ruyipage' && browserRuntime.state === 'failed') label = 'RuyiPage 安装失败';
     $('#browser-label').textContent = label;
+    $('#browser-label').title = browserRuntime.message || label;
     const networkOnline = s.network ?? s.clash;
     $('#dot-clash').classList.toggle('on', !!networkOnline);
     const modeLabels = {clash_auto:'Clash 自动', clash_fixed:'Clash 固定', residential:'住宅代理', direct:'直连'};
@@ -213,7 +217,7 @@ async function showView(v){
   if(v==='network') return loadProxyPanel();
   if(v==='mailpool') return loadMailpool();
   if(v==='k12') return openK12Channel();
-  if(v==='plus'){ loadPlusAtCount(); return openPlusChannel(); }
+  if(v==='plus') return loadPlusImportStatus();
   return Promise.resolve();
 }
 $$('.navbtn').forEach(b=> b.onclick = ()=> showView(b.dataset.view));
@@ -267,23 +271,6 @@ function escapeHtml(value){
   }[char]));
 }
 
-function renderPlusRouteOptions(id, nodes, selected, fallback){
-  const select = $(id);
-  if(!select) return;
-  const values = [
-    {value:'residential', label:'住宅 IP'},
-    {value:'clash', label:'Clash 当前节点'},
-    ...(nodes || []).map(node=>({value:`clash:${node}`, label:`Clash：${node}`})),
-  ];
-  const known = new Set(values.map(item=>item.value));
-  if(selected && !known.has(selected) && selected.startsWith('clash:')){
-    values.push({value:selected, label:`Clash：${selected.slice(6)}`});
-  }
-  select.innerHTML = values.map(item=>`<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join('');
-  select.value = selected || fallback;
-  if(!select.value) select.value = fallback;
-}
-
 async function loadProxyPanel(includeNodes=false){
   setProxyMessage('读取中…');
   try{
@@ -296,21 +283,6 @@ async function loadProxyPanel(includeNodes=false){
     $('#proxy-clash-secret').value = config.CLASH_SECRET || '';
     $('#proxy-clash-proxy').value = config.CLASH_PROXY || '';
     $('#proxy-clash-group').value = config.CLASH_GROUP || '';
-    const residentialConfigured = Boolean(config.REG_FACTORY_PROXY || config.REG_FACTORY_PROXY_POOL);
-    renderPlusRouteOptions(
-      '#proxy-plus-link-route',
-      data.nodes,
-      config.REG_FACTORY_PLUS_LINK_ROUTE || (residentialConfigured ? 'residential' : 'clash'),
-      residentialConfigured ? 'residential' : 'clash',
-    );
-    renderPlusRouteOptions(
-      '#proxy-plus-bind-route',
-      data.nodes,
-      config.REG_FACTORY_PLUS_BIND_ROUTE || 'clash',
-      'clash',
-    );
-    $('#proxy-plus-link-proxy').value = config.REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE || '';
-    $('#proxy-plus-bind-proxy').value = config.REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE || '';
     $('#proxy-residential-url').value = config.REG_FACTORY_PROXY || '';
     $('#proxy-residential-pool').value = config.REG_FACTORY_PROXY_POOL || '';
     $('#proxy-rotate-url').value = config.REG_FACTORY_PROXY_ROTATE_URL || '';
@@ -345,10 +317,6 @@ function collectProxyConfig(){
     CLASH_PROXY: $('#proxy-clash-proxy').value.trim(),
     CLASH_GROUP: $('#proxy-clash-group').value.trim(),
     CLASH_FIXED_NODE: $('#proxy-fixed-node').value,
-    REG_FACTORY_PLUS_LINK_ROUTE: $('#proxy-plus-link-route').value,
-    REG_FACTORY_PLUS_BIND_ROUTE: $('#proxy-plus-bind-route').value,
-    REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE: $('#proxy-plus-link-proxy').value.trim(),
-    REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE: $('#proxy-plus-bind-proxy').value.trim(),
     REG_FACTORY_PROXY: $('#proxy-residential-url').value.trim(),
     REG_FACTORY_PROXY_POOL: $('#proxy-residential-pool').value.trim(),
     REG_FACTORY_PROXY_ROTATE_URL: $('#proxy-rotate-url').value.trim(),
@@ -844,14 +812,14 @@ async function saveAssetKey(){
 async function callAssetApi(){
   const button = $('#btn-call-asset');
   button.disabled = true;
-  setAssetMessage('#asset-call-msg', '正在在线校验并读取资产…');
+  setAssetMessage('#asset-call-msg', '正在领取未取用资产…');
   try{
     const request = buildAssetRequest();
     const response = await fetch(request.relative, {headers:assetHeaders()});
     const data = await readAssetResponse(response);
     $('#asset-response').textContent = JSON.stringify(data, null, 2);
-    const progress = data.remaining === undefined ? '' : `，剩余 ${data.remaining} 个未领取正常账号`;
-    setAssetMessage('#asset-call-msg', `在线校验通过并完成一次性领取${progress}`, true);
+    const progress = data.remaining === undefined ? '' : `，剩余 ${data.remaining} 个未领取账号`;
+    setAssetMessage('#asset-call-msg', `已完成一次性领取${progress}`, true);
     await refreshAssetSummary(true);
   }catch(error){
     $('#asset-response').textContent = JSON.stringify({error:error.message || String(error)}, null, 2);
@@ -1145,7 +1113,7 @@ async function openK12Channel(){
 $('#btn-k12-start').onclick = startK12Service;
 $('#btn-k12-retry').onclick = openK12Channel;
 
-// ---------------------------------------------------------------- ChatGPT Plus 本地工作台
+// ---------------------------------------------------------------- Existing Plus accounts -> Codex OAuth -> SUB2API
 function setPlusImportState(text, kind=''){
   const state = $('#plus-import-state');
   if(!state) return;
@@ -1154,139 +1122,120 @@ function setPlusImportState(text, kind=''){
 }
 
 function renderPlusStatus(status){
-  const alive = !!status.alive;
+  const alive = !!status.ready;
   $('#dot-plus').classList.remove('pending');
   $('#dot-plus').classList.toggle('on', alive);
-  $('#plus-nav-state').textContent = alive ? '在线' : '离线';
+  $('#plus-nav-state').textContent = status.active ? '运行中' : (alive ? '就绪' : '未配置');
   $('#plus-nav-state').classList.toggle('on', alive);
-  if(status.url){
-    plusUrl = status.url;
-    $('#plus-open').href = plusUrl;
-  }
+  const providers = (status.providers || []).join(' / ');
+  setPlusImportState(status.message + (providers ? ` · 接码 ${providers}` : ''), alive ? 'ok' : 'bad');
 }
 
-async function fetchPlusStatus(){
+async function loadPlusImportStatus(){
   try{
     const status = await (await fetch('/api/chatgpt-plus/status')).json();
     renderPlusStatus(status);
     return status;
   }catch(e){
-    renderPlusStatus({alive:false});
-    return {alive:false};
+    renderPlusStatus({ready:false, message:'状态读取失败'});
+    return {ready:false};
   }
 }
 
-async function openPlusChannel(){
-  let status = await fetchPlusStatus();
-  if(!status.alive && status.ready){
-    status = await (await fetch('/api/chatgpt-plus/start', {method:'POST'})).json();
-    renderPlusStatus(status);
-  }
-  if(!status.alive) throw new Error(status.message || '本地 Plus 工作台当前不可用');
-  if($('#plus-frame').getAttribute('src') === 'about:blank') $('#plus-frame').src = plusUrl;
-  await waitForPlusFrame();
-  setPlusImportState('本地工作台已就绪', 'ok');
-  return status;
+function appendPlusLog(line){
+  const log = $('#plus-run-log');
+  log.textContent += (log.textContent ? '\n' : '') + line;
+  log.scrollTop = log.scrollHeight;
 }
 
-async function waitForPlus(test, timeoutMs, timeoutMessage){
-  const deadline = Date.now() + timeoutMs;
-  while(Date.now() < deadline){
-    const result = test();
-    if(result) return result;
-    await new Promise(resolve=>setTimeout(resolve, 100));
-  }
-  throw new Error(timeoutMessage);
+function setPlusRunControls(running){
+  $('#btn-plus-import').disabled = running;
+  $('#btn-plus-stop').disabled = !running;
+  $('#plus-account-input').disabled = running;
+  $$('#view-plus input, #view-plus select').forEach(element=>{
+    if(element.id !== 'plus-keep-on-fail') element.disabled = running;
+  });
 }
 
-async function waitForPlusFrame(){
-  const frame = $('#plus-frame');
-  return waitForPlus(()=>{
-    try{
-      const doc = frame.contentDocument;
-      return doc && doc.getElementById('accountImportInput') ? {frame, doc, win:frame.contentWindow} : null;
-    }catch(e){ return null; }
-  }, 20000, '本地 Plus 工作台加载超时');
+function monitorPlusRun(runId, accepted){
+  if(plusEventSource) plusEventSource.close();
+  plusRun = runId;
+  $('#plus-run-summary').textContent = `${accepted} 个账号运行中`;
+  setPlusRunControls(true);
+  plusEventSource = new EventSource(`/api/logs/${runId}`);
+  plusEventSource.onmessage = event=>{
+    appendPlusLog(event.data);
+    if(event.data.includes('[add-phone] 手机验证通过')){
+      $('#plus-run-summary').textContent = '手机号验证通过，继续 OAuth';
+    }else if(event.data.includes('[OK]')){
+      $('#plus-run-summary').textContent = '已有账号导入成功';
+    }else if(event.data.includes('[FAIL]')){
+      $('#plus-run-summary').textContent = '存在失败账号';
+    }
+  };
+  plusEventSource.addEventListener('done', event=>{
+    let result = {};
+    try{ result = JSON.parse(event.data || '{}'); }catch(e){}
+    appendPlusLog(result.returncode === 0 ? '[webui] 批量导入完成' : '[webui] 批量导入结束，请检查失败阶段');
+    $('#plus-run-summary').textContent = result.returncode === 0 ? '全部完成' : '执行结束';
+    setPlusImportState(result.returncode === 0 ? '批量导入完成' : '部分账号未导入', result.returncode === 0 ? 'ok' : 'bad');
+    plusEventSource.close();
+    plusEventSource = null;
+    plusRun = null;
+    setPlusRunControls(false);
+    loadPlusImportStatus();
+  });
+  plusEventSource.onerror = ()=>{
+    if(plusRun) setPlusImportState('日志连接中断，正在等待任务状态', 'bad');
+  };
 }
 
-async function importLocalPlusAts(){
-  if(plusImporting) return;
-  const button = $('#btn-import-ats');
-  plusImporting = true;
-  button.disabled = true;
-  setPlusImportState('正在读取本地 free AT...');
+async function startPlusCodexImport(){
+  if(plusRun) return;
+  const accounts = $('#plus-account-input').value.trim();
+  if(!accounts){ setPlusImportState('请粘贴至少一个 Plus 账号', 'bad'); return; }
+  setPlusImportState('正在创建登录与手机号接码任务');
+  $('#plus-run-log').textContent = '';
+  setPlusRunControls(true);
   try{
-    await openPlusChannel();
-    const response = await fetch(`/api/chatgpt-plus/export-ats?limit=${PLUS_IMPORT_LIMIT}`, {cache:'no-store'});
-    const data = await response.json();
-    if(!response.ok) throw new Error(data.error || `AT 读取失败 (${response.status})`);
-    if(!data.count) throw new Error('没有可导入的未过期 free AT');
-    const context = await waitForPlusFrame();
-    const importInput = context.doc.getElementById('accountImportInput');
-    const importButton = context.doc.getElementById('importAtButton');
-    if(!importInput || !importButton) throw new Error('本地工作台批量导入控件不可用');
-    const before = context.doc.querySelectorAll('.account-row').length;
-    importInput.value = data.ats.join('\n');
-    importInput.dispatchEvent(new context.win.Event('input', {bubbles:true}));
-    importButton.click();
-    await waitForPlus(()=> importInput.value === '' ? true : null, 30000, 'AT 批量导入未完成');
-    const total = context.doc.querySelectorAll('.account-row').length;
-    const imported = Math.max(0, total - before);
-    const selectAll = context.doc.getElementById('selectAllAccounts');
-    if(selectAll && !selectAll.checked){
-      selectAll.checked = true;
-      selectAll.dispatchEvent(new context.win.Event('change', {bubbles:true}));
-    }
-    const concurrency = context.doc.getElementById('batchConcurrency');
-    if(concurrency){
-      const current = Number(concurrency.value) || PLUS_BATCH_SIZE;
-      concurrency.value = String(Math.min(PLUS_BATCH_SIZE, Math.max(1, current)));
-      concurrency.dispatchEvent(new context.win.Event('input', {bubbles:true}));
-    }
-    setPlusImportState(
-      imported ? `已批量导入 ${imported} 条 AT，当前共 ${total} 个账号` : `这 ${data.count} 条 AT 已在工作台中`,
-      'ok'
-    );
+    const response = await fetch('/api/chatgpt-plus/import-codex', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        accounts,
+        sms_provider:$('#plus-sms-provider').value,
+        phone_attempts:Number($('#plus-phone-attempts').value),
+        sms_timeout:Number($('#plus-sms-timeout').value),
+        concurrency:Number($('#plus-concurrency').value),
+        group:$('#plus-group').value.trim() || 'codex',
+        node:$('#plus-node').value.trim() || 'auto',
+        keep_on_fail:$('#plus-keep-on-fail').checked,
+      }),
+    });
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `任务创建失败 (${response.status})`);
+    $('#plus-account-input').value = '';
+    setPlusImportState(`已接收 ${data.accepted} 个账号，开始登录和手机号接码`, 'ok');
+    monitorPlusRun(data.run_id, data.accepted);
   }catch(error){
     setPlusImportState(error.message || String(error), 'bad');
+    setPlusRunControls(false);
+  }
+}
+
+async function stopPlusCodexImport(){
+  if(!plusRun) return;
+  $('#btn-plus-stop').disabled = true;
+  try{
+    await fetch(`/api/stop/${plusRun}`, {method:'POST'});
+    setPlusImportState('正在停止批量任务');
   }finally{
-    plusImporting = false;
-    button.disabled = false;
+    $('#btn-plus-stop').disabled = false;
   }
 }
 
-async function copyLocalPlusAts(){
-  const btn = $('#btn-copy-ats');
-  btn.disabled = true;
-  btn.textContent = '加载中...';
-  try{
-    const data = await (await fetch(`/api/chatgpt-plus/export-ats?limit=${PLUS_IMPORT_LIMIT}`, {cache:'no-store'})).json();
-    if(!data.ats || !data.ats.length){
-      btn.textContent = '无可用 AT';
-      setTimeout(()=>{ btn.textContent = '复制本批 AT'; btn.disabled = false; }, 2000);
-      return;
-    }
-    await navigator.clipboard.writeText(data.ats.join('\n'));
-    btn.textContent = '已复制 ' + data.count + ' 条';
-    setTimeout(()=>{ btn.textContent = '复制本批 AT'; btn.disabled = false; }, 2000);
-  }catch(e){
-    btn.textContent = '复制失败';
-    setTimeout(()=>{ btn.textContent = '复制本批 AT'; btn.disabled = false; }, 2000);
-  }
-}
-
-async function loadPlusAtCount(){
-  try{
-    const data = await (await fetch(`/api/chatgpt-plus/export-ats?limit=${PLUS_IMPORT_LIMIT}`, {cache:'no-store'})).json();
-    $('#plus-at-count').textContent = `${data.available || 0} 个可用 · 可导入 ${data.count || 0}`;
-    $('#btn-import-ats').disabled = Number(data.count || 0) === 0;
-  }catch(e){
-    $('#plus-at-count').textContent = '无法读取';
-  }
-}
-
-$('#btn-copy-ats').onclick = copyLocalPlusAts;
-$('#btn-import-ats').onclick = importLocalPlusAts;
+$('#btn-plus-import').onclick = startPlusCodexImport;
+$('#btn-plus-stop').onclick = stopPlusCodexImport;
 
 // ---------------------------------------------------------------- 脚本导航
 function appendNavGroup(nav, title, items, renderItem, open=false){
@@ -1805,7 +1754,8 @@ const GUIDE_STEPS = [
     id:'browser', section:'浏览器', title:'选择浏览器方式', target:'[data-guide-group="browser"]', placement:'left',
     prepare:async()=>ensureGuideView('env'),
     skipLabel:'跳过浏览器配置', skipTo:'outlook-recovery',
-    body:`<p><strong>ruyipage</strong> 是默认值，使用 Firefox WebDriver BiDi 指纹内核。首次使用先在任务库运行“安装 RuyiPage Firefox”，再点本组连通测试。</p>
+    body:`<p><strong>ruyipage</strong> 是默认值，使用 Firefox WebDriver BiDi 指纹内核。便携包首次启动会在后台自动安装 Firefox runtime，首次任务打开时也会自动补装；以后升级直接复用，无需重复安装。</p>
+      <p>顶栏状态显示“RuyiPage 安装中”时等待下载完成。自动安装失败可在任务库运行“安装 RuyiPage Firefox”重试，或在本组填写已有 Firefox 路径后点击连通测试。</p>
       <p><strong>bundled</strong> 使用程序自带或系统可用的 Chromium；Claude、Grok 和 Outlook 等仍依赖 Chromium CDP 的旧流程会自动回退到它。</p>
       <p><strong>custom</strong> 使用普通 Chrome，填写 <code>CUSTOM_BROWSER_PATH</code>。Windows 常见路径是 <code>C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe</code>。</p>
       <p><strong>bitbrowser</strong> 需要先启动比特浏览器，并确认本地 API 通常为 <code>http://127.0.0.1:54345</code>。填写后使用本组的连通测试。</p>`,
@@ -1827,22 +1777,21 @@ const GUIDE_STEPS = [
       <p>连通测试只确认本机配置和服务接口可用，不代表目标网站一定允许注册，注册前仍应测试网络出口。</p>`,
   },
   {
-    id:'asset-scan', section:'资产 API', title:'先看号池状态', target:'[data-guide="asset-scan"]', placement:'bottom',
+    id:'asset-scan', section:'资产 API', title:'按需查看号池状态', target:'[data-guide="asset-scan"]', placement:'bottom',
     prepare:async()=>{ setNavOpen(false); await showView('assets'); },
     skipLabel:'跳过资产 API', skipTo:'chatgpt-email',
-    body:`<p>资产 API 用于向本地程序或下游服务读取邮箱、Cookie 和登录凭据。先在号池状态区选择类型，再运行“扫描当前类型”或“一键扫描全部”。</p>
-      <p>扫描会将资产分为正常、待解锁、封禁、过期、受限、凭据异常和检测异常。网络错误或目标站风控会显示为受限或检测异常，不会误判为封禁。</p>
+    body:`<p>资产 API 用于向本地程序或下游服务读取邮箱、Cookie 和登录凭据。需要人工复核时，可在号池状态区运行“扫描当前类型”或“一键扫描全部”；领取前无需先扫描。</p>
+      <p>扫描会将资产分为正常、待解锁、封禁、过期、受限、凭据异常和检测异常。它依据检测时的官方接口响应作尽力判断；网络、出口或目标站风控可能造成受限或检测异常，不能作为账号永久状态的绝对结论。</p>
       <p>正常 ChatGPT 账号会额外标注 Plus 免费试用资格。资格接口失败只显示“资格未知”，不会改变账号健康状态。</p>
-      <p>API 不会输出未验证、封禁、过期、受限或凭据异常资产。</p>`,
+      <p>扫描仅供人工参考，不阻塞或改变资产 API 的直接领取。</p>`,
   },
   {
-    id:'asset-call', section:'资产 API', title:'每次输出前都会在线校验', target:'[data-guide="asset-call"]', placement:'top',
+    id:'asset-call', section:'资产 API', title:'直接一次性领取', target:'[data-guide="asset-call"]', placement:'top',
     prepare:async()=>ensureGuideView('assets'),
     skipLabel:'跳过资产 API', skipTo:'chatgpt-email',
-    body:`<p>选择资产、输出格式和取用方式后，点击“在线校验并调用 API”。顺序取用和指定 index 都只面向未领取的健康账号。</p>
-      <p>接口会先扫描对应平台，只返回状态为“正常”的记录，并立即写入领取账本。同一平台账号即使切换输出格式也不会再次返回；只有手动重置领取记录后才可重新领取。</p>
-      <p>响应中的 <code>verification</code> 是本次检测依据，<code>remaining</code> 是该平台剩余未领取正常账号数。</p>
-      <p>这代表账号在本次检测时可用，不代表后续不会被目标服务限制。读取地址和 API key 仅应提供给受信任的本地服务。</p>`,
+    body:`<p>选择资产、输出格式和取用方式后，点击“直接领取”。接口不会先发起在线检测，顺序取用和指定 index 都只面向尚未领取的本地账号。</p>
+      <p>返回后会立即写入领取账本。同一平台账号即使切换输出格式也不会再次返回；只有手动重置领取记录后才可重新领取。</p>
+      <p>响应中的 <code>remaining</code> 是该平台剩余未领取账号数。领取地址和 API key 仅应提供给受信任的本地服务。</p>`,
   },
   {
     id:'chatgpt-email', section:'邮箱接码', title:'ChatGPT 邮箱接码', target:'[data-guide-group="chatgpt-email"]', placement:'left',

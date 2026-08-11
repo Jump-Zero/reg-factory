@@ -6,7 +6,7 @@
 
 支持以下浏览器类型；外部客户端模式需要保持客户端运行：
 
-- [RuyiPage](https://github.com/LoseNine/ruyipage)：`FINGERPRINT_BROWSER=ruyipage`，默认用于 ChatGPT、Codex OAuth、GitHub 等共享浏览器流程。先运行 WebUI 的“安装 RuyiPage Firefox”任务，或执行 `python -m ruyipage install`。可用 `RUYIPAGE_BROWSER_PATH` 指定已有 Firefox。
+- [RuyiPage](https://github.com/LoseNine/ruyipage)：`FINGERPRINT_BROWSER=ruyipage`，默认用于 ChatGPT、Codex OAuth、GitHub 等共享浏览器流程。便携包首次启动和首次打开浏览器时会自动安装 Firefox runtime，后续版本复用 `%LOCALAPPDATA%\ruyipage\browsers`，无需重复安装。自动安装失败时可运行 WebUI 的“安装 RuyiPage Firefox”任务重试，或用 `RUYIPAGE_BROWSER_PATH` 指定已有 Firefox。
 - 内置 Chromium：`FINGERPRINT_BROWSER=bundled`，安装程序会配置浏览器路径。
 - 普通 Chrome/Chromium：`FINGERPRINT_BROWSER=custom`，通过 `CUSTOM_BROWSER_PATH` 指定可执行文件；留空时会尝试查找系统 Chrome。
 - [BitBrowser 官方下载页](https://www.bitbrowser.cn/download)：默认 API 为 `http://127.0.0.1:54345`。
@@ -63,13 +63,19 @@ PROXY_MODE=clash_fixed
 CLASH_FIXED_NODE=美国 01
 ```
 
-Plus 提链和绑卡/支付可以分别走两个固定 Clash 出口。这里填写两个独立的 Clash 代理入口（例如分别绑定固定节点的本地监听端口），不要在并发任务运行期间切换同一个 `GLOBAL` 选择器：
-```env
-REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE=http://127.0.0.1:7901
-REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE=http://127.0.0.1:7902
+Plus Codex 导入只处理已经开通的账号，不会提取优惠链、绑卡或发起支付。每个账号登录后都会进入手机号接码验证阶段，验证成功后才继续 Codex OAuth 和 SUB2API 导入。WebUI 的 Plus 导入页支持批量账号，并可选择接码平台、换号次数、等待时间、并发数、ChatGPT 节点和 SUB2API 分组。
+
+账号行支持 Outlook、iCloud、ChatGPT session token 和完整 Codex OAuth JSON。Outlook RT 与 client_id 顺序均可，也兼容 Hotmail/Live/MSN、两段/三段记录、Tab、逗号、竖线、分号及 `email:password`：
+```text
+email@outlook.com----password----refresh_token----client_id
+email@outlook.jp----password----client_id----refresh_token
+email@hotmail.com----password----refresh_token
+email@live.jp:password
+email@icloud.com
+__Secure-next-auth.session-token=...
+{"email":"...","access_token":"...","refresh_token":"...","plan_type":"plus","codex_phone_status":"verified"}
 ```
-也可以在 WebUI 的 Plus 阶段下拉框中选择住宅 IP、Clash 当前节点或具体 Clash 节点；具体节点选择会通过 Clash 控制器锁定该阶段，两个阶段都选具体节点时会串行保护节点切换。
-未配置时，提链优先使用住宅 IP，绑卡/支付优先使用 `CLASH_PROXY`；缺少其中一种出口会自动回退到另一种。
+Outlook Graph RT/client_id 可用时优先通过 Graph 读取 OpenAI 邮箱验证码，否则使用账号密码在浏览器登录 Outlook 取码。iCloud 地址使用已配置的 `ICLOUD_MAIL_*` API。原始 ChatGPT session cookie 会先验证登录态，再走手机号验证和 Codex OAuth；普通短期 access token 不能直接换出 refresh token，会明确拒绝。完整 OAuth JSON 仅在自身带 `codex_phone_status=verified` 时允许直接导入。
 
 住宅代理支持 `http`、`https`、`socks4` 和 `socks5`；BitBrowser 窗口支持 `http`、`https` 和 `socks5`。代理池优先于单个代理；`.env` 中用逗号分隔，WebUI 中可每行填写一个：
 

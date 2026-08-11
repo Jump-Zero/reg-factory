@@ -48,6 +48,9 @@ CONSENT_LABELS = [
     "続ける", "次へ", "はい", "ChatGPT で続行",
     # 马来
     "Teruskan", "Benarkan", "Sahkan", "Setuju",
+    # 捷克
+    "Přijmout", "Povolit", "Pokračovat", "Ano", "Další", "Souhlasím",
+    "Přijmout a pokračovat",
 ]
 
 
@@ -351,7 +354,9 @@ async def _wait_for_phone_flow_exit(page, timeout=20):
     return False
 
 
-async def _goto_add_phone(page, auth_url, account_email, timeout=45):
+async def _goto_add_phone(
+    page, auth_url, account_email, timeout=45, email_code_provider=None
+):
     """(重新)走到 add-phone 输手机号页:导航 auth_url → 选账号 → 落到 add-phone 且 #tel 可见。
     用于换号前把页面退回干净的输手机号状态。"""
     # 若 OTP 页有"换个号码/返回"入口，先点(更轻);点不到就重新导航
@@ -388,7 +393,9 @@ async def _goto_add_phone(page, auth_url, account_email, timeout=45):
             part in url for part in ("/log-in", "/email-verification")
         ):
             print("  [add-phone] 换号授权要求重新登录，自动完成邮箱验证...")
-            ok, message = await _complete_auth_email_login(page, account_email)
+            ok, message = await _complete_auth_email_login(
+                page, account_email, email_code_provider=email_code_provider
+            )
             if not ok:
                 print(f"  [add-phone] 重新登录失败: {message}")
                 return False
@@ -408,7 +415,10 @@ async def _goto_add_phone(page, auth_url, account_email, timeout=45):
     return False
 
 
-async def handle_add_phone(page, auth_url="", account_email="", attempts=None, sms_timeout=None, sms_provider="auto"):
+async def handle_add_phone(
+    page, auth_url="", account_email="", attempts=None, sms_timeout=None,
+    sms_provider="auto", email_code_provider=None,
+):
     """auth.openai.com/add-phone:接码平台租号→填→收码→提交，被拒/收不到码就**回退页面**换号重试。
     成功(离开 add-phone)返回 True。
 
@@ -443,7 +453,10 @@ async def handle_add_phone(page, auth_url="", account_email="", attempts=None, s
                     print("  [add-phone] 缺 auth_url 无法回退，终止")
                     break
                 print("  [add-phone] 回退到输手机号页...")
-                if not await _goto_add_phone(page, auth_url, account_email):
+                if not await _goto_add_phone(
+                    page, auth_url, account_email,
+                    email_code_provider=email_code_provider,
+                ):
                     if not _is_phone_flow_url(page.url):
                         if _is_authorization_advanced_url(page.url):
                             print("  [add-phone] 已离开 add-phone，继续处理授权回调")
@@ -519,7 +532,11 @@ async def _click_account(page, account_email=""):
     return False
 
 
-async def drive_authorize(page, auth_url, timeout=120, debug_dump=None, account_email="", manual_phone=False, semi_phone="", allow_phone=True, sms_provider="auto"):
+async def drive_authorize(
+    page, auth_url, timeout=120, debug_dump=None, account_email="",
+    manual_phone=False, semi_phone="", allow_phone=True, sms_provider="auto",
+    result_metadata=None, email_code_provider=None,
+):
     """在已登录该账号的页面打开 auth_url，处理账号选择/同意页，捕获 localhost:1455 回调。
     manual_phone=True 时遇到 add-phone 不自动接码，由用户在浏览器手动填号收码，脚本轮询等待。
     semi_phone 非空时(半自动)：脚本自动填该号+选 WhatsApp+发送一次，然后转手动等用户输码。
@@ -530,6 +547,7 @@ async def drive_authorize(page, auth_url, timeout=120, debug_dump=None, account_
     manual_hint_shown = False
     semi_sent = False
     auth_login_attempted = False
+    phone_flow_seen = False
 
     async def _handle(route):
         captured["url"] = route.request.url
@@ -583,7 +601,8 @@ async def drive_authorize(page, auth_url, timeout=120, debug_dump=None, account_
                 if on_auth_login and not auth_login_attempted:
                     auth_login_attempted = True
                     ok, login_msg = await _complete_auth_email_login(
-                        page, account_email
+                        page, account_email,
+                        email_code_provider=email_code_provider,
                     )
                     if not ok:
                         return None, None, login_msg
@@ -603,6 +622,7 @@ async def drive_authorize(page, auth_url, timeout=120, debug_dump=None, account_
             # 脚本只轮询等待离开 add-phone 页；否则走接码自动过。
             try:
                 if _is_phone_flow_url(page.url):
+                    phone_flow_seen = True
                     if not allow_phone:
                         # 本次只赌"免手机直连"，弹了手机就立刻退出(不接码不花钱)，交给上层换会话重试
                         print("  [add-phone] 本次免手机策略：检测到要手机验证，跳过本次(不接码)")
@@ -635,6 +655,7 @@ async def drive_authorize(page, auth_url, timeout=120, debug_dump=None, account_
                         auth_url=auth_url,
                         account_email=account_email,
                         sms_provider=sms_provider,
+                        email_code_provider=email_code_provider,
                     )
                     if not ok:
                         return None, None, "add-phone 手机验证失败(接码换号都没过)"
@@ -760,6 +781,8 @@ async def drive_authorize(page, auth_url, timeout=120, debug_dump=None, account_
             return None, None, f"授权返回 error={err}"
         if not code:
             return None, None, "回调缺少 code"
+        if isinstance(result_metadata, dict):
+            result_metadata["codex_phone_status"] = "verified" if phone_flow_seen else "not_verified"
         return code, state, "ok"
     finally:
         for pat in ("http://localhost:1455/**", "http://127.0.0.1:1455/**"):
@@ -871,14 +894,20 @@ async def _icloud_existing_codes(email):
     return codes
 
 
-async def _complete_auth_email_login(page, account_email):
+async def _complete_auth_email_login(
+    page, account_email, email_code_provider=None
+):
     """Finish the Codex OAuth email login when the ChatGPT cookie is insufficient."""
     if not account_email:
         return False, "OAuth 要求重新登录，但无法确定账号邮箱"
 
     from common.browser import react_fill
 
-    known_codes = await _icloud_existing_codes(account_email)
+    known_codes = (
+        await _icloud_existing_codes(account_email)
+        if email_code_provider is None else set()
+    )
+    code_requested_at = time.time()
     email_input = page.locator('input[type="email"], input[name="email"]').first
     if await email_input.count() > 0:
         if not await react_fill(
@@ -908,23 +937,26 @@ async def _complete_auth_email_login(page, account_email):
     if await code_input.count() == 0:
         return False, f"OAuth 邮箱登录未进入验证码页(当前页 {page.url[:80]})"
 
-    domain = account_email.rsplit("@", 1)[-1].lower()
-    if domain not in {"icloud.com", "me.com", "mac.com"}:
-        return False, "OAuth 要求邮箱验证码；当前仅 iCloud 可在此步骤自动取码"
+    if email_code_provider is not None:
+        code = await email_code_provider(account_email, code_requested_at)
+    else:
+        domain = account_email.rsplit("@", 1)[-1].lower()
+        if domain not in {"icloud.com", "me.com", "mac.com"}:
+            return False, "OAuth 要求邮箱验证码，但当前账号没有可用取码方式"
 
-    from common.temp_email import poll_verification_code
+        from common.temp_email import poll_verification_code
 
-    code = await poll_verification_code(
-        account_email,
-        "icloud",
-        email=account_email,
-        max_wait=120,
-        poll_interval=4,
-        code_regex=r"\b(\d{6})\b",
-        exclude_codes=tuple(known_codes),
-    )
+        code = await poll_verification_code(
+            account_email,
+            "icloud",
+            email=account_email,
+            max_wait=120,
+            poll_interval=4,
+            code_regex=r"\b(\d{6})\b",
+            exclude_codes=tuple(known_codes),
+        )
     if not code:
-        return False, "OAuth iCloud 验证码超时"
+        return False, "OAuth 邮箱验证码超时"
     if not await react_fill(
         page,
         'input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"]',
@@ -956,7 +988,8 @@ async def _complete_auth_email_login(page, account_email):
 async def authorize_with_retry(page, gen_auth_url, account_email="", phone_skip_attempts=3,
                                skip_timeout=120, phone_timeout=600, debug_dump=None,
                                manual_phone=False, semi_phone="", reset_page=None,
-                               sms_provider="auto"):
+                               sms_provider="auto", result_metadata=None,
+                               email_code_provider=None):
     """Codex 授权重试编排：**先赌 N 次"免手机直连"，每次失败重新生成授权链接(新会话=重新摇风控骰子)，
     实在每次都要手机，最后一次才真接码/手动填号。**
 
@@ -1003,17 +1036,21 @@ async def authorize_with_retry(page, gen_auth_url, account_email="", phone_skip_
             mode = "手动填号" if manual_phone else ("半自动" if semi_phone else "自动接码")
             print(f"  [codex] 授权尝试 {attempt+1}/{total}（最后一次，放开手机验证：{mode}，上限 {phone_timeout}s）...")
             _budget = phone_timeout
+            attempt_metadata = {}
             _coro = drive_authorize(
                 page, auth_url, timeout=phone_timeout, debug_dump=debug_dump,
                 account_email=account_email, manual_phone=manual_phone, semi_phone=semi_phone,
-                allow_phone=True, sms_provider=sms_provider)
+                allow_phone=True, sms_provider=sms_provider, result_metadata=attempt_metadata,
+                email_code_provider=email_code_provider)
         else:
             print(f"  [codex] 授权尝试 {attempt+1}/{total}（免手机直连，弹手机就换会话重试，上限 {skip_timeout}s）...")
             _budget = skip_timeout
+            attempt_metadata = {}
             _coro = drive_authorize(
                 page, auth_url, timeout=skip_timeout, debug_dump=None,
                 account_email=account_email, allow_phone=False,
-                sms_provider=sms_provider)
+                sms_provider=sms_provider, result_metadata=attempt_metadata,
+                email_code_provider=email_code_provider)
         # 硬上限：drive_authorize 内部循环若被卡死的 await 阻塞会无视自身 deadline，
         # 这里用 wait_for 兜底(+60s 缓冲)强制超时，避免整轮永久冻结。
         try:
@@ -1023,6 +1060,8 @@ async def authorize_with_retry(page, gen_auth_url, account_email="", phone_skip_
             print(f"  [codex] 第 {attempt+1} 次硬超时，强制中断重试...")
         last_msg = msg
         if code:
+            if isinstance(result_metadata, dict):
+                result_metadata.update(attempt_metadata)
             return code, session_id, cb_state or state, "ok"
         if msg == "ADDPHONE_REQUIRED":
             print(f"  [codex] 第 {attempt+1} 次要手机验证，换新会话重试...")

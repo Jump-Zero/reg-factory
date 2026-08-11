@@ -552,18 +552,19 @@ class RuyiPageBrowser:
     async def open_browser_async(self, profile_id):
         try:
             from ruyipage.aio import launch
-            from ruyipage import resolve_firefox_path
         except ImportError as exc:
             raise RuntimeError(
                 "RuyiPage is unavailable; run: pip install ruyiPage[async]"
             ) from exc
+        from common.ruyipage_runtime import ensure_runtime, runtime_status
+
         configured_path = os.environ.get("RUYIPAGE_BROWSER_PATH", "").strip()
-        browser_path = resolve_firefox_path(configured_path or None)
-        if not browser_path:
-            raise RuntimeError(
-                "RuyiPage Firefox runtime is unavailable; run the WebUI install task "
-                "or: python -m ruyipage install"
-            )
+        status = runtime_status(configured_path)
+        if status["state"] != "ready":
+            print("[ruyipage] Firefox runtime missing; installing automatically...")
+            status = await asyncio.to_thread(ensure_runtime, configured_path)
+            print(f"[ruyipage] Firefox ready: {status.get('path', '')}")
+        browser_path = status["path"]
         profile = self.profiles[str(profile_id)]
         raw_page = await launch(
             browser_path=browser_path,

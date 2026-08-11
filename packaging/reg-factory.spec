@@ -20,6 +20,7 @@ TASK_FILES = [
     "mailbox_broker.py",
     "register_outlook_standalone.py",
     "tools/extract_graph_tokens.py",
+    "tools/import_plus_codex.py",
     "tools/upload_tokens.py",
     "tools/export_chatgpt2api.py",
     "tools/export_accounts.py",
@@ -33,7 +34,6 @@ datas = [
     (str(ROOT / "webui" / "static"), "webui/static"),
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "common" / "bundled_browser_helper.py"), "common"),
-    (str(ROOT / "vendor" / "chatgpt_plus"), "vendor/chatgpt_plus"),
 ]
 datas.extend((str(ROOT / item), str(Path(item).parent)) for item in TASK_FILES)
 
@@ -48,6 +48,7 @@ hiddenimports = playwright_hidden + ruyipage_hidden + [
     "run_full_flow",
     "register_three_platforms",
     "oauth_codex",
+    "tools.import_plus_codex",
     "register_chatgpt",
     "register_grok_http",
     "register_grok",

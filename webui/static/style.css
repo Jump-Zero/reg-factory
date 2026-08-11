@@ -540,27 +540,33 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .k12-frame-stage{position:relative;flex:1;min-height:480px;background:#f4f6f8}
 .k12-frame{display:block;width:100%;height:100%;border:0;background:#f4f6f8}
 
-/* ChatGPT Plus 本地工作台 */
-.plus-workbench-panel{height:100%;display:flex;flex-direction:column;overflow:hidden}
-.plus-workbench-quick{
-  display:flex;flex-wrap:wrap;gap:10px;padding:12px 14px;
-  border-bottom:1px solid var(--line);background:var(--surface)
-}
-.plus-workbench-quick-item{
-  display:flex;align-items:center;gap:8px;padding:6px 10px;
-  border:1px solid var(--line);border-radius:6px;background:var(--surface-raised);font-size:12px
-}
-.plus-workbench-label{color:var(--muted);font-size:11px;font-weight:600;white-space:nowrap}
-.plus-workbench-quick-item code{font:11.5px/1 var(--mono);color:var(--text);user-select:all}
-.btn-plus-primary{
-  min-height:28px;padding:4px 10px;border:1px solid var(--accent);border-radius:6px;
-  background:var(--accent);color:#fff;font-size:11px;font-weight:650;white-space:nowrap;cursor:pointer
-}
-.btn-plus-primary:hover:not(:disabled){background:#619afb}
-.btn-plus-primary:disabled{opacity:.5;cursor:wait}
-#plus-import-state{max-width:340px;color:var(--muted);font-size:11.5px;overflow-wrap:anywhere}
+/* Existing Plus account Codex import */
+.plus-import-panel{height:100%;min-height:620px;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow:hidden}
+.plus-import-head{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:64px;padding:12px 16px;border-bottom:1px solid var(--line)}
+.plus-import-head h2{margin:0 0 4px;font-size:17px;font-weight:680}
+#plus-import-state{color:var(--muted);font-size:11.5px;overflow-wrap:anywhere}
 #plus-import-state.ok{color:var(--green)}
 #plus-import-state.bad{color:var(--red)}
+.plus-run-summary{color:var(--quiet);font:11px var(--mono);white-space:nowrap}
+.plus-import-grid{display:grid;grid-template-columns:minmax(360px,.85fr) minmax(420px,1.15fr);flex:1;min-height:0}
+.plus-import-form{padding:16px;overflow-y:auto;border-right:1px solid var(--line)}
+.plus-field{display:block;min-width:0}
+.plus-field>span{display:block;margin-bottom:5px;color:#d9dce1;font-size:11px;font-weight:600}
+.plus-field input,.plus-field select,.plus-field textarea{width:100%;min-width:0;border:1px solid var(--line);border-radius:6px;background:var(--surface-raised);color:var(--text);font-size:12px}
+.plus-field input,.plus-field select{height:36px;padding:7px 9px}
+.plus-field textarea{height:220px;padding:10px;resize:vertical;font:11px/1.55 var(--mono);overflow-wrap:anywhere}
+.plus-field input:hover,.plus-field select:hover,.plus-field textarea:hover{border-color:var(--line-strong)}
+.plus-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 14px;margin-top:14px}
+.plus-toggle{display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--muted);font-size:11px}
+.plus-toggle input{width:16px;height:16px;margin:0;accent-color:var(--accent)}
+.plus-import-actions{display:flex;align-items:center;gap:9px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.plus-log-surface{display:flex;min-width:0;min-height:0;flex-direction:column;background:#0b0c0e}
+.plus-stage-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid #292d33;background:#111318}
+.plus-stage-row span{padding:9px 10px;border-right:1px solid #292d33;color:#9198a3;font-size:10.5px;text-align:center;white-space:nowrap}
+.plus-stage-row span:last-child{border-right:0}
+#plus-run-log{flex:1;min-height:420px;margin:0;padding:14px;overflow:auto;color:#cbd0d7;font:10.5px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word}
+#plus-run-log:empty{display:grid;place-items:center;color:#555b64}
+#plus-run-log:empty::before{content:attr(data-empty)}
 
 .k12-offline{
   position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -707,6 +713,9 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   .asset-status-summary button{flex-basis:25%}
   .k12-channel-bar{align-items:flex-start;flex-direction:column}
   .k12-channel-actions{width:100%;justify-content:space-between!important}
+  .plus-import-grid{grid-template-columns:1fr}
+  .plus-import-form{border-right:0;border-bottom:1px solid var(--line)}
+  #plus-run-log{min-height:360px}
   .embed-wrap{flex-direction:column;height:auto;min-height:100%}
   .embed-frame-box{min-height:70dvh}
   .sms-helper{width:100%;flex-basis:auto}
@@ -786,6 +795,14 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   .network-actions{align-items:stretch;flex-direction:column}
   .network-actions .btn-run,.network-actions .btn-secondary{width:100%;min-height:41px}
   .network-message{margin:2px 0 0}
+  .plus-import-panel{min-height:0;border-radius:6px}
+  .plus-import-head{align-items:flex-start;flex-direction:column}
+  .plus-run-summary{white-space:normal}
+  .plus-controls{grid-template-columns:1fr}
+  .plus-field textarea{height:230px}
+  .plus-import-actions{align-items:stretch;flex-direction:column}
+  .plus-import-actions .btn-run,.plus-import-actions .btn-secondary{width:100%;min-height:41px}
+  .plus-stage-row span{padding:8px 4px;font-size:9px;white-space:normal}
   .contact-dialog{padding:9px}
   .tour-popover{max-height:min(68dvh,560px);padding:13px}
   .tour-popover h2{font-size:15px}

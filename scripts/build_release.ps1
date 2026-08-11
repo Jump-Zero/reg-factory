@@ -68,7 +68,8 @@ $forbidden = Get-ChildItem -LiteralPath $PackageRoot -Recurse -File | Where-Obje
     $_.Name -match '^emails_(used|error)' -or
     $_.Name -in @("registration_queue.json", "fingerprint_profiles.json") -or
     $_.Extension -eq ".log" -or
-    $relative -match '^(_internal/)?(cookies|tokens|runtime|outlook_accounts|unlock_results|codex_k12)/'
+    $relative -match '^(_internal/)?(cookies|tokens|runtime|outlook_accounts|unlock_results|codex_k12)/' -or
+    $relative -match '^_internal/vendor/chatgpt_plus/'
 }
 if ($forbidden) {
     $names = ($forbidden | Select-Object -ExpandProperty FullName) -join [Environment]::NewLine

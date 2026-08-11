@@ -132,12 +132,15 @@ def _merge_platform_records(platform: str) -> list[dict]:
                 "platform": platform,
                 "kind": "platform",
                 "email": email,
+                "email_provider": asset_store.classify_email_provider(email),
                 "sources": set(),
                 "_cookies": [],
                 "_token": {},
+                **({"codex_phone_status": "not_verified"} if platform == "chatgpt" else {}),
             }
         elif email and not merged[key]["email"]:
             merged[key]["email"] = email
+            merged[key]["email_provider"] = asset_store.classify_email_provider(email)
         merged[key]["sources"].add(source)
         return merged[key]
 
@@ -146,7 +149,13 @@ def _merge_platform_records(platform: str) -> list[dict]:
         data = record["data"]
         source = record["path"].name
         email = asset_store._email_from_session(data, record["path"].stem.split(".")[0])
-        obtain(email, source)["_token"] = data
+        target = obtain(email, source)
+        target["_token"] = data
+        provider = str(data.get("email_provider") or "").strip().lower()
+        target["email_provider"] = provider if provider in asset_store.EMAIL_PROVIDERS else asset_store.classify_email_provider(target.get("email", ""))
+        if platform == "chatgpt":
+            phone_status = str(data.get("codex_phone_status") or "not_verified").strip().lower()
+            target["codex_phone_status"] = phone_status if phone_status in {"verified", "not_verified"} else "not_verified"
 
     for record in asset_store._cookie_records(platform):
         source = record["path"].name
@@ -178,6 +187,7 @@ def _inventory_records() -> list[dict]:
             "platform": "outlook",
             "kind": "mailbox",
             "email": email,
+            "email_provider": mailbox.get("email_provider") or asset_store.classify_email_provider(email),
             "source": source,
             "_mailbox": mailbox,
             "_history": history.get(identity),
@@ -198,6 +208,7 @@ def _public_record(record: dict) -> dict:
 def _status_summary(items: list[dict]) -> dict:
     statuses = {status: 0 for status in STATUSES}
     plus_trial = {status: 0 for status in PLUS_TRIAL_STATUSES}
+    email_providers = {provider: 0 for provider in asset_store.EMAIL_PROVIDERS}
     platforms = {}
     for item in items:
         status = item.get("status", "unknown")
@@ -211,11 +222,14 @@ def _status_summary(items: list[dict]) -> dict:
         if platform == "chatgpt":
             trial_status = str(item.get("plus_trial") or "unknown")
             plus_trial[trial_status if trial_status in plus_trial else "unknown"] += 1
+        provider = str(item.get("email_provider") or "other")
+        email_providers[provider if provider in email_providers else "other"] += 1
     return {
         "total": len(items),
         "statuses": statuses,
         "platforms": platforms,
         "plus_trial": plus_trial,
+        "email_providers": email_providers,
     }
 
 

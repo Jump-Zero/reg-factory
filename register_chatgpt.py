@@ -865,11 +865,13 @@ async def extract_codex(page, email, p=None, ctx=None, release_current=None):
                 reset_fn = None
 
         # 驱动授权（先免手机 N 次，最后一次放开手机），捕获 localhost:1455 回调
+        codex_metadata = {}
         code, session_id, cb_state, msg = await ox.authorize_with_retry(
             page, lambda: ox.generate_auth_url(origin, token),
             account_email=email, phone_skip_attempts=skip_n,
             skip_timeout=120, phone_timeout=timeout, manual_phone=CODEX_MANUAL_PHONE,
-            reset_page=reset_fn, sms_provider=CODEX_SMS_PROVIDER)
+            reset_page=reset_fn, sms_provider=CODEX_SMS_PROVIDER,
+            result_metadata=codex_metadata)
         if reset_fn is not None:
             try:
                 await reset_fn.cleanup()
@@ -882,6 +884,9 @@ async def extract_codex(page, email, p=None, ctx=None, release_current=None):
         # 换码 + 建 oauth 账号（带 refresh_token）
         exch = ox.exchange_code(origin, token, session_id, code, cb_state)
         cred = ox.build_oauth_credentials(exch)
+        cred["codex_phone_status"] = codex_metadata.get("codex_phone_status", "unknown")
+        from common.session_export import save_codex_oauth_credentials
+        save_codex_oauth_credentials(cred, email=cred.get("email") or email)
         print(f"  [codex] exchange-code OK: refresh_token={'YES' if cred.get('refresh_token') else 'NO'} "
               f"plan={cred.get('plan_type')}")
         acct = ox.create_oauth_account(origin, token, cred, [group_id],

@@ -179,26 +179,39 @@ class WebUIEnvReloadTests(unittest.TestCase):
             self.assertIsNone(server._asset_api_denied(by_bearer))
             self.assertEqual(server._asset_api_denied(denied).status_code, 401)
 
-    def test_asset_api_scans_before_returning_an_email(self):
+    def test_asset_api_claims_email_without_running_scanner(self):
         from common import asset_scanner, asset_store
 
         events = []
 
-        def scan_pool(**_kwargs):
-            events.append("scan")
-            return {"items": []}
-
         def get_email(**kwargs):
             events.append("read")
-            self.assertTrue(kwargs["verified_only"])
-            return {"kind": "email", "verification": {"status": "normal"}}
+            self.assertTrue(kwargs["claim_once"])
+            self.assertNotIn("verified_only", kwargs)
+            return {"kind": "email", "claim_recorded": True}
 
-        with patch.object(asset_scanner, "scan_pool", side_effect=scan_pool):
+        with patch.object(asset_scanner, "scan_pool", side_effect=AssertionError("scanner called")):
             with patch.object(asset_store, "get_email", side_effect=get_email):
                 result = server.api_asset_email(FakeJSONRequest())
 
-        self.assertEqual(events, ["scan", "read"])
-        self.assertEqual(result["verification"]["status"], "normal")
+        self.assertEqual(events, ["read"])
+        self.assertTrue(result["claim_recorded"])
+
+    def test_mailpool_import_accepts_mailbox_variants_only(self):
+        client_id = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+        outlook = server._parse_mail_line(
+            f"user@outlook.jp|password|{client_id}|M.refresh-token"
+        )
+        icloud = server._parse_mail_line(
+            '{"email":"user@icloud.com","password":"secret"}'
+        )
+
+        self.assertEqual(
+            outlook,
+            ["user@outlook.jp", "password", "M.refresh-token", client_id],
+        )
+        self.assertEqual(icloud[:2], ["user@icloud.com", "secret"])
+        self.assertIsNone(server._parse_mail_line("session_token=opaque-token-value-long-enough"))
 
 
 class WebUIRunStreamTests(unittest.IsolatedAsyncioTestCase):

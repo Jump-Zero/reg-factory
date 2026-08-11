@@ -24,6 +24,20 @@ class AssetStoreTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
+    def test_email_provider_classification_and_filtering(self):
+        self.assertEqual(asset_store.classify_email_provider("a@outlook.com"), "outlook")
+        self.assertEqual(asset_store.classify_email_provider("a@icloud.com"), "icloud")
+        self.assertEqual(asset_store.classify_email_provider("a@mail.tm"), "temporary")
+        self.assertEqual(asset_store.classify_email_provider("a@example.com"), "other")
+        (self.root / "emails.txt").write_text(
+            "outlook@outlook.com----pw\n"
+            "icloud@icloud.com----pw\n"
+            "temp@mail.tm----pw\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(asset_store.get_email(index=0, email_provider="icloud")["email_provider"], "icloud")
+        self.assertEqual(asset_store.get_email(index=0, email_provider="temporary")["email_provider"], "temporary")
+
     def test_email_sequence_and_explicit_index(self):
         (self.root / "emails.txt").write_text(
             "first@example.com----pw1----rt1----cid1\n"
@@ -127,6 +141,34 @@ class AssetStoreTests(unittest.TestCase):
             with self.assertRaises(asset_store.AssetUnverified):
                 asset_store.get_platform_asset("chatgpt", "raw", index=0, verified_only=True)
 
+    def test_chatgpt_codex_phone_status_filters_verified_oauth_credentials(self):
+        token_dir = self.root / "tokens" / "chatgpt"
+        token_dir.mkdir(parents=True, exist_ok=True)
+        (token_dir / "verified.session.json").write_text(json.dumps({
+            "email": "verified@example.com",
+            "access_token": "verified-access",
+            "codex_phone_status": "verified",
+        }), encoding="utf-8")
+        (token_dir / "regular.session.json").write_text(json.dumps({
+            "email": "regular@example.com",
+            "accessToken": "regular-access",
+        }), encoding="utf-8")
+        from common import asset_scanner
+
+        report = {"items": [
+            {"platform": "chatgpt", "email": "verified@example.com", "status": "normal"},
+            {"platform": "chatgpt", "email": "regular@example.com", "status": "normal"},
+        ]}
+        with patch.object(asset_scanner, "get_report", return_value=report):
+            verified = asset_store.get_platform_asset("chatgpt", "session", verified_only=True, codex_phone_status="verified")
+            asset_store.reset_cursor("chatgpt")
+            regular = asset_store.get_platform_asset("chatgpt", "session", verified_only=True, codex_phone_status="not_verified")
+
+        self.assertEqual(verified["email"], "verified@example.com")
+        self.assertEqual(verified["codex_phone_status"], "verified")
+        self.assertEqual(regular["email"], "regular@example.com")
+        self.assertEqual(regular["codex_phone_status"], "not_verified")
+
     def test_verified_email_claims_are_one_time_and_resettable(self):
         (self.root / "emails.txt").write_text(
             "first@example.com----pw1----rt1----cid1\n"
@@ -184,6 +226,19 @@ class AssetStoreTests(unittest.TestCase):
         self.assertEqual(raw["claim_scope"], "chatgpt")
         self.assertEqual(reset["claim_scopes_removed"], ["chatgpt"])
         self.assertEqual(converted["email"], "user@example.com")
+
+    def test_direct_claim_never_requires_scan_and_is_shared_across_formats(self):
+        self._write_chatgpt_assets()
+        from common import asset_scanner
+
+        with patch.object(asset_scanner, "get_report", side_effect=AssertionError("scan read")):
+            raw = asset_store.get_platform_asset("chatgpt", "raw", claim_once=True)
+            with self.assertRaises(asset_store.AssetExhausted):
+                asset_store.get_platform_asset("chatgpt", "sub2api", claim_once=True)
+
+        self.assertTrue(raw["claim_recorded"])
+        self.assertNotIn("verification", raw)
+        self.assertEqual(raw["remaining"], 0)
 
     def test_grok_sub2api_and_summary(self):
         token_dir = self.root / "tokens" / "grok"

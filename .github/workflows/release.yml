@@ -1,0 +1,91 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "1.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version matching VERSION
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+      - name: Prepare build environment
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+      - name: Build Windows x64 package
+        shell: pwsh
+        run: |
+          $version = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.version }}" } else { "${{ github.ref_name }}" }
+          .\scripts\build_release.ps1 -Version $version -SkipInstall
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-x64
+          path: |
+            dist/reg-factory-windows-x64-*.zip
+            dist/reg-factory-windows-x64-*.zip.sha256.txt
+          if-no-files-found: error
+
+  build-macos-arm64:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = "arm64"
+      - name: Prepare build environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-build.txt
+      - name: Build macOS arm64 package
+        run: |
+          version="${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}"
+          chmod +x scripts/build_release.sh
+          scripts/build_release.sh "$version" --skip-install
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-arm64
+          path: |
+            dist/reg-factory-macos-arm64-*.tar.gz
+            dist/reg-factory-macos-arm64-*.tar.gz.sha256.txt
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-windows, build-macos-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Publish Chinese release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "reg-factory ${GITHUB_REF_NAME}" \
+            --notes-file ".github/release-notes/${GITHUB_REF_NAME}.md"

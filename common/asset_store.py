@@ -52,6 +52,28 @@ _PLATFORMS = {
     },
 }
 
+EMAIL_PROVIDERS = ("outlook", "icloud", "temporary", "other")
+_OUTLOOK_EMAIL_DOMAINS = {"outlook.com", "hotmail.com", "live.com", "msn.com"}
+_ICLOUD_EMAIL_DOMAINS = {"icloud.com", "me.com", "mac.com"}
+_TEMPORARY_EMAIL_MARKERS = (
+    "10minutemail", "10minutemail", "guerrillamail", "mailinator", "mail.tm",
+    "temp-mail", "tempmail", "yopmail", "sharklasers", "getnada", "inboxbear",
+    "dropmail", "moakt", "emailondeck", "minuteinbox", "mohmal",
+)
+
+
+def classify_email_provider(email: str) -> str:
+    """Classify an account's registration mailbox without retaining credentials."""
+    value = str(email or "").strip().lower()
+    domain = value.rsplit("@", 1)[-1] if "@" in value else ""
+    if domain in _OUTLOOK_EMAIL_DOMAINS:
+        return "outlook"
+    if domain in _ICLOUD_EMAIL_DOMAINS:
+        return "icloud"
+    if any(marker in domain for marker in _TEMPORARY_EMAIL_MARKERS):
+        return "temporary"
+    return "other"
+
 
 def _data_root() -> Path:
     return Path(os.environ.get("REG_FACTORY_DATA_DIR") or Path.cwd()).resolve()
@@ -152,7 +174,7 @@ def _claim_record(
     identity_for,
     index: int | None,
 ) -> tuple[int, dict, int, int, bool]:
-    """Atomically select and claim one healthy account across all output formats."""
+    """Atomically select and claim one account across all output formats."""
     with _CURSOR_LOCK:
         claims = _read_claims()
         claimed = set(claims.get(scope, set()))
@@ -167,10 +189,10 @@ def _claim_record(
 
         total = len(candidates)
         if total <= 0:
-            raise AssetExhausted("没有未领取的正常资产；如需重新使用，请重置领取记录")
+            raise AssetExhausted("没有未领取的资产；如需重新使用，请重置领取记录")
         selected = 0 if index is None else index
         if selected < 0 or selected >= total:
-            raise AssetNotFound(f"index 超出未领取正常资产范围：{selected}，可用范围 0-{total - 1}")
+            raise AssetNotFound(f"index 超出未领取资产范围：{selected}，可用范围 0-{total - 1}")
 
         record, claim = candidates[selected]
         claimed.add(claim)
@@ -249,6 +271,7 @@ def _mailboxes() -> list[dict]:
         parts = line.split("----")
         records.append({
             "email": parts[0].strip(),
+            "email_provider": classify_email_provider(parts[0].strip()),
             "password": parts[1].strip() if len(parts) > 1 else "",
             "refresh_token": parts[2].strip() if len(parts) > 2 else "",
             "client_id": parts[3].strip() if len(parts) > 3 else "",
@@ -307,7 +330,10 @@ def _verification_for(platform: str, email: str, source: str) -> dict | None:
 def _verified_records(platform: str, records: list[dict], source_for) -> list[dict]:
     verified = []
     for record in records:
-        verification = _verification_for(platform, record.get("email", ""), source_for(record))
+        email = str(record.get("email") or "").strip()
+        if not email and isinstance(record.get("data"), dict):
+            email = _email_from_session(record["data"])
+        verification = _verification_for(platform, email, source_for(record))
         if verification:
             verified.append({**record, "_verification": verification})
     if not verified:
@@ -319,16 +345,24 @@ def get_email(
     index: int | None = None,
     output_format: str = "json",
     verified_only: bool = False,
+    claim_once: bool = False,
+    email_provider: str = "",
 ) -> dict:
     output_format = str(output_format or "json").strip().lower()
     if output_format not in {"json", "line"}:
         raise AssetError("邮箱 format 仅支持 json、line")
+    provider_filter = str(email_provider or "").strip().lower()
+    if provider_filter and provider_filter not in EMAIL_PROVIDERS:
+        raise AssetError("email_provider must be outlook, icloud, temporary, or other")
     records = [
         {**record, "_asset_source": f"emails.txt:{line_number}"}
         for line_number, record in enumerate(_mailboxes(), start=1)
     ]
+    if provider_filter:
+        records = [record for record in records if record.get("email_provider") == provider_filter]
     if verified_only:
         records = _verified_records("outlook", records, lambda record: record["_asset_source"])
+    if verified_only or claim_once:
         selected, record, total, remaining, advanced = _claim_record(
             records,
             "outlook",
@@ -351,9 +385,11 @@ def get_email(
         "next_index": next_index,
         "cursor_advanced": advanced,
         "data": data,
+        "email_provider": record.get("email_provider") or classify_email_provider(record.get("email", "")),
     }
     if verified_only:
         result["verification"] = record["_verification"]
+    if verified_only or claim_once:
         result.update({
             "claim_recorded": True,
             "claim_scope": "outlook",
@@ -418,6 +454,7 @@ def _cookie_records(platform: str) -> list[dict]:
             records.append({
                 "path": path,
                 "email": accounts.get(str(key_cookie["value"]), ""),
+                "email_provider": classify_email_provider(accounts.get(str(key_cookie["value"]), "")),
                 "cookies": cookies,
             })
     return sorted(records, key=lambda item: (item["path"].stat().st_mtime, str(item["path"]).lower()))
@@ -490,22 +527,46 @@ def _email_from_session(session: dict, fallback: str = "") -> str:
     return str(user.get("email") or session.get("email") or fallback).strip()
 
 
+def _email_provider_from_session(session: dict, fallback: str = "") -> str:
+    explicit = str(session.get("email_provider") or "").strip().lower() if isinstance(session, dict) else ""
+    if explicit in EMAIL_PROVIDERS:
+        return explicit
+    return classify_email_provider(_email_from_session(session, fallback))
+
+
 def get_platform_asset(
     platform: str,
     output_format: str = "raw",
     index: int | None = None,
     verified_only: bool = False,
+    claim_once: bool = False,
+    codex_phone_status: str = "",
+    email_provider: str = "",
 ) -> dict:
     platform = str(platform or "").strip().lower()
     output_format = str(output_format or "raw").strip().lower()
     if platform not in _PLATFORMS:
         raise AssetError("platform 仅支持 claude、chatgpt、grok、kiro")
+    phone_filter = str(codex_phone_status or "").strip().lower()
+    if phone_filter not in {"", "verified", "not_verified"}:
+        raise AssetError("codex_phone_status 仅支持 verified 或 not_verified")
+    if phone_filter and platform != "chatgpt":
+        raise AssetError("codex_phone_status 只适用于 ChatGPT")
+
+    provider_filter = str(email_provider or "").strip().lower()
+    if provider_filter and provider_filter not in EMAIL_PROVIDERS:
+        raise AssetError("email_provider must be outlook, icloud, temporary, or other")
 
     token_formats = {"session", "sub2api", "cpa", "chatgpt2api"}
     if output_format in {"raw", "cookies", "header"}:
         records = _cookie_records(platform)
+        if provider_filter:
+            records = [record for record in records if record.get("email_provider") == provider_filter]
+        if phone_filter == "verified":
+            records = []
         if verified_only:
             records = _verified_records(platform, records, lambda record: record["path"].name)
+        if verified_only or claim_once:
             selected, record, total, remaining, advanced = _claim_record(
                 records,
                 platform,
@@ -533,12 +594,23 @@ def get_platform_asset(
         if platform == "grok" and output_format not in {"session", "sub2api"}:
             raise AssetError("Grok 仅支持 cookies、raw、header、session、sub2api 格式")
         records = _token_records(platform)
+        if provider_filter:
+            records = [
+                record for record in records
+                if _email_provider_from_session(record["data"], record["path"].stem.replace(".session", "")) == provider_filter
+            ]
+        if phone_filter:
+            records = [
+                record for record in records
+                if str(record["data"].get("codex_phone_status") or "not_verified").strip().lower() == phone_filter
+            ]
         if verified_only:
             records = _verified_records(
                 platform,
                 records,
                 lambda record: record["path"].name,
             )
+        if verified_only or claim_once:
             selected, record, total, remaining, advanced = _claim_record(
                 records,
                 platform,
@@ -559,7 +631,9 @@ def get_platform_asset(
         session = record["data"]
         source = record["path"].name
         email = _email_from_session(session, record["path"].stem.replace(".session", ""))
-        extra = {}
+        extra = {
+            "codex_phone_status": str(session.get("codex_phone_status") or "not_verified").strip().lower(),
+        }
         if output_format == "session":
             data = session
         elif platform == "grok":
@@ -589,12 +663,14 @@ def get_platform_asset(
         "next_index": next_index,
         "cursor_advanced": advanced,
         "email": email,
+        "email_provider": _email_provider_from_session(session, email) if output_format in token_formats else classify_email_provider(email),
         "source": source,
         "data": data,
         **extra,
     }
     if verified_only:
         result["verification"] = record["_verification"]
+    if verified_only or claim_once:
         result.update({
             "claim_recorded": True,
             "claim_scope": platform,

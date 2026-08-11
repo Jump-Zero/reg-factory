@@ -3,6 +3,8 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from common.oauth_codex import (
+    CONSENT_LABELS,
+    _complete_auth_email_login,
     _enter_otp,
     _icloud_existing_codes,
     _is_phone_flow_url,
@@ -12,6 +14,10 @@ from common.oauth_codex import (
 
 
 class OAuthCodexTests(unittest.TestCase):
+    def test_czech_consent_labels_are_supported(self):
+        self.assertIn("Přijmout a pokračovat", CONSENT_LABELS)
+        self.assertIn("Povolit", CONSENT_LABELS)
+
     def test_phone_verification_route_remains_in_phone_flow(self):
         self.assertTrue(
             _is_phone_flow_url("https://auth.openai.com/phone-verification")
@@ -73,6 +79,50 @@ class OAuthCodexTests(unittest.TestCase):
         with patch("common.temp_email.fetch_messages", return_value=messages):
             codes = asyncio.run(_icloud_existing_codes("person@icloud.com"))
         self.assertEqual(codes, {"123456", "654321"})
+
+    def test_email_code_provider_is_used_for_outlook_oauth_login(self):
+        async def exercise():
+            page = MagicMock()
+            page.url = "https://auth.openai.com/log-in"
+            email_input = MagicMock()
+            email_input.first = email_input
+            email_input.count = AsyncMock(return_value=1)
+            code_input = MagicMock()
+            code_input.first = code_input
+            code_input.count = AsyncMock(return_value=1)
+            submit = MagicMock()
+            submit.first = submit
+            submit.count = AsyncMock(return_value=1)
+
+            click_count = 0
+
+            async def click():
+                nonlocal click_count
+                click_count += 1
+                page.url = (
+                    "https://auth.openai.com/email-verification"
+                    if click_count == 1
+                    else "https://auth.openai.com/codex/consent"
+                )
+
+            submit.click = AsyncMock(side_effect=click)
+            page.locator.side_effect = [email_input, submit, code_input, submit]
+            provider = AsyncMock(return_value="123456")
+            with patch("common.browser.react_fill", new=AsyncMock(return_value=True)) as fill, patch(
+                "common.oauth_codex.asyncio.sleep", new=AsyncMock()
+            ):
+                ok, message = await _complete_auth_email_login(
+                    page, "person@outlook.jp", email_code_provider=provider
+                )
+            return ok, message, provider, fill, page
+
+        ok, message, provider, fill, page = asyncio.run(exercise())
+        self.assertTrue(ok, message)
+        provider.assert_awaited_once()
+        self.assertEqual(provider.await_args.args[0], "person@outlook.jp")
+        self.assertIsInstance(provider.await_args.args[1], float)
+        self.assertGreaterEqual(fill.await_count, 2)
+        self.assertEqual(page.url, "https://auth.openai.com/codex/consent")
 
     def test_phone_retry_treats_navigation_past_add_phone_as_success(self):
         async def exercise():

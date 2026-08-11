@@ -32,6 +32,14 @@ class UpdateEntrypointTests(unittest.TestCase):
         self.assertIn("Action must be install, start, or update", shell)
         self.assertIn('get("root", "")', shell)
 
+    def test_portable_updater_retries_and_verifies_release_package(self):
+        script = (ROOT / "update-portable.ps1").read_text(encoding="utf-8")
+        self.assertIn("Invoke-Download", script)
+        self.assertIn("Get-FileHash", script)
+        self.assertIn("update-result.json", (ROOT / "webui/server.py").read_text(encoding="utf-8"))
+        self.assertIn("Downloaded package version", script)
+        self.assertIn("Updated WebUI did not report version", script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,7 +40,12 @@ def _configure_frozen_runtime() -> None:
     if not getattr(sys, "frozen", False):
         return
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
-    local_root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    if sys.platform == "darwin":
+        local_root = Path.home() / "Library" / "Application Support"
+    elif os.name == "nt":
+        local_root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        local_root = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
     data_root = Path(os.environ.setdefault("REG_FACTORY_DATA_DIR", str(local_root / "RegFactory")))
     env_path = Path(os.environ.setdefault("REG_FACTORY_ENV_FILE", str(data_root / ".env")))
     data_root.mkdir(parents=True, exist_ok=True)

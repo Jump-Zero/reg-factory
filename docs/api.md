@@ -1,6 +1,6 @@
 # 本地资产 API
 
-主 WebUI 提供资产领取接口，用于按顺序或指定下标读取邮箱与已注册平台凭据。默认地址为 `http://127.0.0.1:8799`。每个读取请求都会在返回前在线扫描对应平台，只会从本次检测为 `normal` 且尚未领取的健康资产池输出数据。接口不修改原始邮箱、Cookie 或 Token 文件，只持久化领取标识。
+主 WebUI 提供资产领取接口，用于按顺序或指定下标读取邮箱与已注册平台凭据。默认地址为 `http://127.0.0.1:8799`。每个读取请求直接从本地尚未领取的资产中输出数据，不会先调用在线状态扫描。接口不修改原始邮箱、Cookie 或 Token 文件，只持久化领取标识。
 
 控制台左侧打开“资产 API”，可以配置 API Key、选择平台和输出格式、生成 `curl` 命令、在线调用并重置领取记录；下面的接口也可供其他本地程序直接调用。
 
@@ -18,17 +18,22 @@ Authorization: Bearer your-key
 ## 邮箱
 
 ```bash
-# 领取下一个正常且未领取的邮箱
+# 领取下一个未领取邮箱
 curl http://127.0.0.1:8799/api/assets/emails
 
-# 领取当前未领取健康池中的第 3 条
+# 领取当前未领取列表中的第 3 条
 curl "http://127.0.0.1:8799/api/assets/emails?index=2"
 
 # 返回原始四段文本
 curl "http://127.0.0.1:8799/api/assets/emails?format=line"
+
+# 只领取 iCloud 注册邮箱
+curl "http://127.0.0.1:8799/api/assets/emails?format=json&email_provider=icloud"
 ```
 
-`format=json` 返回 `email`、`password`、`refresh_token`、`client_id`；`format=line` 返回原始 `----` 分隔文本。响应还包含 `verification`，其中的 `checked_at` 和 `evidence` 表示本次在线检测时间与判定依据。
+`format=json` 返回 `email`、`password`、`refresh_token`、`client_id`；`format=line` 返回原始 `----` 分隔文本。领取响应不包含在线检测结论；需要复核时单独调用号池扫描接口。
+
+邮箱与平台资产响应都会包含 `email_provider`：`outlook`、`icloud`、`temporary` 或 `other`。可用 `email_provider` 查询参数按注册邮箱来源筛选。
 
 ## 平台 Cookie 与下游格式
 
@@ -44,6 +49,9 @@ curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=header&index=0"
 
 # ChatGPT -> SUB2API 导入内容
 curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=sub2api"
+
+# ChatGPT -> 只领取 Outlook 注册账号
+curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=sub2api&email_provider=outlook"
 
 # ChatGPT -> CPA codex 授权 JSON
 curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=cpa"
@@ -69,11 +77,11 @@ curl "http://127.0.0.1:8799/api/assets/cookies/kiro?format=session"
 
 `cookies` 是浏览器扩展通用导入数组，包含 `domain`、`hostOnly`、`httpOnly`、`name`、`path`、`sameSite`、`secure`、`session`、`storeId`、`value`，持久 Cookie 额外包含 `expirationDate`。`raw` 保留注册脚本保存的原始字段，供旧调用兼容。
 
-响应中的 `index` 是本次在未领取健康池中的下标，`total` 是领取前可用总数，`remaining` 是领取后的剩余数量，`claim_recorded=true` 表示领取记录已持久化。省略 `index` 时选择第一条；指定 `index` 时从当前未领取健康池中选择。两种方式都会记录领取。同一平台账号按邮箱或来源文件识别，切换 `raw`、`cookies`、`session`、`sub2api`、`cpa`、`chatgpt2api` 等格式也不会重复返回。封禁、过期、受限、凭据异常、未知、检测异常和未验证资产都会被拦截。在线检测只能说明检测时刻可用，不能保证目标服务之后不会限制账号。
+响应中的 `index` 是本次在未领取列表中的下标，`total` 是领取前可用总数，`remaining` 是领取后的剩余数量，`claim_recorded=true` 表示领取记录已持久化。省略 `index` 时选择第一条；指定 `index` 时从当前未领取列表中选择。两种方式都会记录领取。同一平台账号按邮箱或来源文件识别，切换 `raw`、`cookies`、`session`、`sub2api`、`cpa`、`chatgpt2api` 等格式也不会重复返回。领取接口不读取上次扫描结论，也不会在请求时联网检测。
 
 ## ChatGPT Plus 试用资格
 
-正常 ChatGPT 账号会额外调用优惠资格接口，并在号池扫描结果和资产响应的 `verification` 中写入 `plus_trial`、`plus_trial_detail`、`plus_trial_evidence`。该检测不绑卡、不扣款；失败只标记为 `unknown`，不会改变账号的健康状态。
+扫描 ChatGPT 账号时会额外调用优惠资格接口，并在号池扫描结果中写入 `plus_trial`、`plus_trial_detail`、`plus_trial_evidence`。该检测不绑卡、不扣款；失败只标记为 `unknown`，不会改变账号的健康状态。
 
 | `plus_trial` | 含义 |
 |---|---|
@@ -87,7 +95,7 @@ curl "http://127.0.0.1:8799/api/assets/cookies/kiro?format=session"
 
 ## 号池状态扫描
 
-扫描任务在 WebUI 后台运行，不阻塞其他 API。支持的平台是 `outlook`、`chatgpt`、`claude`、`grok`、`kiro`。
+扫描任务在 WebUI 后台运行，不阻塞其他 API，也不是领取前置条件。支持的平台是 `outlook`、`chatgpt`、`claude`、`grok`、`kiro`。扫描依据检测时的官方接口与 HTTP 响应作尽力判断：明确的成功、撤销或停用响应可信度较高，但普通 403、超时和连接失败可能来自出口、地区或目标服务风控，不能据此断言账号永久失效。
 
 ```bash
 # 读取当前号池明细、上次结果和正在运行的扫描进度

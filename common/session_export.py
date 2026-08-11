@@ -470,6 +470,23 @@ def save_claude_token(session_key, email=""):
     return True
 
 
+def save_codex_oauth_credentials(credentials, email=""):
+    """Persist renewable Codex OAuth credentials with their add-phone result."""
+    if not _is_obj(credentials) or not _s(credentials.get("access_token")):
+        return False
+    output = dict(credentials)
+    output["email"] = _s(email or credentials.get("email"))
+    output["source_type"] = "codex_oauth"
+    status = _s(output.get("codex_phone_status")).lower()
+    output["codex_phone_status"] = status if status in {"verified", "not_verified"} else "unknown"
+    name = _safe_email_name(output["email"] or "account")
+    path = os.path.join(_platform_dir("chatgpt"), f"oauth-{name}.session.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(output, handle, indent=2, ensure_ascii=False)
+    print(f"  [codex] OAuth credential saved: {path} ({output['codex_phone_status']})")
+    return True
+
+
 def save_kiro_token(record, email=""):
     """Save a Builder ID credential bundle for Kiro.
 

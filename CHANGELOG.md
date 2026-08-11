@@ -1,5 +1,47 @@
 ﻿# 更新日志
 
+## 2026-08-11 - 1.2.31
+
+**一键更新修复、资产直接领取与邮箱格式统一**
+- 修复 Windows WebUI 使用 `DETACHED_PROCESS` 后 PowerShell 更新器空跑并以退出码 0 误报成功的问题；更新状态改为读取结构化结果，不再仅凭退出码判断。
+- 便携更新增加 GitHub 下载重试、SHA-256 校验、Release 与包内版本一致性检查、重启版本验证及失败回滚；已是最新版时明确显示当前版本。
+- 外部邮箱池兼容 Outlook 各地域域名、Hotmail/Live/MSN、iCloud、自定义域名、RT/client_id 正反顺序、JSON 和多种分隔符，并拒绝纯 Cookie/token 误入邮箱池。
+- 资产 API 改为直接领取本地未领取记录，不再在每次取件前扫描；领取账本继续保证同一账号跨格式只返回一次。
+- 号池扫描保留为按需人工复核，并明确状态是基于当次官方响应的尽力判断，网络、出口和风控错误不会被描述为绝对账号状态。
+
+---
+
+## 2026-08-10 - 1.2.30
+
+**已开通 Plus 账号多源接码导入与 Apple Silicon 发布**
+- 移除主 WebUI 的 Plus 提链、绑卡和支付入口，改为登录已有付费账号并批量导入 SUB2API。
+- 支持 Outlook、Hotmail、Live、MSN、iCloud、ChatGPT session Cookie/token 和完整 Codex OAuth JSON；兼容 RT/client_id 正反顺序及 JSON/多分隔符批量格式。
+- 邮箱验证码优先通过 Outlook Graph 或 iCloud API 获取，并保留 Outlook 密码登录兜底。
+- 手机号接码验证改为导入硬门槛：只有本次 `add-phone` 验证成功才继续 Codex OAuth 换码和 SUB2API 建号，并在日志中遮蔽验证码、手机号和长 token。
+- 增加原生 Apple Silicon（M 系列）macOS 便携包和自动发布工作流，Windows x64 与 macOS ARM64 产物均附 SHA-256 校验文件。
+
+---
+
+## 2026-08-09 - 1.2.29
+
+**Codex 接码状态与 Plus 资格交付标记**
+- Codex OAuth 授权记录是否完成 add-phone，并持久化到 ChatGPT token 文件。
+- 资产 API 支持按 `verified` / `not_verified` 筛选 Codex 凭据，避免未确认状态进入已接码商品。
+- 修正 token 资产复核时从 `data.user.email` 匹配扫描结果，确保在线复核和一次性领取一致。
+
+---
+
+## 2026-08-09 - 1.2.28
+
+**RuyiPage Firefox 首次使用自动安装**
+- Windows 便携包首次启动且选择 RuyiPage 时，在后台自动下载并安装配套 Firefox runtime。
+- 浏览器任务首次使用时增加安装兜底，无需用户预先寻找或运行安装命令；已有 runtime 直接复用。
+- WebUI 状态栏显示安装中、已就绪或安装失败，原“安装 RuyiPage Firefox”任务保留为失败后的手动重试入口。
+- 增加线程与跨进程安装锁，避免 WebUI 后台安装和注册子进程同时重复下载。
+- 显式配置不存在的 `RUYIPAGE_BROWSER_PATH` 时给出明确错误，不会静默改用其他浏览器。
+
+---
+
 ## 2026-08-09 - 1.2.27
 
 **资产 API 一次性领取与 Plus 资格标注**

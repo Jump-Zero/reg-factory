@@ -554,6 +554,8 @@ MS_POSITIVE_ACTION_LABELS = (
     "accetta", "consenti", "continua", "sì", "avanti", "accetto",
     "accepteren", "toestaan", "doorgaan", "ja", "volgende", "akkoord",
     "zaakceptuj", "zezwól", "kontynuuj", "tak", "dalej", "zgadzam się",
+    "přijmout", "povolit", "pokračovat", "ano", "další", "souhlasím",
+    "přijmout a pokračovat",
     "принять", "разрешить", "продолжить", "да", "далее", "согласен",
     "kabul et", "izin ver", "devam et", "evet", "ileri", "kabul ediyorum",
     "قبول", "السماح", "متابعة", "نعم", "التالي", "موافق", "أوافق",
@@ -574,6 +576,7 @@ MS_NEGATIVE_ACTION_LABELS = (
     "rifiuta", "nega", "annulla", "no",
     "weigeren", "annuleren", "nee",
     "odrzuć", "anuluj", "nie",
+    "odmítnout", "zrušit", "ne", "zpět",
     "отклонить", "отмена", "нет",
     "reddet", "iptal", "hayır",
     "رفض", "إلغاء", "لا", "رجوع",
@@ -590,6 +593,7 @@ MS_SKIP_ACTION_LABELS = (
     "ignora per ora", "ignora", "non ora", "no, grazie", "più tardi",
     "voorlopig overslaan", "overslaan", "niet nu", "nee, bedankt", "later",
     "pomiń na razie", "pomiń", "nie teraz", "nie, dziękuję", "później",
+    "nyní přeskočit", "přeskočit", "teď ne", "ne, děkuji", "možná později", "později",
     "пропустить", "не сейчас", "нет, спасибо", "позже",
     "şimdilik atla", "atla", "şimdi değil", "hayır, teşekkürler", "daha sonra",
     "تخطي الآن", "تخطي", "ليس الآن", "لا شكرًا", "ربما لاحقًا", "لاحقًا",
@@ -1170,6 +1174,8 @@ async def _accept_microsoft_app_consent(page, idx=0):
         or "consenti a questa app di accedere" in body
         or "deze app toegang geven" in body
         or "zezwolić tej aplikacji na dostęp" in body
+        or "povolit této aplikaci přístup" in body
+        or "tato aplikace potřebuje vaše oprávnění" in body
         or "разрешить этому приложению доступ" in body
         or "bu uygulamanın bilgilerinize erişmesine izin ver" in body
         or "هل تريد السماح لهذا التطبيق" in body
@@ -1211,6 +1217,7 @@ async def _handle_microsoft_kmsi(page, idx=0):
         "angemeldet bleiben", "manter-me conectado",
         "rimanere connessi", "aangemeld blijven",
         "nie wylogowuj mnie", "оставаться в системе",
+        "zůstat přihlášeni", "zůstat přihlášený",
         "oturumunuz açık kalsın",
         "هل تريد أن يظل دخولك مسجلاً", "هل تريد البقاء قيد تسجيل الدخول",
         "保持登录状态", "保持登入狀態", "サインインしたままにする",
@@ -1589,6 +1596,8 @@ async def _maybe_confirm_before_register(page, tag, captcha_early_abort=False):
                                     "accetta e continua", "consenso", "dati personali",
                                     "accepteren en doorgaan", "toestemming", "persoonsgegevens",
                                     "zaakceptuj i kontynuuj", "zgoda", "dane osobowe",
+                                    "přijmout a pokračovat", "souhlas", "export dat",
+                                    "vaše data", "osobní údaje", "ochrana osobních údajů",
                                     "принять и продолжить", "согласие", "личные данные",
                                     "kabul et ve devam et", "onay", "kişisel veriler"])
         or "privacynotice" in curl
@@ -1648,7 +1657,8 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
                     "accepter et continuer", "consentement", "aceptar y continuar",
                     "akzeptieren und fortfahren", "aceitar e continuar",
                     "accetta e continua", "accepteren en doorgaan",
-                    "zaakceptuj i kontynuuj", "принять и продолжить",
+                    "zaakceptuj i kontynuuj", "přijmout a pokračovat",
+                    "souhlas", "osobní údaje", "ochrana osobních údajů", "принять и продолжить",
                     "kabul et ve devam et",
                 ]) or "privacynotice" in current_url
             ):

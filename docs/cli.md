@@ -36,8 +36,8 @@ python mailbox_broker.py --port 8765
 # ChatGPT
 python register_chatgpt.py --count 1 --node auto
 
-# 注册成功后加入本地 zkky Plus 工作台；支持批量 AT 和一次填卡后自动批处理
-python register_chatgpt.py --count 1 --node auto --plus-subscription
+# 已开通 Plus 账号：手机号接码验证 -> Codex OAuth -> SUB2API
+python tools/import_plus_codex.py --accounts-file accounts.txt --sms-provider auto --phone-attempts 3
 
 # Grok 指纹浏览器流程
 python register_grok.py --count 1

@@ -148,13 +148,15 @@ async def main():
             else:
                 print(f"  打开授权页，直接一次性接码(不赌免手机){_mode}...")
             reset_fn = ox.make_reset_page(p, cookies, account_email=email) if args.phone_skip > 0 else None
+            codex_metadata = {}
             code, session_id, cb_state, msg = await ox.authorize_with_retry(
                 page, lambda: ox.generate_auth_url(origin, token),
                 account_email=email, phone_skip_attempts=args.phone_skip,
                 skip_timeout=120, phone_timeout=timeout,
                 debug_dump="oauth_authorize_dump.html",
                 manual_phone=args.manual_phone, semi_phone=args.phone,
-                reset_page=reset_fn, sms_provider=args.sms_provider)
+                reset_page=reset_fn, sms_provider=args.sms_provider,
+                result_metadata=codex_metadata)
             if reset_fn is not None:
                 try:
                     await reset_fn.cleanup()
@@ -168,6 +170,9 @@ async def main():
             # 换码 + 建号
             exch = ox.exchange_code(origin, token, session_id, code, cb_state)
             cred = ox.build_oauth_credentials(exch)
+            cred["codex_phone_status"] = codex_metadata.get("codex_phone_status", "unknown")
+            from common.session_export import save_codex_oauth_credentials
+            save_codex_oauth_credentials(cred, email=cred.get("email") or email)
             print(f"  exchange-code OK: refresh_token={'YES' if cred.get('refresh_token') else 'NO'} "
                   f"plan={cred.get('plan_type')} email={cred.get('email')}")
             acct = ox.create_oauth_account(origin, token, cred, [group_id], name=cred.get("email") or email)

@@ -13,10 +13,12 @@ class WebUIUpdateTests(unittest.TestCase):
         self.runs = server.RUNS.copy()
         self.update_process = server.UPDATE_PROCESS
         self.update_log = server.UPDATE_LOG_HANDLE
+        self.update_result_path = server.UPDATE_RESULT_PATH
         self.update_state = dict(server.UPDATE_STATE)
         server.RUNS.clear()
         server.UPDATE_PROCESS = None
         server.UPDATE_LOG_HANDLE = None
+        server.UPDATE_RESULT_PATH = ""
         server.UPDATE_STATE.update(status="idle", message="", started_at="")
 
     def tearDown(self):
@@ -26,6 +28,7 @@ class WebUIUpdateTests(unittest.TestCase):
         server.RUNS.update(self.runs)
         server.UPDATE_PROCESS = self.update_process
         server.UPDATE_LOG_HANDLE = self.update_log
+        server.UPDATE_RESULT_PATH = self.update_result_path
         server.UPDATE_STATE.clear()
         server.UPDATE_STATE.update(self.update_state)
 
@@ -54,6 +57,9 @@ class WebUIUpdateTests(unittest.TestCase):
             self.assertEqual(response.status_code, 202)
             self.assertTrue(json.loads(response.body)["ok"])
             self.assertEqual(popen.call_args.args[0], command)
+            creationflags = popen.call_args.kwargs.get("creationflags", 0)
+            self.assertFalse(creationflags & getattr(server.subprocess, "DETACHED_PROCESS", 0))
+            self.assertTrue(creationflags & getattr(server.subprocess, "CREATE_NO_WINDOW", 0))
             self.assertEqual(server.UPDATE_STATE["status"], "running")
             server.UPDATE_LOG_HANDLE.close()
             server.UPDATE_LOG_HANDLE = None
@@ -92,6 +98,47 @@ class WebUIUpdateTests(unittest.TestCase):
         self.assertIsNotNone(command)
         self.assertIn("-InstallDir", command)
         self.assertIn(tmp, command)
+
+    def test_frozen_macos_runtime_requires_release_update(self):
+        with patch.object(server.sys, "frozen", True, create=True), patch.object(
+            server.os, "name", "posix"
+        ):
+            self.assertIsNone(server._update_script())
+
+    def test_completed_status_requires_structured_updater_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / "update-result.json"
+            result_path.write_text(
+                json.dumps({
+                    "status": "up_to_date",
+                    "message": "Already up to date: v1.2.31",
+                    "current_version": "1.2.31",
+                    "target_version": "1.2.31",
+                }),
+                encoding="utf-8",
+            )
+            process = MagicMock()
+            process.poll.return_value = 0
+            server.UPDATE_PROCESS = process
+            server.UPDATE_RESULT_PATH = str(result_path)
+            server.UPDATE_STATE["status"] = "running"
+
+            with patch.object(server, "_update_script", return_value=["updater"]):
+                status = server._update_status()
+
+        self.assertEqual(status["status"], "completed")
+        self.assertIn("v1.2.31", status["message"])
+
+    def test_zero_exit_without_result_is_not_reported_as_success(self):
+        process = MagicMock()
+        process.poll.return_value = 0
+        server.UPDATE_PROCESS = process
+        server.UPDATE_STATE["status"] = "running"
+
+        with patch.object(server, "_update_script", return_value=["updater"]):
+            status = server._update_status()
+
+        self.assertEqual(status["status"], "failed")
 
     def test_ui_binds_one_click_update(self):
         root = Path(__file__).resolve().parents[1]

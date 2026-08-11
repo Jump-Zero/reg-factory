@@ -37,10 +37,28 @@ class ChatGPTPlusTests(unittest.TestCase):
             self.assertNotIn("fixture-secret-access-token", json.dumps(payload))
             self.assertTrue(Path(payload["items"][0]["session_path"]).is_file())
 
-    def test_webui_exposes_subscription_mode_on_all_chatgpt_registration_entries(self):
-        for script_id in ("run_full_flow", "register_three_platforms", "register_chatgpt"):
-            script = next(item for item in SCRIPTS if item["id"] == script_id)
-            self.assertIn("--plus-subscription", {item["flag"] for item in script["args"]})
+    def test_codex_oauth_credentials_persist_phone_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(session_export, "TOKEN_OUTPUT_DIR", str(Path(temp) / "tokens")):
+                self.assertTrue(session_export.save_codex_oauth_credentials({
+                    "email": "verified@example.com",
+                    "access_token": "fixture-access-token",
+                    "refresh_token": "fixture-refresh-token",
+                    "codex_phone_status": "verified",
+                }))
+            saved = list((Path(temp) / "tokens" / "chatgpt").glob("oauth-*.session.json"))
+            self.assertEqual(len(saved), 1)
+            payload = json.loads(saved[0].read_text(encoding="utf-8"))
+            self.assertEqual(payload["codex_phone_status"], "verified")
+            self.assertNotIn("fixture-access-token", payload["email"])
+
+    def test_webui_exposes_existing_plus_codex_import_task(self):
+        script = next(item for item in SCRIPTS if item["id"] == "plus_codex_import")
+        flags = {item["flag"] for item in script["args"]}
+        self.assertIn("--accounts-file", flags)
+        self.assertIn("--sms-provider", flags)
+        self.assertIn("--phone-attempts", flags)
+        self.assertNotIn("--plus-subscription", flags)
 
     def test_existing_email_flow_propagates_subscription_mode(self):
         args = argparse.Namespace(
@@ -136,37 +154,34 @@ class ChatGPTPlusTests(unittest.TestCase):
         self.assertIn('(?:oaics_|cs_)', server)
         self.assertIn('(?:oaics_|cs_)', frontend)
 
-    def test_main_webui_embeds_local_batch_workbench_on_same_origin(self):
+    def test_main_webui_exposes_plus_codex_importer_and_removes_old_workbench(self):
         root = Path(__file__).resolve().parents[1]
         server = (root / "webui" / "server.py").read_text(encoding="utf-8")
         index = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
         frontend = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
-        self.assertIn('@app.api_route("/chatgpt-plus/{path:path}"', server)
-        self.assertIn('"url": "/chatgpt-plus/"', server)
+        self.assertIn('@app.post("/api/chatgpt-plus/import-codex")', server)
+        self.assertIn("plus_codex_import", server)
         self.assertNotIn("pay.nyanya.love", server)
-        self.assertIn('id="btn-import-ats"', index)
-        self.assertIn("let plusUrl = '/chatgpt-plus/'", frontend)
-        self.assertIn("const PLUS_BATCH_SIZE = 27", frontend)
-        self.assertIn("const PLUS_IMPORT_LIMIT = 100", frontend)
-        self.assertIn("?limit=${PLUS_IMPORT_LIMIT}", frontend)
-        self.assertIn("async function importLocalPlusAts()", frontend)
+        self.assertIn('id="plus-account-input"', index)
+        self.assertIn('id="plus-sms-provider"', index)
+        self.assertIn('id="plus-phone-attempts"', index)
+        self.assertIn('id="btn-plus-import"', index)
+        self.assertIn("/api/chatgpt-plus/import-codex", frontend)
+        self.assertIn("phone_attempts", frontend)
+        self.assertNotIn("btn-import-ats", index)
+        self.assertNotIn("plusUrl", frontend)
         self.assertFalse((root / "webui" / "static" / "card-link-batch.js").exists())
 
-    def test_network_panel_exposes_plus_stage_proxy_overrides(self):
+    def test_network_panel_does_not_expose_removed_plus_payment_controls(self):
         root = Path(__file__).resolve().parents[1]
         index = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
         frontend = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
         server = (root / "webui" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('id="proxy-plus-link-route"', index)
-        self.assertIn('id="proxy-plus-bind-route"', index)
-        self.assertIn('value="residential"', index)
-        self.assertIn('value="clash"', index)
-        self.assertIn("REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE", frontend)
-        self.assertIn("REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE", frontend)
-        self.assertIn("REG_FACTORY_PLUS_LINK_ROUTE", frontend)
-        self.assertIn("REG_FACTORY_PLUS_BIND_ROUTE", frontend)
-        self.assertIn('"REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE"', server)
-        self.assertIn('"REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE"', server)
+        self.assertNotIn('id="proxy-plus-link-route"', index)
+        self.assertNotIn('id="proxy-plus-bind-route"', index)
+        self.assertNotIn("REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE", frontend)
+        self.assertNotIn("REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE", frontend)
+        self.assertIn('status_code=410', server)
 
     def test_batch_selects_latest_27_unexpired_free_accounts(self):
         def jwt(index, expires):

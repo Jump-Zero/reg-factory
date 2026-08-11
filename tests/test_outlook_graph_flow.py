@@ -159,6 +159,46 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
         payload = page.evaluate.call_args.args[1]
         self.assertIn("同意して続行", payload["labels"])
 
+    async def test_czech_signup_consent_gate_is_accepted(self):
+        page = MagicMock()
+        page.url = "https://signup.live.com/privacynotice?mkt=cs-CZ"
+        page.title = AsyncMock(return_value="Ochrana osobních údajů společnosti Microsoft")
+        page.evaluate = AsyncMock(
+            side_effect=[
+                "Osobní údaje Přijmout a pokračovat",
+                "Přijmout a pokračovat",
+            ]
+        )
+        with (
+            patch.dict(register_outlook_standalone.os.environ,
+                       {"OUTLOOK_CONFIRM_BEFORE_REGISTER": "1"}, clear=False),
+            patch.object(register_outlook_standalone.asyncio, "sleep", AsyncMock()),
+        ):
+            await register_outlook_standalone._maybe_confirm_before_register(page, "[#13]")
+
+        payload = page.evaluate.call_args.args[1]
+        self.assertIn("přijmout a pokračovat", payload["labels"])
+
+    async def test_czech_device_app_consent_is_accepted(self):
+        page = MagicMock()
+        page.url = "https://account.live.com/Consent/Update?mkt=cs-CZ"
+        body = MagicMock()
+        body.inner_text = AsyncMock(
+            return_value="Povolit této aplikaci přístup k vašim informacím Odmítnout Povolit"
+        )
+        page.locator.return_value = body
+        page.evaluate = AsyncMock(return_value="povolit")
+        with patch.object(register_outlook_standalone.asyncio, "sleep", AsyncMock()):
+            detected, accepted = await (
+                register_outlook_standalone._accept_microsoft_app_consent(page, 14)
+            )
+
+        self.assertTrue(detected)
+        self.assertTrue(accepted)
+        payload = page.evaluate.call_args.args[1]
+        self.assertIn("povolit", payload["labels"])
+        self.assertIn("odmítnout", payload["negativeLabels"])
+
     async def test_arabic_device_app_consent_is_accepted(self):
         page = MagicMock()
         page.url = "https://account.live.com/Consent/Update?mkt=ar-AE"
