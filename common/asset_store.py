@@ -66,7 +66,10 @@ def classify_email_provider(email: str) -> str:
     """Classify an account's registration mailbox without retaining credentials."""
     value = str(email or "").strip().lower()
     domain = value.rsplit("@", 1)[-1] if "@" in value else ""
-    if domain in _OUTLOOK_EMAIL_DOMAINS:
+    if (
+        domain in _OUTLOOK_EMAIL_DOMAINS
+        or domain.startswith(("outlook.", "hotmail.", "live.", "msn."))
+    ):
         return "outlook"
     if domain in _ICLOUD_EMAIL_DOMAINS:
         return "icloud"
@@ -100,6 +103,27 @@ def _cursor_path() -> Path:
 
 def _claim_path() -> Path:
     return _data_root() / "runtime" / "state" / "asset_api_claims.json"
+
+
+def _outlook_sale_exclusion_path() -> Path:
+    return _data_root() / "runtime" / "state" / "outlook_sale_emails.txt"
+
+
+def _exclude_outlook_sale_from_registration(email: str) -> None:
+    normalized = str(email or "").strip().lower()
+    if "@" not in normalized:
+        raise AssetError("Outlook 资产缺少可用于平台注册排除的邮箱")
+    with _CURSOR_LOCK:
+        path = _outlook_sale_exclusion_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = {
+            line.strip().lower()
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip()
+        } if path.is_file() else set()
+        if normalized not in existing:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{normalized}\n")
 
 
 def _read_json(path: Path):
@@ -280,6 +304,54 @@ def _mailboxes() -> list[dict]:
     return records
 
 
+def registered_mailbox_usage() -> dict[str, tuple[str, ...]]:
+    """Return mailboxes that were reserved or attempted for another platform."""
+    usage: dict[str, set[str]] = {}
+
+    def record(email: str, platform: str) -> None:
+        normalized = str(email or "").strip().lower()
+        if "@" in normalized:
+            usage.setdefault(normalized, set()).add(platform)
+
+    root = _data_root()
+    for pattern, prefix in (
+        ("emails_used_*.txt", "emails_used_"),
+        ("emails_error_*.txt", "emails_error_"),
+    ):
+        for path in sorted(root.glob(pattern)):
+            platform = path.stem.removeprefix(prefix).strip().lower()
+            if not platform or platform in {"email", "outlook"}:
+                continue
+            for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                email = line.split("----", 1)[0].strip().lower()
+                record(email, platform)
+
+    # Successful explicit-account registrations may not pass through an email
+    # reservation ledger. Treat their stored tokens and cookies as definitive
+    # evidence that the mailbox is no longer pristine.
+    for platform in _PLATFORMS:
+        for item in _cookie_records(platform):
+            record(item.get("email", ""), platform)
+        for item in _token_records(platform):
+            record(_email_from_session(item.get("data", {})), platform)
+    claude_tokens = _token_root() / "claude"
+    for path in claude_tokens.glob("*.sessionKey.json") if claude_tokens.is_dir() else ():
+        try:
+            data = _read_json(path)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            record(_email_from_session(data, path.stem.split(".")[0]), "claude")
+
+    return {
+        email: tuple(sorted(platforms))
+        for email, platforms in sorted(usage.items())
+    }
+
+
 def _verification_for(platform: str, email: str, source: str) -> dict | None:
     """Return a recent normal scan record that identifies this local asset.
 
@@ -308,6 +380,8 @@ def _verification_for(platform: str, email: str, source: str) -> dict | None:
                     "plus_trial": str(item.get("plus_trial") or "unknown"),
                     "plus_trial_detail": str(item.get("plus_trial_detail") or ""),
                     "plus_trial_evidence": str(item.get("plus_trial_evidence") or ""),
+                    "registration_country": str(item.get("registration_country") or ""),
+                    "network_node": str(item.get("network_node") or ""),
                 })
             return verification
         sources = {part.strip() for part in str(item.get("source") or "").split(",")}
@@ -322,6 +396,8 @@ def _verification_for(platform: str, email: str, source: str) -> dict | None:
                     "plus_trial": str(item.get("plus_trial") or "unknown"),
                     "plus_trial_detail": str(item.get("plus_trial_detail") or ""),
                     "plus_trial_evidence": str(item.get("plus_trial_evidence") or ""),
+                    "registration_country": str(item.get("registration_country") or ""),
+                    "network_node": str(item.get("network_node") or ""),
                 })
             return verification
     return None
@@ -337,7 +413,7 @@ def _verified_records(platform: str, records: list[dict], source_for) -> list[di
         if verification:
             verified.append({**record, "_verification": verification})
     if not verified:
-        raise AssetUnverified("没有通过本次在线检测的正常资产，已拦截封禁、失效和凭据异常记录")
+        raise AssetUnverified("最近一次号池扫描中没有状态为正常的可领取资产；请先手动扫描，或取消仅正常筛选")
     return verified
 
 
@@ -347,6 +423,7 @@ def get_email(
     verified_only: bool = False,
     claim_once: bool = False,
     email_provider: str = "",
+    pristine_only: bool = False,
 ) -> dict:
     output_format = str(output_format or "json").strip().lower()
     if output_format not in {"json", "line"}:
@@ -360,6 +437,14 @@ def get_email(
     ]
     if provider_filter:
         records = [record for record in records if record.get("email_provider") == provider_filter]
+    if pristine_only:
+        registered = registered_mailbox_usage()
+        records = [
+            record for record in records
+            if str(record.get("email") or "").strip().lower() not in registered
+        ]
+        if not records:
+            raise AssetNotFound("没有未被其他平台注册或尝试使用的邮箱")
     if verified_only:
         records = _verified_records("outlook", records, lambda record: record["_asset_source"])
     if verified_only or claim_once:
@@ -395,6 +480,10 @@ def get_email(
             "claim_scope": "outlook",
             "remaining": remaining,
         })
+    if pristine_only:
+        if verified_only or claim_once:
+            _exclude_outlook_sale_from_registration(record.get("email", ""))
+        result["pristine"] = True
     return result
 
 

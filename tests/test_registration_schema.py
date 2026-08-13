@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import register
 from tools import validate_keys
-from webui.scripts import ENV_SCHEMA, SCRIPTS
+from webui.scripts import CHATGPT_COUNTRY_CHOICES, ENV_SCHEMA, SCRIPTS
 
 
 def _script(script_id):
@@ -63,8 +63,29 @@ class RegistrationSchemaTests(unittest.TestCase):
     def test_chatgpt_exposes_fixed_node(self):
         args = {item["flag"]: item for item in _script("register_chatgpt")["args"]}
         self.assertEqual(args["--node"]["default"], "auto")
+        self.assertEqual(args["--country"]["default"], "auto")
+        self.assertIn("JP", args["--country"]["choices"])
+        for script_id in ("run_full_flow", "register_three_platforms"):
+            flow_args = {
+                item["flag"]: item for item in _script(script_id)["args"]
+            }
+            self.assertEqual(flow_args["--chatgpt-country"]["default"], "auto")
         oauth_args = {item["flag"]: item for item in _script("oauth_codex")["args"]}
         self.assertEqual(oauth_args["--node"]["default"], "auto")
+
+    def test_chatgpt_country_picker_exposes_complete_iso_list(self):
+        self.assertEqual(len(CHATGPT_COUNTRY_CHOICES), 250)
+        self.assertEqual(len(set(CHATGPT_COUNTRY_CHOICES)), 250)
+        for country in ("AE", "BR", "IN", "JP", "ZA"):
+            self.assertIn(country, CHATGPT_COUNTRY_CHOICES)
+        for script_id, flag in (
+            ("run_full_flow", "--chatgpt-country"),
+            ("register_three_platforms", "--chatgpt-country"),
+            ("register_chatgpt", "--country"),
+        ):
+            args = {item["flag"]: item for item in _script(script_id)["args"]}
+            self.assertIs(args[flag]["choices"], CHATGPT_COUNTRY_CHOICES)
+            self.assertTrue(args[flag]["countryNames"])
 
     def test_chatgpt_promotes_direct_sub2api_import(self):
         script = _script("register_chatgpt")
@@ -87,6 +108,15 @@ class RegistrationSchemaTests(unittest.TestCase):
             items["FINGERPRINT_BROWSER"]["choices"][0], "ruyipage"
         )
         self.assertIn("RUYIPAGE_BROWSER_PATH", items)
+
+    def test_legacy_cdp_tasks_explain_ruyipage_chromium_fallback(self):
+        outlook_warning = _script("outlook_reg_loop").get("warning", "")
+        self.assertIn("Firefox WebDriver BiDi", outlook_warning)
+        self.assertNotIn("Chromium CDP", outlook_warning)
+        for script_id in ("register_claude", "register_grok"):
+            warning = _script(script_id).get("warning", "")
+            self.assertIn("Chromium CDP", warning)
+            self.assertIn("RuyiPage", warning)
 
     def test_claude_defaults_to_latest_rt(self):
         args = {item["flag"]: item for item in _script("register_claude")["args"]}

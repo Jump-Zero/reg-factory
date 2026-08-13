@@ -64,6 +64,41 @@ class WebUIUpdateTests(unittest.TestCase):
             server.UPDATE_LOG_HANDLE.close()
             server.UPDATE_LOG_HANDLE = None
 
+    def test_update_process_does_not_inherit_registration_proxy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            process = MagicMock()
+            process.poll.return_value = None
+            command = ["powershell.exe", "-File", "update.ps1"]
+            proxy = "http://registration-user:registration-pass@residential.test:9000"
+            with patch.object(server, "ROOT", tmp), patch.object(
+                server, "_update_script", return_value=command
+            ), patch.dict(
+                os.environ,
+                {
+                    "REG_FACTORY_DATA_DIR": tmp,
+                    "HTTP_PROXY": proxy,
+                    "HTTPS_PROXY": proxy,
+                    "ALL_PROXY": proxy,
+                    "http_proxy": proxy,
+                    "https_proxy": proxy,
+                    "all_proxy": proxy,
+                },
+                clear=False,
+            ), patch.object(server.subprocess, "Popen", return_value=process) as popen:
+                response = server.api_update()
+
+            self.assertEqual(response.status_code, 202)
+            child_env = popen.call_args.kwargs["env"]
+            for name in (
+                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                "http_proxy", "https_proxy", "all_proxy",
+            ):
+                self.assertNotIn(name, child_env)
+            self.assertIn("github.com", child_env["NO_PROXY"])
+            self.assertEqual(child_env["REG_FACTORY_NONINTERACTIVE"], "1")
+            server.UPDATE_LOG_HANDLE.close()
+            server.UPDATE_LOG_HANDLE = None
+
     def test_reports_missing_updater(self):
         with patch.object(server, "_update_script", return_value=None):
             response = server.api_update()
@@ -147,6 +182,12 @@ class WebUIUpdateTests(unittest.TestCase):
         self.assertIn('id="btn-update"', html)
         self.assertIn("fetch('/api/update'", app)
         self.assertIn("location.reload()", app)
+
+    def test_source_updater_does_not_kill_its_own_process_tree(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "update.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Stop-Process -Id $panelPid -Force", script)
+        self.assertNotIn("taskkill.exe /PID $stopPid /T /F", script)
 
 
 if __name__ == "__main__":

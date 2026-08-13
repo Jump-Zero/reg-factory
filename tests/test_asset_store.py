@@ -26,6 +26,9 @@ class AssetStoreTests(unittest.TestCase):
 
     def test_email_provider_classification_and_filtering(self):
         self.assertEqual(asset_store.classify_email_provider("a@outlook.com"), "outlook")
+        self.assertEqual(asset_store.classify_email_provider("a@outlook.jp"), "outlook")
+        self.assertEqual(asset_store.classify_email_provider("a@outlook.eu"), "outlook")
+        self.assertEqual(asset_store.classify_email_provider("a@hotmail.co.uk"), "outlook")
         self.assertEqual(asset_store.classify_email_provider("a@icloud.com"), "icloud")
         self.assertEqual(asset_store.classify_email_provider("a@mail.tm"), "temporary")
         self.assertEqual(asset_store.classify_email_provider("a@example.com"), "other")
@@ -56,6 +59,60 @@ class AssetStoreTests(unittest.TestCase):
         self.assertEqual(second["index"], 1)
         with self.assertRaises(asset_store.AssetExhausted):
             asset_store.get_email()
+
+    def test_pristine_email_claim_excludes_other_platform_usage(self):
+        (self.root / "emails.txt").write_text(
+            "used@outlook.com----pw1----rt1----cid1\n"
+            "clean@outlook.com----pw2----rt2----cid2\n",
+            encoding="utf-8",
+        )
+        (self.root / "emails_used_tri.txt").write_text(
+            "used@outlook.com----pw1----reserved\n",
+            encoding="utf-8",
+        )
+
+        result = asset_store.get_email(claim_once=True, pristine_only=True)
+
+        self.assertEqual(result["data"]["email"], "clean@outlook.com")
+        self.assertTrue(result["pristine"])
+        self.assertEqual(
+            (self.root / "runtime" / "state" / "outlook_sale_emails.txt").read_text(encoding="utf-8").strip(),
+            "clean@outlook.com",
+        )
+        self.assertEqual(asset_store.registered_mailbox_usage(), {
+            "used@outlook.com": ("tri",),
+        })
+
+    def test_pristine_email_claim_conservatively_excludes_failed_usage(self):
+        (self.root / "emails.txt").write_text(
+            "attempted@outlook.com----pw----rt----cid\n",
+            encoding="utf-8",
+        )
+        (self.root / "emails_error_chatgpt.txt").write_text(
+            "attempted@outlook.com----pw----challenge_after_email\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(asset_store.AssetNotFound):
+            asset_store.get_email(claim_once=True, pristine_only=True)
+
+    def test_pristine_email_claim_excludes_stored_platform_credentials(self):
+        (self.root / "emails.txt").write_text(
+            "registered@outlook.com----pw1----rt1----cid1\n"
+            "clean@outlook.com----pw2----rt2----cid2\n",
+            encoding="utf-8",
+        )
+        token_dir = self.root / "tokens" / "chatgpt"
+        token_dir.mkdir(parents=True)
+        (token_dir / "registered.session.json").write_text(json.dumps({
+            "email": "registered@outlook.com",
+            "accessToken": "secret",
+        }), encoding="utf-8")
+
+        result = asset_store.get_email(claim_once=True, pristine_only=True)
+
+        self.assertEqual(result["data"]["email"], "clean@outlook.com")
+        self.assertEqual(asset_store.registered_mailbox_usage()["registered@outlook.com"], ("chatgpt",))
 
     def _write_chatgpt_assets(self):
         cookie_dir = self.root / "cookies" / "chatgpt"

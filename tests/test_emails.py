@@ -7,6 +7,23 @@ from common import emails
 
 
 class EmailPoolTests(unittest.TestCase):
+    def test_platform_pool_skips_outlook_mailboxes_already_sold_standalone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.join(tmp, "emails.txt")
+            sold = os.path.join(tmp, "outlook_sale_emails.txt")
+            with open(pool, "w", encoding="utf-8") as f:
+                f.write("sold@outlook.com----pw1----rt1----cid1\n")
+                f.write("clean@outlook.com----pw2----rt2----cid2\n")
+            with open(sold, "w", encoding="utf-8") as f:
+                f.write("sold@outlook.com\n")
+            with patch.object(emails, "EMAILS_FILE", pool):
+                with patch.object(emails, "_used_file", return_value=os.path.join(tmp, "used.txt")):
+                    with patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")):
+                        with patch.object(emails, "_outlook_sale_file", return_value=sold):
+                            selected = emails.next_email("chatgpt")
+
+            self.assertEqual(selected[0], "clean@outlook.com")
+
     def test_latest_email_requires_token_and_reserves_newest(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = os.path.join(tmp, "emails.txt")

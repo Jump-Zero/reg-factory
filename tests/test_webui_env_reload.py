@@ -149,6 +149,61 @@ class WebUIEnvReloadTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("disk full", payload["error"])
 
+    def test_proxy_save_applies_configurable_concurrency_limit(self):
+        path = self._env_file("unchanged")
+
+        async def save():
+            with patch.object(server, "ENV_PATH", path):
+                with patch.object(server, "_apply_saved_env") as apply_saved:
+                    with patch.object(server, "_proxy_panel_data", return_value={"config": {}}):
+                        with patch("common.proxy_switch.ensure_proxy_mode", return_value="test-node"):
+                            result = await server.api_proxy_set(FakeJSONRequest({
+                                "config": {
+                                    "PROXY_MODE": "clash_auto",
+                                    "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "balanced",
+                                    "REG_FACTORY_MAX_CONCURRENCY": "10",
+                                    "REG_FACTORY_ALLOW_SHARED_EGRESS": "true",
+                                },
+                            }))
+            return result, apply_saved
+
+        result, apply_saved = asyncio.run(save())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["applied"], "test-node")
+        updates = apply_saved.call_args.args[0]
+        self.assertEqual(updates["REG_FACTORY_MAX_CONCURRENCY"], "10")
+        self.assertEqual(updates["REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE"], "balanced")
+        self.assertEqual(updates["REG_FACTORY_ALLOW_SHARED_EGRESS"], "true")
+        with open(path, encoding="utf-8") as handle:
+            saved = handle.read()
+        self.assertIn("REG_FACTORY_MAX_CONCURRENCY=10", saved)
+        self.assertIn("REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE=balanced", saved)
+        self.assertIn("REG_FACTORY_ALLOW_SHARED_EGRESS=true", saved)
+
+    def test_proxy_save_rejects_invalid_traffic_mode(self):
+        response = asyncio.run(server.api_proxy_set(FakeJSONRequest({
+            "config": {
+                "PROXY_MODE": "clash_auto",
+                "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "maximum",
+            },
+        })))
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(payload["ok"])
+
+    def test_proxy_save_rejects_invalid_concurrency_limit(self):
+        for value in ("0", "101", "not-a-number"):
+            with self.subTest(value=value):
+                response = asyncio.run(server.api_proxy_set(FakeJSONRequest({
+                    "config": {
+                        "PROXY_MODE": "clash_auto",
+                        "REG_FACTORY_MAX_CONCURRENCY": value,
+                    },
+                })))
+                payload = json.loads(response.body)
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(payload["ok"])
+
     def test_proxy_test_invalid_platform_returns_json(self):
         response = asyncio.run(server.api_proxy_test("invalid-platform"))
         payload = json.loads(response.body)
@@ -187,7 +242,8 @@ class WebUIEnvReloadTests(unittest.TestCase):
         def get_email(**kwargs):
             events.append("read")
             self.assertTrue(kwargs["claim_once"])
-            self.assertNotIn("verified_only", kwargs)
+            self.assertFalse(kwargs["pristine_only"])
+            self.assertFalse(kwargs["verified_only"])
             return {"kind": "email", "claim_recorded": True}
 
         with patch.object(asset_scanner, "scan_pool", side_effect=AssertionError("scanner called")):
@@ -196,6 +252,20 @@ class WebUIEnvReloadTests(unittest.TestCase):
 
         self.assertEqual(events, ["read"])
         self.assertTrue(result["claim_recorded"])
+
+    def test_asset_api_can_claim_only_cached_normal_email_without_live_scan(self):
+        from common import asset_scanner, asset_store
+
+        def get_email(**kwargs):
+            self.assertTrue(kwargs["claim_once"])
+            self.assertTrue(kwargs["verified_only"])
+            return {"kind": "email", "verification": {"status": "normal"}}
+
+        with patch.object(asset_scanner, "scan_pool", side_effect=AssertionError("scanner called")):
+            with patch.object(asset_store, "get_email", side_effect=get_email):
+                result = server.api_asset_email(FakeJSONRequest(), normal_only=True)
+
+        self.assertEqual(result["verification"]["status"], "normal")
 
     def test_mailpool_import_accepts_mailbox_variants_only(self):
         client_id = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
@@ -292,6 +362,7 @@ class WebUIAssetScanTests(unittest.IsolatedAsyncioTestCase):
     async def test_asset_scan_runs_in_background_and_exposes_progress(self):
         from common import asset_scanner
 
+        captured = {}
         report = {
             "schema_version": 1,
             "finished_at": "2026-07-28T09:00:00Z",
@@ -301,13 +372,14 @@ class WebUIAssetScanTests(unittest.IsolatedAsyncioTestCase):
         }
 
         def scan_pool(**kwargs):
+            captured.update(kwargs)
             kwargs["progress"]({"completed": 1, "total": 1, "current": "mail@example.com"})
             return report
 
         with patch.object(asset_scanner, "get_report", return_value=report):
             with patch.object(asset_scanner, "scan_pool", side_effect=scan_pool):
                 started = await server.api_asset_scan_start(
-                    FakeJSONRequest({"platforms": ["outlook"], "concurrency": 2})
+                    FakeJSONRequest({"platforms": ["outlook"], "concurrency": 99})
                 )
                 task = server.ASSET_SCAN_TASK
                 self.assertTrue(started["ok"])
@@ -318,9 +390,17 @@ class WebUIAssetScanTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(current["scan"]["running"])
         self.assertEqual(current["scan"]["progress"]["completed"], 1)
         self.assertEqual(current["summary"]["statuses"]["normal"], 1)
+        self.assertEqual(captured["concurrency"], 2)
+        self.assertFalse(captured["force"])
 
     async def test_asset_scan_rejects_unknown_platform(self):
         response = await server.api_asset_scan_start(FakeJSONRequest({"platforms": ["unknown"]}))
+        self.assertEqual(response.status_code, 400)
+
+    async def test_asset_scan_rejects_non_boolean_force(self):
+        response = await server.api_asset_scan_start(
+            FakeJSONRequest({"platforms": ["outlook"], "force": "true"})
+        )
         self.assertEqual(response.status_code, 400)
 
     async def test_asset_scan_accepts_kiro(self):

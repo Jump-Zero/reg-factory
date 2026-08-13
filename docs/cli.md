@@ -33,8 +33,9 @@ python mailbox_broker.py --port 8765
 ## 单个平台
 
 ```bash
-# ChatGPT
+# ChatGPT：自动选择国家，或只使用实际出口为日本的网络节点
 python register_chatgpt.py --count 1 --node auto
+python register_chatgpt.py --count 1 --node auto --country JP
 
 # 已开通 Plus 账号：手机号接码验证 -> Codex OAuth -> SUB2API
 python tools/import_plus_codex.py --accounts-file accounts.txt --sms-provider auto --phone-attempts 3
@@ -61,11 +62,20 @@ python register_kiro.py --email a@outlook.com --refresh-token <refresh_token> --
 ## Outlook
 
 ```bash
-# 常驻注册
+# 持续注册；默认不按总次数停止，最近 20 次成功率低于 10% 时停止
 python outlook_reg_loop.py
 
-# 注册指定数量后退出
+# 可选硬上限：最多尝试 20 次后退出
 python outlook_reg_loop.py --count 20
+
+# 自定义成功率熔断：最近 30 次低于 20% 时停止
+python outlook_reg_loop.py --min-success-rate 20 --success-rate-window 30
+
+# 关闭成功率熔断（不建议长期无人值守）
+python outlook_reg_loop.py --min-success-rate 0
+
+# 住宅代理池并发；最终并发还受 REG_FACTORY_MAX_CONCURRENCY 和池大小约束
+python outlook_reg_loop.py --concurrency 5
 
 # 固定当前节点
 python outlook_reg_loop.py --no-rotate
@@ -83,6 +93,8 @@ python unlock_outlook.py
 ```text
 email----password----refresh_token----client_id
 ```
+
+Outlook 的 `--timeout` 只限制注册阶段；Graph 授权使用独立的 `OUTLOOK_GRAPH_AUTH_TIMEOUT`。验证码控件消失不等于账号已经创建，程序只有在离开注册表单并进入明确的 Microsoft 后续页面后才会导出账号。遇到账号不存在、密码登录不可用或登录次数过多时，Graph 授权会停止提交凭据，避免继续触发临时限流。
 
 ## Codex OAuth 与下游导入
 

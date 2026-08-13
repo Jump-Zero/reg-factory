@@ -54,6 +54,8 @@
 
 ## 快速开始
 
+第一次使用建议先阅读 [新手教程](docs/getting-started.md)。教程从下载安装开始，按界面顺序说明网络出口、指纹浏览器、Outlook Graph 辅助邮箱、住宅节流、并发、成功率自动停止、结果检查和升级，不要求先理解命令行或 `.env`。
+
 ### Windows 便携安装包
 
 从 [Releases](https://github.com/tiantianGPU/reg-factory/releases/latest) 下载 `reg-factory-windows-x64-<版本>.zip`，完整解压后双击 `reg-factory.exe`，程序会自动打开控制台页面。便携包无需安装 Python；浏览器与网络出口按下面的前置条件选择配置。不要直接在 ZIP 压缩包预览窗口中运行 EXE。
@@ -101,8 +103,8 @@ macOS / Linux：
 - 任务库：按流程分类选择任务，只展示常用参数，低频参数收进“更多设置”。
 - 运行日志：实时查看输出和结果状态；可停止当前任务树，或一键清理新旧版本遗留的全部注册任务。
 - 邮箱池：批量导入 Outlook 各地域域名、Hotmail/Live/MSN、iCloud 和自定义邮箱；兼容 JSON、RT/client_id 正反顺序及多种分隔符。
-- 资产 API：直接领取本地尚未领取的邮箱或平台账号，不在取件前在线检测；同一账号跨输出格式只返回一次。
-- 号池扫描：按需校验 Outlook、ChatGPT、Claude、Grok 和 Kiro，查看正常、待解锁、封禁、过期、受限及检测异常明细，并标注 ChatGPT Plus 免费试用资格；结果为检测时刻的尽力判断，仅供人工参考。
+- 资产 API：直接领取本地尚未领取的邮箱或平台账号，不在取件前在线检测；邮箱可选“仅领取最近扫描为正常”，同一账号跨输出格式只返回一次。
+- 号池扫描：同平台低频串行、近期结果自动复用，遇到限流或连续风控响应自动暂停；按需校验 Outlook、ChatGPT、Claude、Grok 和 Kiro，并标注 ChatGPT Plus 免费试用资格。
 - 网络出口：切换 Clash 自动轮换、固定节点或动态住宅 IP，并测试公网出口。
 - 环境配置：分组编辑 `.env` 并测试外部服务连通性。
 - Codex K12：管理 K12 workspace、邮箱资产、任务与 Codex 凭据。
@@ -112,13 +114,20 @@ macOS / Linux：
 
 动态住宅 IP 会在创建新浏览器窗口时写入完整代理认证；轮换后的代理从下一个新窗口开始使用。网络页可分别设置 Outlook、Claude、ChatGPT、Grok 和 Kiro 的出口，例如 Outlook 使用 Clash、其他平台使用住宅代理，并可按平台测试真实公网 IP。
 
+住宅模式默认启用“平衡节流”，浏览器会跳过普通图片、字体和音视频，并保留脚本、样式表以及 Cloudflare、hCaptcha、Arkose、PerimeterX 等验证资源。网络页可以切换到“激进节流”进一步拦截样式表和常见统计请求；Microsoft 登录与 Graph 授权页会保留必要样式表，避免可见状态判断失真。该设置只影响浏览器页面资源，不改变账号 API、代理分配和出口粘性。
+
+并发注册会为每个任务创建独立浏览器 Profile、Cookie 和指纹环境。住宅代理池会按并发槽分配不同端点；没有住宅 IP 时也可把网络模式设为 `clash_fixed`，或在单平台注册任务中指定一个节点，以同一固定公网 IP 并发。`clash_auto` 的节点选择是全局状态，为避免注册中途换 IP 会自动降为单并发。建议先从并发 `2` 开始，固定 Clash 并发需自行承担共享出口带来的关联和限流风险。
+
 ## 本地资产 API
 
-本地接口支持按顺序或指定 `index` 领取邮箱、Claude/ChatGPT/Grok Cookie 和 Kiro Builder ID 账号；`format=cookies` 输出浏览器扩展可导入的标准 JSON，并可把 ChatGPT 会话转换为 SUB2API、CPA 或 chatgpt2api 格式。读取请求直接从本地尚未领取的资产中返回数据，不会先发起在线状态检测。账号成功返回后会按平台写入领取账本，切换输出格式也不会再次返回；需要复用时必须显式重置领取记录。号池扫描是独立的人工复核工具，接口响应受网络、出口和目标服务风控影响，不能保证是账号的永久状态。控制台左侧打开“资产 API”即可配置访问密钥、生成调用命令和查看状态。默认仅允许本机访问，可配置 `REG_FACTORY_ASSET_API_KEY`。
+本地接口支持按顺序或指定 `index` 领取邮箱、Claude/ChatGPT/Grok Cookie 和 Kiro Builder ID 账号；`format=cookies` 输出浏览器扩展可导入的标准 JSON，并可把 ChatGPT 会话转换为 SUB2API、CPA 或 chatgpt2api 格式。读取请求直接从本地尚未领取的资产中返回数据，不会先发起在线状态检测。邮箱设置 `normal_only=true` 时只使用最近一次扫描缓存筛选正常状态，领取时仍不联网。账号成功返回后会按平台写入领取账本，切换输出格式也不会再次返回；需要复用时必须显式重置领取记录。号池扫描按平台低频串行并自动复用近期结果，接口响应受网络、出口和目标服务风控影响，不能保证是账号的永久状态。控制台左侧打开“资产 API”即可配置访问密钥、生成调用命令和查看状态。默认仅允许本机访问，可配置 `REG_FACTORY_ASSET_API_KEY`。
 
 ```bash
 # 按顺序取下一个邮箱
 curl "http://127.0.0.1:8799/api/assets/emails?format=json"
+
+# 只领取最近一次扫描为正常的邮箱（领取时不联网检测）
+curl "http://127.0.0.1:8799/api/assets/emails?normal_only=true"
 
 # 领取当前未领取列表中的第 3 个 ChatGPT 账号，输出 SUB2API 格式
 curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=sub2api&index=2"
@@ -231,6 +240,7 @@ node --check webui/static/app.js
 
 ## 文档
 
+- [新手教程](docs/getting-started.md)
 - [配置说明](docs/configuration.md)
 - [本地资产 API](docs/api.md)
 - [CLI 手册](docs/cli.md)

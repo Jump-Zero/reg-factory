@@ -86,13 +86,7 @@ class OutlookMergedRecoveryTests(unittest.IsolatedAsyncioTestCase):
         page = MagicMock()
         context = MagicMock(pages=[page])
         browser = MagicMock(contexts=[context])
-        playwright = MagicMock()
-        playwright.chromium.connect_over_cdp = AsyncMock(return_value=browser)
-        manager = MagicMock()
-        manager.__aenter__ = AsyncMock(return_value=playwright)
-        manager.__aexit__ = AsyncMock(
-            side_effect=lambda *_args: events.append("context_closed")
-        )
+        client = MagicMock()
 
         async def extract(*_args, **_kwargs):
             events.append("graph_extracted")
@@ -106,11 +100,17 @@ class OutlookMergedRecoveryTests(unittest.IsolatedAsyncioTestCase):
         results = []
         graph_attempts = []
         with (
-            patch.object(unlock_outlook, "create_browser", return_value="profile"),
-            patch.object(unlock_outlook, "open_browser", return_value="ws://browser"),
-            patch.object(unlock_outlook, "close_browser"),
-            patch.object(unlock_outlook, "delete_browser"),
-            patch.object(unlock_outlook, "async_playwright", return_value=manager),
+            patch.object(
+                unlock_outlook,
+                "open_and_connect",
+                AsyncMock(return_value=(client, "profile", browser, context, page)),
+            ) as connect,
+            patch.object(
+                unlock_outlook,
+                "teardown",
+                AsyncMock(side_effect=lambda *_args, **_kwargs: events.append("context_closed")),
+            ) as teardown,
+            patch.object(unlock_outlook, "selected_browser_provider", return_value="ruyipage"),
             patch.object(
                 unlock_outlook,
                 "unlock_account",
@@ -132,6 +132,8 @@ class OutlookMergedRecoveryTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(events, ["graph_extracted", "context_closed"])
+        connect.assert_awaited_once()
+        teardown.assert_awaited_once_with(client, "profile", delete=True)
         self.assertEqual(results[0][3], "unlocked")
         self.assertEqual(
             graph_attempts[0]["result"]["refresh_token"], "refresh-token"

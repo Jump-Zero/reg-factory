@@ -542,21 +542,29 @@ def _icloud_base_and_query(base_url):
     return root, query
 
 
-def _icloud_create(name, domain, expiry_ms, api_key, base_url, sess):
+def _icloud_create(
+    name, domain, expiry_ms, api_key, base_url, sess, *, mail_type=None, service=None
+):
     """Allocate an iCloud address from the provider's GET-only API."""
     base, pasted_query = _icloud_base_and_query(base_url)
     key = (api_key or pasted_query.get("apikey") or ICLOUD_MAIL_API_KEY or "").strip()
     if not key:
         raise ValueError("iCloud Mail 需要 API key（ICLOUD_MAIL_API_KEY）")
-    kind = (pasted_query.get("type") or ICLOUD_MAIL_TYPE or "icloud-code").strip().lower()
+    kind = (
+        mail_type or pasted_query.get("type") or ICLOUD_MAIL_TYPE or "icloud-code"
+    ).strip().lower()
     if kind not in {"icloud", "icloud-code"}:
         raise ValueError("ICLOUD_MAIL_TYPE 只能是 icloud 或 icloud-code")
     params = {"type": kind, "apikey": key}
     if kind == "icloud-code":
-        service = (pasted_query.get("service") or ICLOUD_MAIL_SERVICE or "openai").strip().lower()
-        if not service:
+        code_service = (
+            service or pasted_query.get("service") or ICLOUD_MAIL_SERVICE or "openai"
+        ).strip().lower()
+        if not code_service:
             raise ValueError("icloud-code 需要 ICLOUD_MAIL_SERVICE")
-        params["service"] = service
+        params["service"] = code_service
+    else:
+        code_service = ""
     response = sess.get(f"{base}/api/user/email", params=params, timeout=HTTP_TIMEOUT)
     if response.status_code >= 400:
         raise _icloud_error(response, "create")
@@ -570,6 +578,8 @@ def _icloud_create(name, domain, expiry_ms, api_key, base_url, sess):
         "email": str(address),
         "token": "",
         "provider": "icloud",
+        "mail_type": kind,
+        "service": code_service,
         "raw": data,
     }
 
@@ -809,7 +819,7 @@ def _provider_list(provider=None):
 
 
 def create_mailbox(provider=None, name=None, domain=None, expiry_ms=None,
-                   api_key=None, base_url=None):
+                   api_key=None, base_url=None, mail_type=None, service=None):
     """创建临时邮箱。返回 {"id", "email", "token", "provider", "raw"}。
     provider 为空时用 config.TEMP_EMAIL_PROVIDER，支持逗号分隔的多 provider 故障转移：
     按序尝试，第一个建号成功的即返回；全失败才抛异常（把各家错误合并抛出）。
@@ -820,7 +830,8 @@ def create_mailbox(provider=None, name=None, domain=None, expiry_ms=None,
         fn = _CREATE.get(prov)
         if not fn:
             raise ValueError(f"未知临时邮箱 provider: {prov}")
-        return fn(name, domain, expiry_ms, api_key, base_url, _session())
+        kwargs = {"mail_type": mail_type, "service": service} if prov == "icloud" else {}
+        return fn(name, domain, expiry_ms, api_key, base_url, _session(), **kwargs)
     provs = _provider_list(provider)
     errors = []
     for prov in provs:
@@ -829,7 +840,8 @@ def create_mailbox(provider=None, name=None, domain=None, expiry_ms=None,
             errors.append(f"{prov}: 未知 provider")
             continue
         try:
-            mb = fn(name, domain, expiry_ms, None, None, _session())
+            kwargs = {"mail_type": mail_type, "service": service} if prov == "icloud" else {}
+            mb = fn(name, domain, expiry_ms, None, None, _session(), **kwargs)
             if len(provs) > 1:
                 print(f"  [temp-email] provider={prov} 建号成功（候选 {provs}）")
             return mb

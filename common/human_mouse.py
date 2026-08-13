@@ -111,10 +111,38 @@ def windmouse_path(x0, y0, x1, y1, gravity=_WM_GRAVITY, wind=_WM_WIND,
 
 async def human_move_to(page, x, y, start=None):
     """沿 WindMouse 轨迹把鼠标移到 (x, y)，每步 sleep 变速（两端慢、中段快）。"""
+    viewport = None
+    try:
+        value = await page.evaluate(
+            "() => ({width: window.innerWidth, height: window.innerHeight})"
+        )
+        if isinstance(value, dict):
+            width = float(value.get("width") or 0)
+            height = float(value.get("height") or 0)
+            if width > 2 and height > 2:
+                viewport = (width, height)
+    except Exception:
+        pass
+
+    def clamp_point(px, py):
+        if not viewport:
+            return px, py
+        width, height = viewport
+        return (
+            max(1.0, min(width - 1.0, float(px))),
+            max(1.0, min(height - 1.0, float(py))),
+        )
+
+    if viewport and clamp_point(x, y) != (float(x), float(y)):
+        raise ValueError(
+            f"mouse target ({x:.0f}, {y:.0f}) is outside viewport "
+            f"({viewport[0]:.0f}, {viewport[1]:.0f})"
+        )
     if start is None:
         # 未知当前位置：从一个偏离目标的随机点起步（真人不会瞬移到按钮上）
         sx = x + random.uniform(-260, 260)
         sy = y + random.uniform(-180, 180)
+        sx, sy = clamp_point(sx, sy)
         await page.mouse.move(sx, sy)
         await asyncio.sleep(random.uniform(0.04, 0.12))
     else:
@@ -123,8 +151,11 @@ async def human_move_to(page, x, y, start=None):
     n = len(path)
     for i, (px, py) in enumerate(path):
         # 亚像素抖动，避免整数网格化的机器人痕迹
-        await page.mouse.move(px + random.uniform(-0.6, 0.6),
-                              py + random.uniform(-0.6, 0.6))
+        px, py = clamp_point(
+            px + random.uniform(-0.6, 0.6),
+            py + random.uniform(-0.6, 0.6),
+        )
+        await page.mouse.move(px, py)
         # 加减速：路径首尾放慢，中段加快（用位置比例做钟形延时）
         frac = i / max(1, n - 1)
         bell = math.sin(math.pi * frac)          # 0->1->0
@@ -261,4 +292,3 @@ def _selftest():
 
 if __name__ == "__main__":
     _selftest()
-

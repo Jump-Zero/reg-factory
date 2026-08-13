@@ -12,6 +12,81 @@ import oauth_codex
 
 
 class ChatGPTFlowTests(unittest.TestCase):
+    def test_chatgpt_icloud_mailbox_is_service_filtered(self):
+        with patch.object(
+            register_chatgpt,
+            "create_mailbox",
+            return_value={"email": "code@example.com"},
+        ) as create:
+            mailbox = register_chatgpt.create_chatgpt_icloud_mailbox()
+
+        self.assertEqual(mailbox["email"], "code@example.com")
+        create.assert_called_once_with(
+            provider="icloud", mail_type="icloud-code", service="openai"
+        )
+
+    def test_registration_runs_targeted_plus_trial_check(self):
+        async def exercise():
+            with patch(
+                "common.asset_scanner.check_chatgpt_plus_trial_for_session",
+                return_value={
+                    "plus_trial": "zero_price",
+                    "plus_trial_detail": "命中明确显示 0 元的 Plus 优惠",
+                },
+            ) as check:
+                result = await register_chatgpt.check_chatgpt_plus_trial_after_registration(
+                    {"accessToken": "token"}, "trial@example.com"
+                )
+            return result, check
+
+        result, check = asyncio.run(exercise())
+
+        self.assertEqual(result["plus_trial"], "zero_price")
+        check.assert_called_once_with({"accessToken": "token"}, "trial@example.com", 15)
+
+    def test_expired_auth_entry_is_reopened_for_ruyipage(self):
+        async def exercise():
+            field = MagicMock()
+            field.first = field
+            field.count = AsyncMock(side_effect=[0, 1])
+            field.is_visible = AsyncMock(return_value=True)
+            body = MagicMock()
+            body.inner_text = AsyncMock(return_value="Your session has ended")
+            page = MagicMock()
+            page.locator.side_effect = lambda selector: (
+                field if selector.startswith('input[type="email"]') else body
+            )
+            page.goto = AsyncMock()
+            with patch.object(register_chatgpt.asyncio, "sleep", AsyncMock()):
+                recovered = await register_chatgpt.ensure_chatgpt_email_entry(page)
+            return recovered, page
+
+        recovered, page = asyncio.run(exercise())
+
+        self.assertTrue(recovered)
+        page.goto.assert_awaited_once_with(
+            register_chatgpt.SIGNUP_URL,
+            timeout=60000,
+            wait_until="domcontentloaded",
+        )
+
+    def test_missing_email_entry_without_expired_session_does_not_loop(self):
+        field = MagicMock()
+        field.first = field
+        field.count = AsyncMock(return_value=0)
+        body = MagicMock()
+        body.inner_text = AsyncMock(return_value="Service unavailable")
+        page = MagicMock()
+        page.locator.side_effect = lambda selector: (
+            field if selector.startswith('input[type="email"]') else body
+        )
+        page.goto = AsyncMock()
+
+        recovered = asyncio.run(register_chatgpt.ensure_chatgpt_email_entry(page))
+
+        self.assertFalse(recovered)
+        page.goto.assert_not_awaited()
+
     def test_age_selector_does_not_capture_generic_number_inputs(self):
         self.assertNotIn('input[type="number"]', register_chatgpt._AGE_SELECTOR)
         self.assertIn('name="age"', register_chatgpt._AGE_SELECTOR)
@@ -480,6 +555,46 @@ class ChatGPTFlowTests(unittest.TestCase):
             ["🇯🇵 日本 | 01", "🇸🇬 新加坡 | 01"],
         )
 
+    def test_country_selection_skips_usable_wrong_country(self):
+        probes = [(True, "SG", 200), (True, "JP", 200)]
+        with patch.object(register_chatgpt.proxy_switch, "proxy_mode", return_value="clash_auto"):
+            with patch.object(register_chatgpt, "_chatgpt_node_candidates", return_value=["sg-node", "jp-node"]):
+                with patch.object(register_chatgpt.time, "sleep"):
+                    with patch.object(register_chatgpt, "_activate_cf_node", side_effect=lambda node: node):
+                        with patch.object(register_chatgpt, "_probe_chatgpt_node", side_effect=probes):
+                            selected = register_chatgpt.select_chatgpt_node(
+                                "auto", country="jp"
+                            )
+
+        self.assertEqual(selected, "jp-node")
+        self.assertEqual(register_chatgpt._get_active_chatgpt_country(), "JP")
+
+    def test_country_code_validation_rejects_non_iso_value(self):
+        self.assertEqual(register_chatgpt._normalize_chatgpt_country("sg"), "SG")
+        self.assertEqual(register_chatgpt._normalize_chatgpt_country("any"), "auto")
+        with self.assertRaises(ValueError):
+            register_chatgpt._normalize_chatgpt_country("Japan")
+
+    def test_direct_browser_mode_explicitly_disables_proxy(self):
+        with patch.object(register_chatgpt, "CHATGPT_NODE", "none"):
+            fields = register_chatgpt.chatgpt_browser_proxy_fields()
+
+        self.assertEqual(fields["proxyType"], "noproxy")
+
+    def test_worker_country_check_uses_direct_probe_for_direct_node(self):
+        with patch.object(register_chatgpt, "CHATGPT_NODE", "direct"):
+            with patch.object(register_chatgpt, "CHATGPT_COUNTRY", "US"):
+                with patch.object(register_chatgpt.proxy_switch, "proxy_mode", return_value="clash_auto"):
+                    with patch.object(
+                        register_chatgpt,
+                        "_probe_chatgpt_node",
+                        return_value=(True, "US", 200),
+                    ) as probe:
+                        country = register_chatgpt.ensure_chatgpt_worker_country()
+
+        self.assertEqual(country, "US")
+        probe.assert_called_once_with(direct=True)
+
     def test_auto_nodes_interleave_regions_before_applying_probe_limit(self):
         candidates = [
             "🇯🇵 日本 | 01",
@@ -504,6 +619,7 @@ class ChatGPTFlowTests(unittest.TestCase):
         args = argparse.Namespace(
             timeout=600,
             node="level1-test-node",
+            chatgpt_country="JP",
             keep_on_fail=False,
             import_c2a=False,
             codex=False,
@@ -516,6 +632,8 @@ class ChatGPTFlowTests(unittest.TestCase):
 
         node_index = command.index("--node")
         self.assertEqual(command[node_index + 1], "level1-test-node")
+        country_index = command.index("--country")
+        self.assertEqual(command[country_index + 1], "JP")
 
     def test_platform_failure_returns_nonzero(self):
         results = [("chatgpt", False, 1, "chatgpt.log")]

@@ -11,6 +11,8 @@ import os
 import sys
 import threading
 
+from common.file_lock import append_line, file_lock
+
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -26,9 +28,14 @@ def _error_file(platform):
     return f"emails_error_{platform}.txt"
 
 
+def _outlook_sale_file():
+    root = os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or "."
+    return os.path.join(root, "runtime", "state", "outlook_sale_emails.txt")
+
+
 def _load_used(platform):
     used = set()
-    for fp in [_used_file(platform), _error_file(platform)]:
+    for fp in [_used_file(platform), _error_file(platform), _outlook_sale_file()]:
         if os.path.exists(fp):
             with open(fp, "r", encoding="utf-8") as f:
                 for line in f:
@@ -41,7 +48,7 @@ def _load_used(platform):
 def next_email(platform):
     """取下一个未被该平台占用的邮箱，返回 (email, password, refresh_token, client_id) 或 None。
     取出即标记 reserved，防止并发重复。"""
-    with _lock:
+    with _lock, file_lock(f"{EMAILS_FILE}.{platform}.reserve"):
         if not os.path.exists(EMAILS_FILE):
             print(f"  [email] {EMAILS_FILE} not found")
             return None
@@ -58,8 +65,7 @@ def next_email(platform):
                 password = parts[1].strip() if len(parts) >= 2 else ""
                 token = parts[2].strip() if len(parts) >= 3 else ""
                 client_id = parts[3].strip() if len(parts) >= 4 else ""
-                with open(_used_file(platform), "a", encoding="utf-8") as uf:
-                    uf.write(f"{email}----{password}----reserved\n")
+                append_line(_used_file(platform), f"{email}----{password}----reserved")
                 print(f"  [email] picked for {platform}: {email}")
                 return email, password, token, client_id
         print(f"  [email] no unused emails left for {platform}")
@@ -68,7 +74,7 @@ def next_email(platform):
 
 def latest_email(platform, require_token=False, validate_token=False):
     """Reserve the newest unused mailbox, optionally requiring a working Graph RT."""
-    with _lock:
+    with _lock, file_lock(f"{EMAILS_FILE}.{platform}.reserve"):
         if not os.path.exists(EMAILS_FILE):
             print(f"  [email] {EMAILS_FILE} not found")
             return None
@@ -93,15 +99,13 @@ def latest_email(platform, require_token=False, validate_token=False):
                 if not validation["ok"]:
                     reason = validation.get("reason") or "refresh_token_unusable"
                     if validation.get("permanent"):
-                        with open(_error_file(platform), "a", encoding="utf-8") as ef:
-                            ef.write(f"{email}----{password}----{reason}\n")
+                        append_line(_error_file(platform), f"{email}----{password}----{reason}")
                         used.add(email.lower())
                         print(f"  [email] quarantined unusable rt for {platform}: {email} ({reason})")
                     else:
                         print(f"  [email] skip mailbox after transient rt check: {email} ({reason})")
                     continue
-            with open(_used_file(platform), "a", encoding="utf-8") as uf:
-                uf.write(f"{email}----{password}----reserved\n")
+            append_line(_used_file(platform), f"{email}----{password}----reserved")
             print(f"  [email] picked latest for {platform}: {email} (rt={'yes' if token else 'no'})")
             return email, password, token, client_id
         print(f"  [email] no unused latest mailbox for {platform} "
@@ -110,10 +114,8 @@ def latest_email(platform, require_token=False, validate_token=False):
 
 
 def mark_used(platform, email, password=""):
-    with open(_used_file(platform), "a", encoding="utf-8") as f:
-        f.write(f"{email}----{password}----ok\n")
+    append_line(_used_file(platform), f"{email}----{password}----ok")
 
 
 def mark_error(platform, email, password="", reason=""):
-    with open(_error_file(platform), "a", encoding="utf-8") as f:
-        f.write(f"{email}----{password}----{reason}\n")
+    append_line(_error_file(platform), f"{email}----{password}----{reason}")

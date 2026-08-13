@@ -5,10 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
+import re
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable
 
@@ -31,7 +35,18 @@ STATUSES = (
     "unknown",
     "error",
 )
-PLUS_TRIAL_STATUSES = ("eligible", "ineligible", "active", "unknown", "disabled")
+PLUS_TRIAL_STATUSES = (
+    "eligible",
+    "zero_price",
+    "ineligible",
+    "active",
+    "unknown",
+    "disabled",
+)
+
+SAFE_SCAN_DEFAULT_CACHE_SECONDS = 6 * 60 * 60
+SAFE_SCAN_DEFAULT_MIN_INTERVAL = 3.0
+SAFE_SCAN_DEFAULT_MAX_INTERVAL = 6.0
 
 _BANNED_MARKERS = (
     "account_deactivated",
@@ -46,6 +61,24 @@ _BANNED_MARKERS = (
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _env_number(name: str, default, minimum, maximum, cast=float):
+    try:
+        value = cast(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = cast(default)
+    return min(maximum, max(minimum, value))
+
+
+def _checked_at_epoch(item: dict) -> float:
+    value = str(item.get("checked_at") or "").strip()
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _scan_path() -> Path:
@@ -156,6 +189,10 @@ def _merge_platform_records(platform: str) -> list[dict]:
         if platform == "chatgpt":
             phone_status = str(data.get("codex_phone_status") or "not_verified").strip().lower()
             target["codex_phone_status"] = phone_status if phone_status in {"verified", "not_verified"} else "not_verified"
+            target["registration_country"] = str(
+                data.get("registration_country") or ""
+            ).strip().upper()
+            target["network_node"] = str(data.get("network_node") or "").strip()
 
     for record in asset_store._cookie_records(platform):
         source = record["path"].name
@@ -171,22 +208,10 @@ def _merge_platform_records(platform: str) -> list[dict]:
     return sorted(records, key=lambda item: (item["email"].lower(), item["source"].lower()))
 
 
-def _build_email_platform_map() -> dict[str, list[str]]:
-    """Build {email_lower: [platform, ...]} from token/cookie records."""
-    mapping: dict[str, list[str]] = {}
-    for platform in ("chatgpt", "claude", "grok", "kiro"):
-        records = _merge_platform_records(platform)
-        for record in records:
-            email = str(record.get("email") or "").strip().lower()
-            if email and email not in mapping:
-                mapping.setdefault(email, []).append(platform)
-    return mapping
-
-
 def _inventory_records() -> list[dict]:
     records = []
     history = _history_outcomes()
-    email_platform_map = _build_email_platform_map()
+    registered = asset_store.registered_mailbox_usage()
     seen_mailboxes = set()
     for index, mailbox in enumerate(asset_store._mailboxes()):
         email = mailbox.get("email", "").strip()
@@ -201,10 +226,11 @@ def _inventory_records() -> list[dict]:
             "kind": "mailbox",
             "email": email,
             "email_provider": mailbox.get("email_provider") or asset_store.classify_email_provider(email),
+            "pristine": identity not in registered,
+            "registered_platforms": list(registered.get(identity, ())),
             "source": source,
             "_mailbox": mailbox,
             "_history": history.get(identity),
-            "registered_platforms": email_platform_map.get(identity, []),
         })
     for platform in ("chatgpt", "claude", "grok"):
         records.extend(_merge_platform_records(platform))
@@ -354,7 +380,7 @@ def get_report() -> dict:
             public.setdefault("plus_trial_detail", "尚未检测 Plus 试用资格")
             public.setdefault("plus_trial_evidence", "none")
         items.append(public)
-    return {
+    report = {
         "schema_version": 2,
         "last_scan_at": cache.get("finished_at", ""),
         "items": items,
@@ -364,6 +390,9 @@ def get_report() -> dict:
             "not_imported": sum(1 for item in items if not item.get("sub2api_uploaded")),
         },
     }
+    if isinstance(cache.get("safe_mode"), dict):
+        report["safe_mode"] = dict(cache["safe_mode"])
+    return report
 
 
 def update_cached_outlook_statuses(outcomes: dict[str, dict]) -> int:
@@ -605,6 +634,70 @@ def _chatgpt_plan_type(record: dict) -> str:
     return str(account.get("planType") or token.get("planType") or "").strip().lower()
 
 
+_ZERO_PRICE_KEYS = {
+    "amount_due",
+    "amount_total",
+    "checkout_price",
+    "display_price",
+    "discounted_price",
+    "due",
+    "final_amount",
+    "final_price",
+    "formatted_price",
+    "payable_amount",
+    "price",
+    "price_after_discount",
+    "price_label",
+    "total",
+    "total_amount",
+}
+_ZERO_PRICE_TEXT = re.compile(
+    r"(?:[$\u20ac\u00a3\u00a5\u20b1\u20b9\u20a9]\s*0(?:[.,]0+)?|"
+    r"0(?:[.,]0+)?\s*(?:usd|eur|gbp|jpy|cny|rmb|php|inr|krw|aud|cad|"
+    r"\u5143|\u5186)|\bfree\b|no\s+charge|\u514d\u8d39)",
+    re.IGNORECASE,
+)
+
+
+def _zero_price_offer(payload) -> str:
+    """Return the evidence path for an explicitly payable zero-price offer."""
+    queue = [("", payload)]
+    while queue:
+        path, value = queue.pop(0)
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                normalized_key = re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).lower()
+                parent_parts = set(re.split(r"[.\[\]_]+", path.lower()))
+                excluded_price = bool(
+                    parent_parts
+                    & {"credit", "discount", "discounts", "saving", "savings"}
+                )
+                if (
+                    normalized_key in _ZERO_PRICE_KEYS
+                    and not excluded_price
+                    and not isinstance(nested, bool)
+                ):
+                    try:
+                        if Decimal(str(nested).strip()) == 0:
+                            return child_path
+                    except (InvalidOperation, TypeError, ValueError):
+                        if isinstance(nested, str) and _ZERO_PRICE_TEXT.search(nested):
+                            return child_path
+                if isinstance(nested, str) and any(
+                    marker in normalized_key
+                    for marker in ("display_price", "formatted_price", "price_label")
+                ) and _ZERO_PRICE_TEXT.search(nested):
+                    return child_path
+                if isinstance(nested, (dict, list)):
+                    queue.append((child_path, nested))
+        elif isinstance(value, list):
+            for index, nested in enumerate(value):
+                if isinstance(nested, (dict, list)):
+                    queue.append((f"{path}[{index}]", nested))
+    return ""
+
+
 def _scan_chatgpt_plus_trial(record: dict, access_token: str, timeout: int) -> dict:
     enabled = str(os.environ.get("ASSET_SCAN_CHATGPT_PLUS_TRIAL", "true")).strip().lower()
     if enabled in {"0", "false", "no", "off"}:
@@ -659,13 +752,21 @@ def _scan_chatgpt_plus_trial(record: dict, access_token: str, timeout: int) -> d
         redemption = payload.get("redemption") if isinstance(payload.get("redemption"), dict) else {}
         redeemed_by_user = redemption.get("redeemed_by_user") is True
         evidence = f"promo_campaign:{response.status_code}:{state or 'none'}"
+        zero_price_path = _zero_price_offer(payload)
+        ineligible = state in {"ineligible", "redeemed", "expired"} or redeemed_by_user
+        if response.status_code == 200 and zero_price_path and not ineligible:
+            return {
+                "plus_trial": "zero_price",
+                "plus_trial_detail": "命中明确显示 0 元的 Plus 优惠",
+                "plus_trial_evidence": f"{evidence}:zero:{zero_price_path}",
+            }
         if response.status_code == 200 and state == "eligible" and not redeemed_by_user:
             return {
                 "plus_trial": "eligible",
                 "plus_trial_detail": "命中 Plus 免费试用资格",
                 "plus_trial_evidence": evidence,
             }
-        if response.status_code == 200 and (state in {"ineligible", "redeemed", "expired"} or redeemed_by_user):
+        if response.status_code == 200 and ineligible:
             return {
                 "plus_trial": "ineligible",
                 "plus_trial_detail": "当前没有可用的 Plus 免费试用资格",
@@ -694,6 +795,95 @@ def _scan_chatgpt_plus_trial(record: dict, access_token: str, timeout: int) -> d
             "plus_trial_detail": f"Plus 试用资格检测异常：{type(exc).__name__}",
             "plus_trial_evidence": "promo_campaign:error",
         }
+
+
+def check_chatgpt_plus_trial_for_session(
+    session: dict, email: str = "", timeout: int = 15
+) -> dict:
+    """Check one newly saved ChatGPT session and update the local scan cache.
+
+    Registration must not wait for a full pool scan just to label the account.
+    This targeted path reuses the same read-only promotion check as the asset
+    scanner, then merges the result into the cached public record without ever
+    writing the access token to the cache.
+    """
+    data = session if isinstance(session, dict) else {}
+    token = str(data.get("accessToken") or data.get("access_token") or "").strip()
+    address = str(
+        email
+        or (data.get("user") or {}).get("email")
+        or data.get("email")
+        or ""
+    ).strip()
+    record = {
+        "platform": "chatgpt",
+        "kind": "platform",
+        "email": address,
+        "_token": data,
+    }
+    started = time.monotonic()
+    try:
+        outcome = _scan_chatgpt_plus_trial(record, token, int(timeout))
+    except Exception as exc:  # keep registration success independent of labeling
+        outcome = {
+            "plus_trial": "unknown",
+            "plus_trial_detail": f"Plus 试用资格检测异常：{type(exc).__name__}",
+            "plus_trial_evidence": "promo_campaign:error",
+        }
+
+    now = _now_iso()
+    source = f"{address}.session.json" if address else "registration.session.json"
+    target_record = next(
+        (
+            item
+            for item in _inventory_records()
+            if item.get("platform") == "chatgpt"
+            and address
+            and str(item.get("email") or "").strip().lower() == address.lower()
+        ),
+        None,
+    )
+    target_id = str((target_record or {}).get("id") or _stable_id("chatgpt", address, "registration"))
+    if target_record:
+        source = str(target_record.get("source") or source)
+    public = {
+        "platform": "chatgpt",
+        "kind": "platform",
+        "email": address,
+        "email_provider": asset_store.classify_email_provider(address),
+        "source": source,
+        "id": target_id,
+        "status": "normal",
+        "detail": "ChatGPT 注册会话正常",
+        "evidence": "chatgpt_session:registration",
+        "checked_at": now,
+        "latency_ms": round((time.monotonic() - started) * 1000),
+        "registration_country": str(data.get("registration_country") or "").strip().upper(),
+        "network_node": str(data.get("network_node") or "").strip(),
+    }
+    public.update(outcome)
+
+    cache = _read_cache()
+    items = cache.get("items")
+    if not isinstance(items, list):
+        items = []
+    replaced = False
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        same_id = str(item.get("id") or "") == target_id
+        same_email = bool(address) and str(item.get("email") or "").strip().lower() == address.lower()
+        if same_id or same_email:
+            items[index] = {**item, **public, "id": str(item.get("id") or target_id)}
+            replaced = True
+            break
+    if not replaced:
+        items.append(public)
+    cache["schema_version"] = max(2, int(cache.get("schema_version") or 0))
+    cache["items"] = items
+    cache["summary"] = _status_summary(items)
+    _write_cache(cache)
+    return public
 
 
 def _scan_claude(record: dict, timeout: int) -> dict:
@@ -839,19 +1029,95 @@ def _record_with_outcome(record: dict, outcome: dict) -> dict:
     return public
 
 
+def _scan_should_trip_breaker(result: dict) -> str:
+    evidence = str(result.get("evidence") or "").lower()
+    status = str(result.get("status") or "").lower()
+    if evidence.endswith(":429") or ":429:" in evidence:
+        return "rate_limited"
+    if status == "restricted" and (
+        evidence.endswith(":403") or evidence.endswith(":challenge")
+    ):
+        return "restricted"
+    if status == "error" and evidence.startswith(("network:", "preflight:")):
+        return "network"
+    return ""
+
+
+def _scan_platform_safely(
+    platform: str,
+    records: list[dict],
+    timeout: int,
+    min_interval: float,
+    max_interval: float,
+    on_result: Callable[[dict], None] | None = None,
+) -> list[dict]:
+    results = []
+    consecutive_risk = 0
+    breaker_reason = ""
+    for record in records:
+        if breaker_reason:
+            result = _record_with_outcome(record, {
+                "status": "unknown",
+                "detail": f"为降低风控，本次已暂停 {platform} 后续检测",
+                "evidence": f"safe_scan:circuit_breaker:{breaker_reason}",
+            })
+            results.append(result)
+            if on_result:
+                on_result(result)
+            continue
+        if max_interval > 0:
+            time.sleep(random.uniform(min_interval, max_interval))
+        result = _scan_record(record, timeout)
+        results.append(result)
+        if on_result:
+            on_result(result)
+        risk = _scan_should_trip_breaker(result)
+        if risk == "rate_limited":
+            breaker_reason = risk
+        elif risk:
+            consecutive_risk += 1
+            if consecutive_risk >= 2:
+                breaker_reason = risk
+        else:
+            consecutive_risk = 0
+    return results
+
+
 def scan_pool(
     platforms: list[str] | tuple[str, ...] | None = None,
-    concurrency: int = 4,
+    concurrency: int = 1,
     timeout: int = 15,
     progress: Callable[[dict], None] | None = None,
     emails: list[str] | None = None,
+    force: bool = False,
 ) -> dict:
     requested = {str(item).strip().lower() for item in (platforms or PLATFORMS)}
     invalid = requested.difference(PLATFORMS)
     if invalid:
         raise ValueError(f"不支持的平台：{', '.join(sorted(invalid))}")
-    concurrency = min(12, max(1, int(concurrency)))
+    # Concurrency controls independent platforms only. Accounts within one
+    # platform are always scanned serially to avoid a request burst.
+    concurrency = min(2, max(1, int(concurrency)))
     timeout = min(60, max(5, int(timeout)))
+    cache_seconds = int(_env_number(
+        "ASSET_SCAN_CACHE_SECONDS",
+        SAFE_SCAN_DEFAULT_CACHE_SECONDS,
+        0,
+        7 * 24 * 60 * 60,
+        int,
+    ))
+    min_interval = _env_number(
+        "ASSET_SCAN_MIN_INTERVAL",
+        SAFE_SCAN_DEFAULT_MIN_INTERVAL,
+        0.0,
+        60.0,
+    )
+    max_interval = _env_number(
+        "ASSET_SCAN_MAX_INTERVAL",
+        SAFE_SCAN_DEFAULT_MAX_INTERVAL,
+        min_interval,
+        120.0,
+    )
     started_at = _now_iso()
     records = _inventory_records()
     selected = [record for record in records if record["platform"] in requested]
@@ -864,15 +1130,32 @@ def scan_pool(
         if isinstance(item, dict) and item.get("id")
     }
     scanned = {}
+    now = time.time()
+    selected_to_scan = []
+    for record in selected:
+        cached = previous.get(str(record.get("id")))
+        cache_age = now - _checked_at_epoch(cached or {})
+        if (
+            not force
+            and cache_seconds > 0
+            and cached
+            and 0 <= cache_age < cache_seconds
+        ):
+            scanned[str(record["id"])] = dict(cached)
+        else:
+            selected_to_scan.append(record)
     total = len(selected)
     if progress:
         progress({"completed": 0, "total": total, "current": ""})
     records_by_platform = {
-        platform: [record for record in selected if record["platform"] == platform]
+        platform: [record for record in selected_to_scan if record["platform"] == platform]
         for platform in requested
     }
     preflight_failures = {}
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(records_by_platform)))) as executor:
+    with ThreadPoolExecutor(
+        max_workers=min(concurrency, max(1, len(records_by_platform))),
+        thread_name_prefix="asset-scan-preflight",
+    ) as executor:
         future_map = {
             executor.submit(_platform_preflight, platform, timeout): platform
             for platform, platform_records in records_by_platform.items()
@@ -883,9 +1166,11 @@ def scan_pool(
             if outcome:
                 preflight_failures[future_map[future]] = outcome
 
-    completed = 0
+    completed = len(scanned)
+    if progress and completed:
+        progress({"completed": completed, "total": total, "current": "复用近期扫描结果"})
     pending = []
-    for record in selected:
+    for record in selected_to_scan:
         outcome = preflight_failures.get(record["platform"])
         if outcome:
             result = _record_with_outcome(record, outcome)
@@ -899,10 +1184,18 @@ def scan_pool(
                 })
         else:
             pending.append(record)
-    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="asset-scan") as executor:
-        future_map = {executor.submit(_scan_record, record, timeout): record for record in pending}
-        for future in as_completed(future_map):
-            result = future.result()
+    pending_by_platform = {
+        platform: [record for record in pending if record["platform"] == platform]
+        for platform in requested
+    }
+    pending_by_platform = {
+        platform: records for platform, records in pending_by_platform.items() if records
+    }
+    progress_lock = threading.Lock()
+
+    def collect_result(result: dict):
+        nonlocal completed
+        with progress_lock:
             scanned[result["id"]] = result
             completed += 1
             if progress:
@@ -911,6 +1204,25 @@ def scan_pool(
                     "total": total,
                     "current": result.get("email") or result.get("source") or "",
                 })
+
+    with ThreadPoolExecutor(
+        max_workers=min(concurrency, max(1, len(pending_by_platform))),
+        thread_name_prefix="asset-scan-platform",
+    ) as executor:
+        future_map = {
+            executor.submit(
+                _scan_platform_safely,
+                platform,
+                records,
+                timeout,
+                min_interval,
+                max_interval,
+                collect_result,
+            ): platform
+            for platform, records in pending_by_platform.items()
+        }
+        for future in as_completed(future_map):
+            future.result()
 
     items = []
     for record in records:
@@ -938,6 +1250,15 @@ def scan_pool(
         "started_at": started_at,
         "finished_at": finished_at,
         "platforms_scanned": sorted(requested),
+        "safe_mode": {
+            "enabled": True,
+            "platform_concurrency": concurrency,
+            "account_concurrency": 1,
+            "min_interval_seconds": min_interval,
+            "max_interval_seconds": max_interval,
+            "cache_seconds": cache_seconds,
+            "force": bool(force),
+        },
         "items": items,
         "summary": _status_summary(items),
     }

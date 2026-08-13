@@ -34,6 +34,7 @@ except Exception:
     direct_proxy = None
     proxy_switch = None
 from common import human_mouse as _hm
+from common.traffic_saver import install as install_traffic_saver
 try:
     from check_outlook_status import check_account_api
 except Exception:
@@ -376,16 +377,9 @@ def probe_claude_residential_continuity(
 
 def claude_browser_fingerprint():
     """Use the installed modern BitBrowser core with exit-IP-derived locale."""
-    return {
-        "ostype": "PC",
-        "os": "Win32",
-        "coreVersion": CLAUDE_BROWSER_CORE_VERSION,
-        "isIpCreateTimeZone": True,
-        "isIpCreateLanguage": True,
-        "isIpCreateDisplayLanguage": True,
-        "isIpCreatePosition": True,
-        "isIpCountry": True,
-    }
+    from common.fingerprint import browser_fingerprint
+
+    return browser_fingerprint("claude", CLAUDE_BROWSER_CORE_VERSION)
 
 
 def _claude_hcaptcha_grid_prompt(instruction):
@@ -506,6 +500,7 @@ async def validate_session_key_with_page(page, session_key: str) -> bool:
             browser = await p.chromium.connect_over_cdp(ws)
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             vpage = await context.new_page()
+            await install_traffic_saver(context)
 
             # 设 sessionKey cookie
             await context.add_cookies([{
@@ -624,7 +619,9 @@ async def validate_session_key_with_page(page, session_key: str) -> bool:
 def read_next_email_from_file():
     """从 emails.txt 读取下一个未使用的邮箱，返回 (email, password, token, client_id) 或 None
     线程安全：读取后立即标记为已使用，防止并发取到同一个"""
-    with _email_lock:
+    from common.file_lock import append_line, file_lock
+
+    with _email_lock, file_lock(f"{EMAILS_USED_FILE}.reserve"):
         if not os.path.exists(EMAILS_FILE):
             print(f"  [email-file] {EMAILS_FILE} not found")
             return None
@@ -642,8 +639,10 @@ def read_next_email_from_file():
                 token = parts[2].strip() if len(parts) >= 3 else ""
                 client_id = parts[3].strip() if len(parts) >= 4 else ""
                 # 立即标记为已使用，防止其他线程取到同一个
-                with open(EMAILS_USED_FILE, "a", encoding="utf-8") as uf:
-                    uf.write(f"{email_addr}----{password}----reserved\n")
+                append_line(
+                    EMAILS_USED_FILE,
+                    f"{email_addr}----{password}----reserved",
+                )
                 print(f"  [email-file] picked: {email_addr}")
                 return email_addr, password, token, client_id
         print(f"  [email-file] no unused emails left in {EMAILS_FILE}")
@@ -652,14 +651,16 @@ def read_next_email_from_file():
 
 def mark_email_used(email, password=""):
     """记录已成功使用的邮箱"""
-    with open(EMAILS_USED_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{email}----{password}\n")
+    from common.file_lock import append_line
+
+    append_line(EMAILS_USED_FILE, f"{email}----{password}")
 
 
 def mark_email_error(email, password="", reason=""):
     """记录异常邮箱"""
-    with open(EMAILS_ERROR_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{email}----{password}----{reason}\n")
+    from common.file_lock import append_line
+
+    append_line(EMAILS_ERROR_FILE, f"{email}----{password}----{reason}")
 
 
 # Arkose Labs public key for Microsoft signup
@@ -5037,8 +5038,9 @@ async def save_cookies(context, profile_id, email=None, email_password=None):
         if email:
             pwd = email_password or ""
             accounts_file = os.path.join(COOKIE_OUTPUT_DIR, "accounts.txt")
-            with open(accounts_file, "a", encoding="utf-8") as f:
-                f.write(f"{email}|{pwd}|{session_key}\n")
+            from common.file_lock import append_line
+
+            append_line(accounts_file, f"{email}|{pwd}|{session_key}")
             print(f"  account saved to: {accounts_file}")
         # 导出标准 token（Claude 登录态就是 sessionKey），失败不影响主流程
         try:
@@ -5209,6 +5211,7 @@ async def register(
             browser = await p.chromium.connect_over_cdp(ws_url)
             context = browser.contexts[0]
             page = context.pages[0] if context.pages else await context.new_page()
+            await install_traffic_saver(context)
 
             # 注入反检测脚本（通过 CDP 在页面 JS 执行前注入）
             stealth_js = """
@@ -5991,10 +5994,6 @@ async def main():
     CLAUDE_CHALLENGE_NODE_RETRIES = max(0, args.challenge_node_retries)
     CLAUDE_CAPTCHA_MANUAL_TIMEOUT = max(0, args.captcha_manual_timeout)
 
-    if CLAUDE_PROXY_AUTO and args.concurrency > 1:
-        print("  [proxy] --node auto uses a global Clash route; forcing concurrency=1")
-        args.concurrency = 1
-
     # 选 Clash 节点过 claude 区域封锁（app-unavailable-in-region）
     if args.node and args.node.lower() != "none":
         if proxy_switch is None:
@@ -6011,7 +6010,7 @@ async def main():
                         _record_claude_node(node)
                         print(f"  [proxy] 选用节点: {node}")
                 else:
-                    proxy_switch.set_node(args.node)
+                    proxy_switch.pin_fixed_node(args.node, "claude")
                     time.sleep(2)
                     CLAUDE_PROXY_NODE = args.node
                     print(f"  [proxy] 使用指定节点 -> {proxy_switch.current_node()}")
@@ -6102,22 +6101,33 @@ async def main():
             print("  add a working Graph RT mailbox or select a configured temp-email provider")
             return 2
 
-    bb = BitBrowser()
     results = []
     results_lock = asyncio.Lock()
-    sem = asyncio.Semaphore(args.concurrency)
 
     # 确定总数：有邮箱文件用文件数量，否则用 --count
     total = len(email_list) if email_list else args.count
+    from common.concurrency import build_worker_plan
+    from common.task_context import activate_worker
+
+    worker_plan = build_worker_plan("claude", total, args.concurrency)
+    worker_plan.log()
+    slot_locks = [asyncio.Lock() for _ in range(worker_plan.effective_concurrency)]
 
     async def run_one(i):
-        async with sem:
-            # 错开启动时间，避免并发任务同时访问同一站点
-            if i > 1:
-                await asyncio.sleep(random.uniform(2, 8) * (i - 1))
+        stagger_slot = (i - 1) % worker_plan.effective_concurrency
+        if stagger_slot:
+            await asyncio.sleep(random.uniform(1.5, 4.0) * stagger_slot)
+        worker_context = worker_plan.worker(i)
+        async with slot_locks[worker_context.slot - 1]:
+            with activate_worker(worker_context) as worker:
+                return await run_worker(i, worker)
+
+    async def run_worker(i, worker):
             print(f"\n{'#' * 50}")
-            print(f"  #{i}/{total}")
+            print(f"  #{i}/{total} worker={worker.worker_id} slot={worker.slot}")
             print(f"{'#' * 50}")
+
+            bb = BitBrowser()
 
             email, email_password, email_token, email_client_id = "", "", "", ""
             if email_list:

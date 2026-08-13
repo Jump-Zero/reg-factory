@@ -20,6 +20,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $InstallDir "reg-factory.exe"))) {
 }
 Set-Location -LiteralPath $parentDir
 
+# Never spend or depend on a registration proxy while downloading updates.
+foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")) {
+    Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+}
+$env:NO_PROXY = $env:no_proxy = "127.0.0.1,localhost,::1,github.com,api.github.com,uploads.github.com"
+
 function Write-UpdateResult {
     param(
         [string]$Status,

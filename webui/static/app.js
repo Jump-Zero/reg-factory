@@ -288,6 +288,11 @@ async function loadProxyPanel(includeNodes=false){
     $('#proxy-rotate-url').value = config.REG_FACTORY_PROXY_ROTATE_URL || '';
     $('#proxy-rotate-method').value = config.REG_FACTORY_PROXY_ROTATE_METHOD || 'GET';
     $('#proxy-chatgpt-retries').value = config.CHATGPT_RESIDENTIAL_ROTATE_RETRIES || '3';
+    $('#proxy-traffic-mode').value = config.REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE || 'balanced';
+    $('#proxy-max-concurrency').value = config.REG_FACTORY_MAX_CONCURRENCY || '10';
+    $('#proxy-allow-shared-egress').checked = ['1','true','yes','on'].includes(
+      String(config.REG_FACTORY_ALLOW_SHARED_EGRESS || '').toLowerCase()
+    );
     $('#proxy-mode-outlook').value = config.OUTLOOK_PROXY_MODE || 'inherit';
     $('#proxy-mode-claude').value = config.CLAUDE_PROXY_MODE || 'inherit';
     $('#proxy-mode-chatgpt').value = config.CHATGPT_PROXY_MODE || 'inherit';
@@ -322,6 +327,9 @@ function collectProxyConfig(){
     REG_FACTORY_PROXY_ROTATE_URL: $('#proxy-rotate-url').value.trim(),
     REG_FACTORY_PROXY_ROTATE_METHOD: $('#proxy-rotate-method').value,
     CHATGPT_RESIDENTIAL_ROTATE_RETRIES: $('#proxy-chatgpt-retries').value,
+    REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE: $('#proxy-traffic-mode').value,
+    REG_FACTORY_MAX_CONCURRENCY: $('#proxy-max-concurrency').value,
+    REG_FACTORY_ALLOW_SHARED_EGRESS: $('#proxy-allow-shared-egress').checked ? 'true' : 'false',
   };
 }
 
@@ -414,7 +422,7 @@ const ASSET_SCAN_PLATFORM_LABELS = {
   outlook:'Outlook', chatgpt:'ChatGPT', claude:'Claude', grok:'Grok', kiro:'Kiro',
 };
 const ASSET_PLUS_TRIAL_LABELS = {
-  eligible:'可试用', ineligible:'暂无试用', active:'已有套餐', unknown:'资格未知', disabled:'检测关闭',
+  eligible:'可试用', zero_price:'0 元优惠', ineligible:'暂无优惠', active:'已有套餐', unknown:'资格未知', disabled:'检测关闭',
 };
 const PLATFORM_REG_NUM = { claude:1, chatgpt:2, grok:3, kiro:4 };
 const PLATFORM_REG_LABELS = { 1:'Claude', 2:'ChatGPT', 3:'Grok', 4:'Kiro' };
@@ -448,6 +456,8 @@ function updateAssetFormats(){
     option.selected = format === previous;
     select.appendChild(option);
   });
+  $('#asset-normal-only').disabled = resource !== 'emails';
+  $('.asset-normal-only').classList.toggle('disabled', resource !== 'emails');
   updateAssetRequestPreview();
 }
 
@@ -456,6 +466,9 @@ function buildAssetRequest(){
   const format = $('#asset-format').value || ASSET_FORMATS[resource][0];
   const path = resource === 'emails' ? '/api/assets/emails' : `/api/assets/cookies/${resource}`;
   const params = new URLSearchParams({format});
+  if(resource === 'emails' && $('#asset-normal-only').checked){
+    params.set('normal_only', 'true');
+  }
   if(assetPickMode === 'index'){
     const index = Math.max(0, parseInt($('#asset-index').value || '0', 10));
     params.set('index', String(index));
@@ -622,6 +635,16 @@ function renderAssetScanTable(){
       catCell.textContent = '—';
     }
     row.appendChild(catCell);
+    // 网络/节点 (仅 chatgpt)
+    const networkLabel = item.platform === 'chatgpt'
+      ? [item.registration_country, item.network_node].filter(Boolean).join(' · ')
+      : '';
+    const network = appendAssetScanCell(
+      row,
+      networkLabel || '--',
+      'asset-scan-network',
+    );
+    network.title = networkLabel;
     // 状态
     const statusCell = document.createElement('td');
     statusCell.className = 'col-status';
@@ -774,7 +797,7 @@ async function startAssetScan(all=false){
   try{
     const response = await fetch('/api/assets/scan', {method:'POST', headers:assetHeaders(true), body:JSON.stringify({
       platforms,
-      concurrency:parseInt($('#asset-scan-concurrency').value || '4', 10),
+      concurrency:parseInt($('#asset-scan-concurrency').value || '1', 10),
       timeout:15,
     })});
     await readAssetResponse(response);
@@ -885,6 +908,7 @@ async function resetAssetCursor(){
 $('#asset-resource').onchange = updateAssetFormats;
 $('#asset-format').onchange = updateAssetRequestPreview;
 $('#asset-index').oninput = updateAssetRequestPreview;
+$('#asset-normal-only').onchange = updateAssetRequestPreview;
 $('#asset-api-key').oninput = updateAssetRequestPreview;
 $$('[data-asset-pick]').forEach(button=>button.onclick=()=>setAssetPickMode(button.dataset.assetPick));
 $('#btn-refresh-assets').onclick = ()=>Promise.all([refreshAssetSummary(), loadAssetScan()]);
@@ -1357,8 +1381,14 @@ function renderArgField(a){
     f.innerHTML = `<input type="checkbox" id="f_${label}" ${a.default?'checked':''}>
       <label for="f_${label}"><span>${label}</span>${a.help?`<small>${a.help}</small>`:''}</label>`;
   }else if(a.type==='choice'){
+    let displayNames = null;
+    if(a.countryNames && typeof Intl.DisplayNames === 'function'){
+      displayNames = new Intl.DisplayNames(['zh-CN'], {type:'region'});
+    }
+    const choiceLabel = c => (a.labels&&a.labels[c])
+      || (displayNames && c !== 'auto' ? `${displayNames.of(c)} (${c})` : c);
     f.innerHTML = `<label for="f_${label}">${label}</label>
-      <select id="f_${label}">${a.choices.map(c=>`<option value="${c}" ${c==a.default?'selected':''}>${(a.labels&&a.labels[c])||c}</option>`).join('')}</select>
+      <select id="f_${label}">${a.choices.map(c=>`<option value="${c}" ${c==a.default?'selected':''}>${choiceLabel(c)}</option>`).join('')}</select>
       ${a.help?`<div class="fhelp">${a.help}</div>`:''}`;
   }else if(a.type==='multi'){
     const def = a.default||[];
@@ -1717,7 +1747,7 @@ async function releaseNum(pkey){
 }
 
 // ---------------------------------------------------------------- 新手指南
-const GUIDE_STORAGE_KEY = 'reg-factory-guide-v2';
+const GUIDE_STORAGE_KEY = 'reg-factory-guide-v3';
 const GUIDE_STEPS = [
   {
     id:'welcome', section:'开始', title:'先认识工作台', target:'.brand', placement:'bottom',
@@ -1819,16 +1849,18 @@ const GUIDE_STEPS = [
     id:'asset-scan', section:'资产 API', title:'按需查看号池状态', target:'[data-guide="asset-scan"]', placement:'bottom',
     prepare:async()=>{ setNavOpen(false); await showView('assets'); },
     skipLabel:'跳过资产 API', skipTo:'chatgpt-email',
-    body:`<p>资产 API 用于向本地程序或下游服务读取邮箱、Cookie 和登录凭据。需要人工复核时，可在号池状态区运行“扫描当前类型”或“一键扫描全部”；领取前无需先扫描。</p>
+    body:`<p>资产 API 用于向本地程序或下游服务读取邮箱、Cookie 和登录凭据。需要人工复核时，可在号池状态区运行“扫描当前类型”或“一键扫描全部”；默认领取无需先扫描。</p>
+      <p>同一平台账号始终低频串行扫描，近期结果会自动复用；遇到限流或连续风控响应时会暂停该平台，降低批量请求带来的风险。</p>
       <p>扫描会将资产分为正常、待解锁、封禁、过期、受限、凭据异常和检测异常。它依据检测时的官方接口响应作尽力判断；网络、出口或目标站风控可能造成受限或检测异常，不能作为账号永久状态的绝对结论。</p>
-      <p>正常 ChatGPT 账号会额外标注 Plus 免费试用资格。资格接口失败只显示“资格未知”，不会改变账号健康状态。</p>
-      <p>扫描仅供人工参考，不阻塞或改变资产 API 的直接领取。</p>`,
+      <p>正常 ChatGPT 账号会额外标注 Plus 免费试用资格，或明确显示 0 元的优惠。资格接口失败只显示“资格未知”，不会改变账号健康状态，也不会发起支付或领取优惠。</p>
+      <p>扫描仅供人工参考；只有邮箱领取勾选“仅领取最近一次扫描为正常”时，才会读取扫描缓存进行筛选。</p>`,
   },
   {
     id:'asset-call', section:'资产 API', title:'直接一次性领取', target:'[data-guide="asset-call"]', placement:'top',
     prepare:async()=>ensureGuideView('assets'),
     skipLabel:'跳过资产 API', skipTo:'chatgpt-email',
     body:`<p>选择资产、输出格式和取用方式后，点击“直接领取”。接口不会先发起在线检测，顺序取用和指定 index 都只面向尚未领取的本地账号。</p>
+      <p>领取邮箱时可勾选“仅领取最近一次扫描为正常”。这个选项只读取已有扫描缓存，不会在领取请求中临时检测；没有可用的正常邮箱时会明确提示先手动扫描。</p>
       <p>返回后会立即写入领取账本。同一平台账号即使切换输出格式也不会再次返回；只有手动重置领取记录后才可重新领取。</p>
       <p>响应中的 <code>remaining</code> 是该平台剩余未领取账号数。领取地址和 API key 仅应提供给受信任的本地服务。</p>`,
   },

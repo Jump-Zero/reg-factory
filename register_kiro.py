@@ -538,7 +538,6 @@ class KiroClient:
 
 def register_one(email, mailbox_password, mailbox_token, mailbox_client_id, args):
     target_password = args.account_password or _random_password()
-    proxy_switch.apply_platform_environment("kiro")
     proxy = proxy_switch.effective_proxy_url()
     client = KiroClient(proxy=proxy, timeout=args.timeout)
     try:
@@ -590,6 +589,7 @@ def register_one(email, mailbox_password, mailbox_token, mailbox_client_id, args
 def main():
     parser = argparse.ArgumentParser(description="Kiro Builder ID registration")
     parser.add_argument("--count", type=int, default=1)
+    parser.add_argument("--concurrency", "-c", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--email", default="")
     parser.add_argument("--password", default="", help="Outlook mailbox password")
@@ -600,6 +600,7 @@ def main():
     parser.add_argument("--node", default="auto", help="Compatibility option; proxy is selected from WebUI settings")
     parser.add_argument("--keep-on-fail", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    proxy_switch.apply_platform_environment("kiro")
     if args.email:
         accounts = [(args.email.strip(), args.password.strip(), args.refresh_token.strip(), args.client_id.strip())]
     else:
@@ -614,17 +615,44 @@ def main():
     if not accounts:
         print("[kiro] no mailbox available")
         return 1
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from common.concurrency import build_worker_plan
+    from common.task_context import activate_worker
+
+    worker_plan = build_worker_plan("kiro", len(accounts), args.concurrency)
+    worker_plan.log()
+
+    def run_lane(slot):
+        output = []
+        for index in range(slot + 1, len(accounts) + 1, worker_plan.effective_concurrency):
+            account = accounts[index - 1]
+            with activate_worker(worker_plan.worker(index)) as worker:
+                print(
+                    f"[kiro] {index}/{len(accounts)} {account[0]} "
+                    f"worker={worker.worker_id} slot={worker.slot} "
+                    f"proxy={proxy_switch.current_node()}"
+                )
+                output.append((index, account, register_one(*account, args)))
+        return output
+
     success = 0
-    for index, account in enumerate(accounts, 1):
-        print(f"[kiro] {index}/{len(accounts)} {account[0]}")
-        result = register_one(*account, args)
-        if result["status"] == "success":
-            success += 1
-            email_pool.mark_used("kiro", account[0], account[1])
-            print(f"[kiro] success: {success}/{len(accounts)}")
-        else:
-            email_pool.mark_error("kiro", account[0], account[1], result.get("error", "failed"))
-            print(f"[kiro] failed: {result.get('error', 'unknown')}")
+    with ThreadPoolExecutor(max_workers=worker_plan.effective_concurrency) as pool:
+        futures = [
+            pool.submit(run_lane, slot)
+            for slot in range(worker_plan.effective_concurrency)
+        ]
+        for future in as_completed(futures):
+            for _index, account, result in future.result():
+                if result["status"] == "success":
+                    success += 1
+                    email_pool.mark_used("kiro", account[0], account[1])
+                    print(f"[kiro] success: {success}/{len(accounts)}")
+                else:
+                    email_pool.mark_error(
+                        "kiro", account[0], account[1], result.get("error", "failed")
+                    )
+                    print(f"[kiro] failed: {result.get('error', 'unknown')}")
     return 0 if success == len(accounts) else 1
 
 

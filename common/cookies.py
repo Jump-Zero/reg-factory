@@ -12,6 +12,8 @@ import os
 import sys
 from datetime import datetime
 
+from common.file_lock import append_line
+
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -44,8 +46,7 @@ async def save_platform_cookies(context, platform, profile_id, email=None, passw
 
     if key_val and email:
         acc_path = os.path.join(pdir, "accounts.txt")
-        with open(acc_path, "a", encoding="utf-8") as f:
-            f.write(f"{email}|{password or ''}|{key_val}\n")
+        append_line(acc_path, f"{email}|{password or ''}|{key_val}")
         print(f"  [{platform}] account saved: {acc_path}")
 
     return key_val, full_path

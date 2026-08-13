@@ -12,6 +12,24 @@ webui/scripts.py — GUI 的数据核心：把每个入口脚本的命令行参�
 positional=True 表示位置参数(不带 --，直接拼值)。
 """
 
+# Complete ISO 3166-1 alpha-2 list. The registration worker still verifies the
+# actual Cloudflare exit country before creating a browser profile.
+CHATGPT_COUNTRY_CHOICES = ["auto", *"""
+AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ
+BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ
+CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ
+DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR
+GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY
+HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP
+KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY
+MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ
+NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR
+PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN
+SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ
+UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW
+""".split()]
+CHATGPT_COUNTRY_LABELS = {"auto": "自动"}
+
 # ============================================================ 入口脚本 schema
 SCRIPTS = [
     # ---------------------------------------------------------------- 主流程
@@ -21,6 +39,7 @@ SCRIPTS = [
         "category": "主流程",
         "title": "端到端全流程",
         "desc": "注册 Outlook 邮箱 → 在所选平台注册账号。最常用入口。",
+        "warning": "浏览器兼容说明：ChatGPT 和 Outlook 使用已选择的 RuyiPage Firefox；Claude 和 Grok 当前依赖 Chromium CDP，选择 RuyiPage 时这些阶段会自动使用内置 Chromium。",
         "args": [
             {"flag": "--platforms", "type": "multi", "choices": ["claude", "chatgpt", "grok", "kiro"],
              "default": ["claude"], "help": "要注册的平台(可多选)"},
@@ -35,6 +54,10 @@ SCRIPTS = [
             {"flag": "--email", "type": "str", "default": "", "help": "配合 --skip-email：现成邮箱"},
             {"flag": "--password", "type": "str", "default": "", "help": "配合 --email 的密码"},
             {"flag": "--node", "type": "str", "default": "auto", "help": "claude/chatgpt/grok 走的 Clash 节点"},
+            {"flag": "--chatgpt-country", "type": "choice",
+             "choices": CHATGPT_COUNTRY_CHOICES, "labels": CHATGPT_COUNTRY_LABELS,
+             "countryNames": True,
+             "default": "auto", "help": "仅约束 ChatGPT 的出口国家，并与网络节点关联"},
             {"flag": "--email-attempts", "type": "int", "default": 30, "help": "邮箱注册最多尝试次数"},
             {"flag": "--platform-timeout", "type": "int", "default": 600, "help": "平台注册单号超时(秒)"},
             {"flag": "--email-confirm-before-register", "type": "bool", "default": False,
@@ -63,6 +86,10 @@ SCRIPTS = [
             {"flag": "--grok-sub2api-group", "type": "str", "default": "", "help": "SUB2API Grok 分组名(默认取配置)"},
             {"flag": "--import-c2a", "type": "bool", "default": False, "help": "chatgpt 后导入 chatgpt2api"},
             {"flag": "--node", "type": "str", "default": "auto", "help": "Claude/ChatGPT/Grok Clash 节点"},
+            {"flag": "--chatgpt-country", "type": "choice",
+             "choices": CHATGPT_COUNTRY_CHOICES, "labels": CHATGPT_COUNTRY_LABELS,
+             "countryNames": True,
+             "default": "auto", "help": "仅约束 ChatGPT 的出口国家，并与网络节点关联"},
             {"flag": "--timeout", "type": "int", "default": 600, "help": "单平台超时(秒)"},
         ],
     },
@@ -123,13 +150,18 @@ SCRIPTS = [
             {"flag": "--timeout", "type": "int", "default": 480, "help": "单号超时(秒)"},
             {"flag": "--node", "type": "str", "default": "auto",
              "help": "固定 Clash 出口；auto 自动探测，none 直连"},
+            {"flag": "--country", "type": "choice",
+             "choices": CHATGPT_COUNTRY_CHOICES, "labels": CHATGPT_COUNTRY_LABELS,
+             "countryNames": True,
+             "default": "auto", "help": "按出口国家筛选网络并校验 Cloudflare loc；找不到匹配出口则停止"},
             {"flag": "--email-provider", "type": "choice", "choices": ["", "pool", "icloud"],
              "labels": {"": "按 .env 配置", "pool": "Outlook 邮箱池", "icloud": "iCloud API 接码"},
              "default": "", "help": "邮箱来源；留空使用 CHATGPT_EMAIL_PROVIDER 配置"},
             {"flag": "--codex", "type": "bool", "default": False,
              "help": "注册成功后直接导入 SUB2API；需配置 SUB2API_*，OAuth 期间可能需要手机验证"},
             {"flag": "--import-c2a", "type": "bool", "default": False, "help": "注册后导入 chatgpt2api"},
-            {"flag": "--concurrency", "type": "int", "default": 1, "help": "并发数；ChatGPT 当前按单窗口运行"},
+            {"flag": "--concurrency", "type": "int", "default": 1,
+             "help": "并发数；住宅代理池隔离出口；指定固定 Clash 节点也可共享 IP 并发"},
             {"flag": "--email", "type": "str", "default": "", "help": "指定邮箱(绕过池)"},
             {"flag": "--password", "type": "str", "default": "", "help": "邮箱密码"},
             {"flag": "--refresh-token", "type": "str", "default": "", "help": "Outlook refresh_token"},
@@ -149,9 +181,11 @@ SCRIPTS = [
         "category": "单平台注册",
         "title": "Grok 注册",
         "desc": "使用指纹浏览器注册 Grok，支持 Outlook 或配置的临时邮箱，成功后可导入 SUB2API。",
+        "warning": "Grok 当前依赖 Chromium CDP；选择 RuyiPage 时本任务会使用内置 Chromium，不代表 RuyiPage 配置未保存。",
         "args": [
             {"flag": "--count", "type": "int", "default": 1, "help": "注册数量"},
-            {"flag": "--concurrency", "type": "int", "default": 1, "help": "并发数"},
+            {"flag": "--concurrency", "type": "int", "default": 1,
+             "help": "并发数；住宅代理池可隔离出口，固定 Clash 节点可共享 IP 并发"},
             {"flag": "--timeout", "type": "int", "default": 600, "help": "单号超时(秒)"},
             {"flag": "--node", "type": "str", "default": "auto",
              "help": "Clash 模式下的出口节点；auto 自动探测，住宅模式下忽略"},
@@ -174,10 +208,11 @@ SCRIPTS = [
         "category": "单平台注册",
         "title": "Claude 注册",
         "desc": "Claude 单平台注册；支持 YYDS 临时邮箱，自动处理节点预检、magic-link 原生验证和 hCaptcha，成功后保存 sessionKey。",
-        "warning": "运行前必须在“配置 (.env) → Claude 注册与验证”中填写视觉 API 地址和 key，否则无法自动通过图形验证。",
+        "warning": "运行前必须在“配置 (.env) → Claude 注册与验证”中填写视觉 API 地址和 key。Claude 当前依赖 Chromium CDP；选择 RuyiPage 时本任务会使用内置 Chromium。",
         "args": [
             {"flag": "--count", "type": "int", "default": 1, "help": "注册数量"},
-            {"flag": "--concurrency", "type": "int", "default": 1, "help": "并发数"},
+            {"flag": "--concurrency", "type": "int", "default": 1,
+             "help": "并发数；每个任务独立 Profile；固定 Clash 节点可共享 IP 并发"},
             {"flag": "--timeout", "type": "int", "default": 480, "help": "单号超时(秒)"},
             {"flag": "--provider", "type": "choice",
              "choices": ["", "yyds", "gptmail", "cfmail", "moemail", "custom"], "default": "",
@@ -209,6 +244,8 @@ SCRIPTS = [
         "desc": "使用 Outlook 资产池注册 AWS Builder ID，并导出 Kiro 所需的长期凭据。",
         "args": [
             {"flag": "--count", "type": "int", "default": 1, "help": "注册数量"},
+            {"flag": "--concurrency", "type": "int", "default": 1,
+             "help": "并发数；每个任务使用独立 HTTP Session 和设备指纹"},
             {"flag": "--timeout", "type": "int", "default": 600, "help": "单号超时(秒)"},
             {"flag": "--email", "type": "str", "default": "", "help": "指定邮箱(留空从 Outlook 资产池取)"},
             {"flag": "--password", "type": "str", "default": "", "help": "Outlook 邮箱密码(与邮箱资产一并记录)"},
@@ -239,10 +276,20 @@ SCRIPTS = [
         "platform": "outlook",
         "category": "邮箱注册",
         "title": "Outlook 邮箱注册",
-        "desc": "持续自注册 Outlook，产出到 _outlook_pool/ 与 emails.txt。count=0 为无限循环。",
+        "desc": "持续自注册 Outlook；最近窗口成功率低于阈值时自动停止，避免持续消耗住宅流量。",
+        "warning": "Outlook 浏览器注册、Graph 授权和账号恢复均使用当前选择的指纹浏览器；选择 RuyiPage 时会启动 Firefox WebDriver BiDi。",
         "args": [
-            {"flag": "--count", "type": "int", "default": 0, "help": "注册数量(0=无限循环)"},
+            {"flag": "--count", "type": "int", "default": 0,
+             "help": "可选硬上限（0=不限制总次数）"},
+            {"flag": "--concurrency", "type": "int", "default": 1,
+             "help": "并发数；住宅代理池按槽隔离；固定 Clash 节点可共享 IP 并发"},
+            {"flag": "--node", "type": "str", "default": "auto",
+             "help": "无住宅代理时可指定一个 Clash 节点，以共享固定公网 IP 并发"},
             {"flag": "--target-pool", "type": "int", "default": 0, "help": "池达到此数量就停(0=不限)"},
+            {"flag": "--min-success-rate", "type": "int", "default": 10,
+             "help": "最近窗口最低成功率百分比（0=关闭成功率熔断）"},
+            {"flag": "--success-rate-window", "type": "int", "default": 20,
+             "help": "成功率统计窗口；完成这么多次后才开始判断"},
             {"flag": "--max-press", "type": "str", "default": "5", "help": "人机验证按住次数上限"},
             {"flag": "--confirm-before-register", "type": "bool", "default": False,
              "help": "注册页打开后仅在出现数据许可页时才点确认(正常表单不点)"},
@@ -328,7 +375,7 @@ SCRIPTS = [
         "file": "tools/install_ruyipage.py",
         "category": "配置工具",
         "title": "安装 RuyiPage Firefox",
-        "desc": "自动安装失败时手动重试 RuyiPage Firefox runtime；正常情况下便携包首次启动会自动安装。",
+        "desc": "自动安装失败时手动重试 RuyiPage Firefox runtime；安装成功后供 ChatGPT、Codex OAuth、GitHub 等已适配流程使用。",
         "args": [],
     },
 ]
@@ -423,6 +470,15 @@ ENV_SCHEMA = [
          "help": "可选的住宅代理供应商换 IP 接口。"},
         {"key": "REG_FACTORY_PROXY_ROTATE_METHOD", "type": "choice", "choices": ["GET", "POST"],
          "default": "GET", "help": "调用换 IP 接口时使用的方法。"},
+        {"key": "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE", "type": "choice",
+         "choices": ["balanced", "aggressive", "off"], "default": "balanced",
+         "help": "住宅代理浏览器节流：平衡模式拦图片、字体和音视频；激进模式额外拦样式表和常见统计请求。验证码域名始终放行。"},
+        {"key": "OUTLOOK_GRAPH_AUTH_TIMEOUT", "type": "int", "default": 240,
+         "help": "Outlook 注册完成后的 Graph 授权独立超时秒数，不计入注册阶段超时。"},
+        {"key": "REG_FACTORY_MAX_CONCURRENCY", "type": "int", "default": 10,
+         "help": "单个注册任务允许的最大并发数，防止浏览器和代理资源过载。"},
+        {"key": "REG_FACTORY_ALLOW_SHARED_EGRESS", "type": "bool", "default": False,
+         "help": "允许多个并发账号共享同一公网出口；默认关闭以降低关联和限流风险。"},
         {"key": "CHATGPT_RESIDENTIAL_ROTATE_RETRIES", "default": "3",
          "help": "ChatGPT 遇到 Cloudflare 拦截时最多轮换住宅 IP 的次数。"},
     ]},
@@ -436,7 +492,9 @@ ENV_SCHEMA = [
         {"key": "REG_FACTORY_BROWSER_HELPER", "help": "内置 Chromium 启动器路径"},
         {"key": "BITBROWSER_API", "default": "http://127.0.0.1:54345", "help": "比特浏览器本地 API"},
         {"key": "BB_CORE_VERSION", "default": "146",
-         "help": "Outlook 自注册等共享 BitBrowser 流程的首选 Chromium 内核"},
+         "help": "使用 BitBrowser provider 时，Outlook 自注册等流程的首选 Chromium 内核"},
+        {"key": "CHATGPT_BROWSER_CORE_VERSION", "default": "146",
+         "help": "ChatGPT 并发 Profile 使用的 Chromium 内核"},
         {"key": "OUTLOOK_BROWSER_FALLBACK_CORE_VERSION", "default": "130",
          "help": "Outlook 首选内核安装失败时自动回退的内核；留空禁用"},
         {"key": "GROK_BROWSER_CORE_VERSION", "default": "146",
@@ -499,6 +557,14 @@ ENV_SCHEMA = [
      "tests": [{"target": "outlook-recovery", "label": "验证 Outlook 辅助邮箱 RT"}],
      "items": [
         {"key": "OUTLOOK_PROXIES", "help": "Outlook 自注册住宅代理池(换行/逗号分隔)"},
+        {"key": "OUTLOOK_UI_LOCALE", "default": "en-US",
+         "help": "Microsoft 页面语言提示；印度可用 hi-IN，印度尼西亚可用 id-ID"},
+        {"key": "OUTLOOK_EMAIL_DOMAIN", "default": "auto",
+         "help": "auto 按当前网络出口的注册页域名选项选择；也可填 outlook.jp、outlook.eu 或其它区域后缀"},
+        {"key": "OUTLOOK_NODE_REGION_KEYWORDS", "default": "",
+         "help": "Outlook Clash 节点国家关键词，逗号分隔；留空沿用 NODE_REGION_KEYWORDS"},
+        {"key": "OUTLOOK_NODE_EXCLUDE_REGION_KEYWORDS", "default": "香港,Hong Kong,🇭🇰",
+         "help": "Outlook Clash 强制排除的节点国家关键词；默认排除香港"},
         {"key": "OUTLOOK_GRAPH_RECOVERY_EMAIL", "type": "bool",
          "default": "true", "help": "启用 Graph proofs/Add 辅助邮箱自动绑定和接码；关闭后无法保证 RT 可提取"},
         {"key": "OUTLOOK_GRAPH_RECOVERY_PROVIDER", "type": "choice", "choices": ["yyds", "custom", "outlook"],
@@ -515,8 +581,8 @@ ENV_SCHEMA = [
          "help": "iCloud 邮箱 API 请求地址；email.manageh.shop 是文档站，不是接口地址"},
         {"key": "ICLOUD_MAIL_API_KEY", "secret": True, "help": "iCloud 邮箱 API key"},
         {"key": "ICLOUD_MAIL_TYPE", "type": "choice", "choices": ["icloud-code", "icloud"],
-         "default": "icloud-code", "help": "icloud-code=ChatGPT 接码类型；icloud=普通 iCloud 子邮箱"},
-        {"key": "ICLOUD_MAIL_SERVICE", "default": "openai", "help": "接码服务名，ICLOUD_MAIL_TYPE=icloud-code 时使用"},
+         "default": "icloud-code", "help": "ChatGPT 始终使用 icloud-code；icloud 仅供其它流程申请普通 iCloud 子邮箱"},
+        {"key": "ICLOUD_MAIL_SERVICE", "default": "openai", "help": "ChatGPT 固定按 openai 服务申请接码邮箱"},
     ]},
     {"group": "临时邮箱(Claude/Grok 注册取码)", "tests": [{"target": "yyds", "label": "测试 YYDS"}], "items": [
         {"key": "CLAUDE_USE_TEMP_EMAIL", "type": "choice", "choices": ["false", "true"], "default": "false",

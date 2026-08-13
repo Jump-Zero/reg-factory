@@ -365,6 +365,9 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .asset-mode-switch button{padding:5px 7px;border:0;border-right:1px solid var(--line);background:var(--surface-raised);color:var(--muted);font-size:11px;cursor:pointer}
 .asset-mode-switch button:last-child{border-right:0}
 .asset-mode-switch button.active{background:var(--accent-soft);color:#9fc2ff;font-weight:650}
+.asset-normal-only{display:inline-flex;align-items:center;gap:8px;margin:0 0 2px;color:var(--muted);font-size:11px;cursor:pointer}
+.asset-normal-only input{width:15px;height:15px;margin:0;accent-color:var(--accent)}
+.asset-normal-only.disabled{opacity:.45;cursor:not-allowed}
 .asset-request{margin-top:11px}
 .asset-request-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:5px;color:var(--muted);font-size:10.5px}
 .asset-request>code,.asset-request>pre{
@@ -416,28 +419,29 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .asset-scan-toolbar label{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:10.5px}
 .asset-scan-result-count{margin-left:auto;color:var(--quiet);font:10.5px var(--mono);white-space:nowrap}
 .asset-scan-table-wrap{margin-top:10px;overflow-x:auto;border:1px solid var(--line);border-radius:6px}
-.asset-scan-table{width:100%;min-width:1100px;border-collapse:collapse;table-layout:fixed;font-size:10.5px}
+.asset-scan-table{width:100%;min-width:1180px;border-collapse:collapse;table-layout:fixed;font-size:10.5px}
 .asset-scan-table th{padding:8px 10px;border-bottom:1px solid var(--line);background:var(--surface-raised);color:var(--quiet);font-weight:600;text-align:left}
 .asset-scan-table td{padding:9px 10px;border-bottom:1px solid var(--line);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .asset-scan-table tr:last-child td{border-bottom:0}
 .asset-scan-table tbody tr:hover{background:var(--surface-hover)}
 .asset-scan-table .col-check{width:38px;text-align:center}
 .asset-scan-table .col-check input{cursor:pointer}
-.asset-scan-table .col-source{width:80px}
 .asset-scan-table .col-type{width:7%}
-.asset-scan-table .col-account{width:18%}
-.asset-scan-table .col-cat{width:80px}
+.asset-scan-table .col-account{width:16%}
+.asset-scan-table .col-cat{width:70px}
+.asset-scan-table .col-network{width:10%}
 .asset-scan-table .col-status{width:8%}
-.asset-scan-table .col-trial{width:10%}
+.asset-scan-table .col-trial{width:9%}
 .asset-scan-table .col-reg{width:10%}
-.asset-scan-table .col-detail{width:20%}
-.asset-scan-table .col-sub{width:8%}
-.asset-scan-table .col-checked{width:13%}
-/* Outlook 视图：隐藏 类型/Plus试用/Sub2API，显示 已注册账号 */
+.asset-scan-table .col-detail{width:18%}
+.asset-scan-table .col-sub{width:7%}
+.asset-scan-table .col-checked{width:12%}
+/* Outlook 视图：隐藏 类型/Plus试用/Sub2API/网络，显示 已注册账号 */
 .asset-scan-table .col-reg{display:none}
 .asset-scan-table.outlook-view .col-type,
 .asset-scan-table.outlook-view .col-trial,
-.asset-scan-table.outlook-view .col-sub{display:none}
+.asset-scan-table.outlook-view .col-sub,
+.asset-scan-table.outlook-view .col-network{display:none}
 .asset-scan-table.outlook-view .col-reg{display:table-cell}
 .asset-scan-table.outlook-view{min-width:860px}
 .asset-sub-cell{text-align:center}
@@ -464,6 +468,7 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .asset-scan-row-child td{background:rgba(155,89,182,.04)}
 .asset-scan-row-child .asset-scan-account{padding-left:24px;opacity:.85}
 .asset-scan-account{color:var(--text)!important;font-family:var(--mono)}
+.asset-scan-network{color:var(--text)!important;font-family:var(--mono)}
 .asset-status-badge{display:inline-flex;align-items:center;min-height:22px;padding:2px 7px;border:1px solid var(--line);border-radius:5px;font-size:9.5px;white-space:nowrap}
 .asset-status-badge.normal{border-color:rgba(65,184,120,.5);color:var(--green);background:rgba(65,184,120,.08)}
 .asset-status-badge.unlock{border-color:rgba(229,168,75,.55);color:var(--amber);background:rgba(229,168,75,.08)}
@@ -472,7 +477,7 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .asset-status-badge.restricted{border-color:rgba(67,182,178,.5);color:var(--cyan);background:rgba(67,182,178,.08)}
 .asset-status-badge.unknown,.asset-status-badge.error{color:var(--quiet)}
 .asset-trial-badge{display:inline-flex;align-items:center;min-height:22px;padding:2px 7px;border:1px solid var(--line);border-radius:5px;font-size:9.5px;white-space:nowrap}
-.asset-trial-badge.eligible{border-color:rgba(229,168,75,.6);color:#f0c77e;background:rgba(229,168,75,.1)}
+.asset-trial-badge.eligible,.asset-trial-badge.zero_price{border-color:rgba(229,168,75,.6);color:#f0c77e;background:rgba(229,168,75,.1)}
 .asset-trial-badge.active{border-color:rgba(65,184,120,.5);color:var(--green);background:rgba(65,184,120,.08)}
 .asset-trial-badge.ineligible{color:#b0b5bd;background:rgba(116,123,133,.08)}
 .asset-trial-badge.unknown,.asset-trial-badge.disabled{color:var(--quiet)}
@@ -515,6 +520,10 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .network-field input,.network-field select{height:36px}
 .network-field textarea{min-height:126px;resize:vertical;font-family:var(--mono);line-height:1.5}
 .network-field input:hover,.network-field select:hover,.network-field textarea:hover{border-color:var(--line-strong)}
+.network-check-field{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:58px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface-raised)}
+.network-check-field>span{margin:0}
+.network-check-field input[type="checkbox"]{width:17px;height:17px;min-width:17px;padding:0;accent-color:var(--accent);cursor:pointer}
+.network-check-field:hover{border-color:var(--line-strong)}
 .network-field-wide{grid-column:1/-1}
 .network-fixed-row{display:flex;align-items:flex-end;gap:8px;max-width:calc(50% - 8px);margin-top:13px}
 .network-fixed-row .network-field{flex:1}

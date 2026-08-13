@@ -207,6 +207,28 @@ class ICloudMailTests(unittest.TestCase):
             sess.calls[0][2]["params"],
             {"type": "icloud-code", "service": "openai", "apikey": "test-key"},
         )
+        self.assertEqual(mailbox["mail_type"], "icloud-code")
+        self.assertEqual(mailbox["service"], "openai")
+
+    def test_create_explicit_chatgpt_purpose_overrides_generic_alias_config(self):
+        sess = FakeSession([
+            FakeResponse(data={"code": 0, "message": "success", "data": {
+                "type": "icloud-code", "email": "openai-code@example.com"
+            }}),
+        ])
+        with patch.object(temp_email, "ICLOUD_MAIL_TYPE", "icloud"), patch.object(
+            temp_email, "_session", return_value=sess
+        ):
+            mailbox = temp_email.create_mailbox(
+                provider="icloud",
+                api_key="test-key",
+                base_url="https://mail.no-replyca.xyz/api/user/email?type=icloud",
+                mail_type="icloud-code",
+                service="openai",
+            )
+
+        self.assertEqual(mailbox["email"], "openai-code@example.com")
+        self.assertEqual(mailbox["mail_type"], "icloud-code")
 
     def test_fetch_maps_provider_code_and_empty_success(self):
         sess = FakeSession([

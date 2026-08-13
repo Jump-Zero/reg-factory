@@ -12,6 +12,7 @@ ChatGPT (OpenAI) 自动注册
 
 import argparse
 import asyncio
+import contextvars
 import functools
 import json
 import os as _os
@@ -71,7 +72,69 @@ CODEX_MANUAL_PHONE = False  # add-phone 手动模式（不接码，自己在浏�
 CODEX_SMS_PROVIDER = "auto"  # auto / smsman / firefox / hero
 CODEX_TIMEOUT = 120  # Codex 授权捕获超时秒
 CHATGPT_NODE = "auto"
+CHATGPT_COUNTRY = "auto"
 ACTIVE_CHATGPT_NODE = None
+ACTIVE_CHATGPT_COUNTRY = None
+_ACTIVE_CHATGPT_NODE_TASK = contextvars.ContextVar(
+    "chatgpt_active_node", default=None
+)
+_ACTIVE_CHATGPT_COUNTRY_TASK = contextvars.ContextVar(
+    "chatgpt_active_country", default=None
+)
+
+
+def _set_active_chatgpt_node(value):
+    global ACTIVE_CHATGPT_NODE
+    from common.task_context import active_worker
+
+    if active_worker():
+        _ACTIVE_CHATGPT_NODE_TASK.set(value)
+    else:
+        ACTIVE_CHATGPT_NODE = value
+
+
+def _get_active_chatgpt_node():
+    from common.task_context import active_worker
+
+    return _ACTIVE_CHATGPT_NODE_TASK.get() if active_worker() else ACTIVE_CHATGPT_NODE
+
+
+def _normalize_chatgpt_country(value):
+    country = str(value or "auto").strip().upper()
+    if country in {"", "AUTO", "ANY"}:
+        return "auto"
+    if not re.fullmatch(r"[A-Z]{2}", country):
+        raise ValueError("ChatGPT country must be auto or a two-letter ISO code")
+    return country
+
+
+def _set_active_chatgpt_country(value):
+    global ACTIVE_CHATGPT_COUNTRY
+    from common.task_context import active_worker
+
+    country = _normalize_chatgpt_country(value) if value else None
+    if active_worker():
+        _ACTIVE_CHATGPT_COUNTRY_TASK.set(country)
+    else:
+        ACTIVE_CHATGPT_COUNTRY = country
+
+
+def _get_active_chatgpt_country():
+    from common.task_context import active_worker
+
+    return (
+        _ACTIVE_CHATGPT_COUNTRY_TASK.get()
+        if active_worker()
+        else ACTIVE_CHATGPT_COUNTRY
+    )
+
+
+def _chatgpt_country_matches(actual, requested):
+    target = _normalize_chatgpt_country(requested)
+    actual_country = str(actual or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", actual_country):
+        return False
+    return target == "auto" or actual_country == target
 
 
 def _env_int(name, default):
@@ -227,7 +290,6 @@ async def _click_turnstile(page):
 
 def _activate_cf_node(node):
     """切换 Clash 节点并断开旧连接，避免新注册会话沿用旧出口。"""
-    global ACTIVE_CHATGPT_NODE
     try:
         from common import proxy_switch
         import _clash_verge as cv
@@ -238,7 +300,7 @@ def _activate_cf_node(node):
         proxy_switch.set_node(active, group)
         client = cv.ClashClient(api, secret)
         client.close_connections()
-        ACTIVE_CHATGPT_NODE = active
+        _set_active_chatgpt_node(active)
         return active
     except Exception as e:
         print(f"  [cf] 切节点失败: {str(e)[:80]}")
@@ -251,14 +313,34 @@ def _switch_cf_node():
     if proxy_switch.proxy_mode() == "residential":
         result = proxy_switch.rotate_proxy()
         if result.get("ok"):
-            global ACTIVE_CHATGPT_NODE
-            ACTIVE_CHATGPT_NODE = proxy_switch.current_node()
-            return ACTIVE_CHATGPT_NODE
+            if result.get("requires_new_session"):
+                print("  [cf] 任务代理已轮换；当前浏览器仍绑定旧端点，需要新建 Profile")
+                return None
+            active = proxy_switch.current_node()
+            _set_active_chatgpt_node(active)
+            return active
         return None
     candidates = _chatgpt_node_candidates()
-    node = candidates[_cf_node_idx[0] % len(candidates)]
-    _cf_node_idx[0] += 1
-    return _activate_cf_node(node)
+    requested_country = CHATGPT_COUNTRY
+    for _ in range(len(candidates)):
+        node = candidates[_cf_node_idx[0] % len(candidates)]
+        _cf_node_idx[0] += 1
+        if not _activate_cf_node(node):
+            continue
+        time.sleep(2)
+        try:
+            ok, loc, status = _probe_chatgpt_node()
+            matched = ok and _chatgpt_country_matches(loc, requested_country)
+            print(
+                f"  [node] ChatGPT rotate {node}: HTTP {status} loc={loc} "
+                f"{'PASS' if matched else 'SKIP'}"
+            )
+            if matched:
+                _set_active_chatgpt_country(loc)
+                return node
+        except Exception as exc:
+            print(f"  [node] ChatGPT rotate {node}: {str(exc)[:80]}")
+    return None
 
 
 def clash_browser_proxy_fields():
@@ -267,14 +349,34 @@ def clash_browser_proxy_fields():
     return proxy_switch.browser_proxy_fields()
 
 
-def _probe_chatgpt_node():
+def chatgpt_browser_proxy_fields():
+    if (CHATGPT_NODE or "auto").strip().lower() in {"none", "off", "direct"}:
+        return {"proxyMethod": 1, "proxyType": "noproxy"}
+    return clash_browser_proxy_fields()
+
+
+def chatgpt_network_label():
+    if (CHATGPT_NODE or "auto").strip().lower() in {"none", "off", "direct"}:
+        return "direct"
+    active = _get_active_chatgpt_node()
+    if active:
+        return str(active)
+    try:
+        return str(proxy_switch.current_node() or "")
+    except Exception:
+        return ""
+
+
+def _probe_chatgpt_node(direct=False):
     """验证当前 Clash 出口能访问 ChatGPT，并返回 Cloudflare 识别地区。"""
     from curl_cffi import requests as creq
 
     from common import proxy_switch
-    proxy = proxy_switch.effective_proxy_url()
+    proxy = "" if direct else proxy_switch.effective_proxy_url()
     session = creq.Session(impersonate="chrome131", http_version="v2")
-    session.proxies = {"http": proxy, "https": proxy}
+    session.trust_env = False
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
     try:
         trace = session.get("https://auth.openai.com/cdn-cgi/trace", timeout=15)
         loc = next(
@@ -294,21 +396,49 @@ def _probe_chatgpt_node():
         session.close()
 
 
-def select_chatgpt_node(requested, allow_blocked=False):
+def select_chatgpt_node(requested, allow_blocked=False, country="auto"):
     """注册开始前选定一个节点；账号会话建立后不再静默换出口。"""
     global ACTIVE_CHATGPT_NODE
     value = (requested or "auto").strip()
+    requested_country = _normalize_chatgpt_country(country)
+    _set_active_chatgpt_country(None)
     from common import proxy_switch
     mode = proxy_switch.proxy_mode()
-    if mode in {"residential", "direct"} and value.lower() == "auto":
-        ACTIVE_CHATGPT_NODE = None
-        print("  [node] ChatGPT 使用直连住宅代理，跳过 Clash 节点探测")
+    explicit_direct = value.lower() in {"none", "off", "direct"}
+    if mode == "direct" or explicit_direct:
+        ok, loc, status = _probe_chatgpt_node(direct=True)
+        if not ok or not _chatgpt_country_matches(loc, requested_country):
+            raise RuntimeError(
+                f"direct exit country mismatch: requested={requested_country}, "
+                f"actual={loc}, HTTP {status}"
+            )
+        _set_active_chatgpt_country(loc)
+        _set_active_chatgpt_node(None)
+        print(f"  [node] ChatGPT direct exit verified: {loc}")
         return None
-    if value.lower() in {"none", "off", "direct"}:
-        ACTIVE_CHATGPT_NODE = None
-        print("  [node] ChatGPT 使用直连模式")
-        return None
-
+    if mode == "residential" and value.lower() == "auto":
+        retries = max(1, _env_int("CHATGPT_RESIDENTIAL_ROTATE_RETRIES", 3))
+        last = ""
+        for attempt in range(retries):
+            try:
+                ok, loc, status = _probe_chatgpt_node()
+                last = f"loc={loc} HTTP {status}"
+                if ok and _chatgpt_country_matches(loc, requested_country):
+                    _set_active_chatgpt_country(loc)
+                    _set_active_chatgpt_node(None)
+                    print(f"  [node] ChatGPT residential exit verified: {loc}")
+                    return None
+            except Exception as exc:
+                last = str(exc)
+            if attempt + 1 < retries:
+                result = proxy_switch.rotate_proxy()
+                print(
+                    f"  [node] residential country mismatch; rotate "
+                    f"({attempt + 1}/{retries}): {result.get('node') or 'failed'}"
+                )
+        raise RuntimeError(
+            f"no residential exit matched country {requested_country}: {last}"
+        )
     if mode == "clash_fixed":
         fixed = proxy_switch.fixed_node()
         if not fixed:
@@ -329,31 +459,69 @@ def select_chatgpt_node(requested, allow_blocked=False):
         time.sleep(2)
         try:
             ok, loc, status = _probe_chatgpt_node()
-            print(f"  [node] ChatGPT probe {node}: HTTP {status} loc={loc} {'PASS' if ok else 'BLOCK'}")
-            if ok:
+            country_ok = _chatgpt_country_matches(loc, requested_country)
+            outcome = "PASS" if ok and country_ok else "COUNTRY" if ok else "BLOCK"
+            print(f"  [node] ChatGPT probe {node}: HTTP {status} loc={loc} {outcome}")
+            if ok and country_ok:
                 _cf_node_idx[0] = index + 1
+                _set_active_chatgpt_country(loc)
                 return node
         except Exception as e:
             last_error = str(e)
             print(f"  [node] ChatGPT probe {node}: {last_error[:80]}")
-    if allow_blocked and activated:
+    if allow_blocked and activated and requested_country == "auto":
         fallback = activated[0]
         _activate_cf_node(fallback)
         print(f"  [node] 无 Cookie 预检均被拦，OAuth 使用已有登录态继续验证: {fallback}")
         return fallback
-    raise RuntimeError(f"没有可用的 ChatGPT 节点: {last_error or value}")
+    country_note = "" if requested_country == "auto" else f" country={requested_country}"
+    raise RuntimeError(f"no usable ChatGPT node{country_note}: {last_error or value}")
+
+
+def ensure_chatgpt_worker_country():
+    """Verify a worker's final proxy before its browser profile is created."""
+    requested = _normalize_chatgpt_country(CHATGPT_COUNTRY)
+    from common import proxy_switch
+
+    mode = proxy_switch.proxy_mode()
+    explicit_direct = (CHATGPT_NODE or "auto").strip().lower() in {
+        "none",
+        "off",
+        "direct",
+    }
+    attempts = (
+        max(1, _env_int("CHATGPT_RESIDENTIAL_ROTATE_RETRIES", 3))
+        if mode == "residential" and not explicit_direct
+        else 1
+    )
+    last = ""
+    for attempt in range(attempts):
+        ok, loc, status = _probe_chatgpt_node(
+            direct=explicit_direct or mode == "direct"
+        )
+        last = f"loc={loc} HTTP {status}"
+        if ok and _chatgpt_country_matches(loc, requested):
+            _set_active_chatgpt_country(loc)
+            return loc
+        if explicit_direct or mode != "residential" or attempt + 1 >= attempts:
+            break
+        result = proxy_switch.rotate_proxy()
+        if not result.get("ok") or not result.get("changed"):
+            break
+    raise RuntimeError(f"worker exit did not match country {requested}: {last}")
 
 
 def assert_chatgpt_node(stage):
     """检测其他任务是否在注册中途改了 GLOBAL 出口。"""
-    if not ACTIVE_CHATGPT_NODE:
+    expected = _get_active_chatgpt_node()
+    if not expected:
         return
     from common import proxy_switch
 
     current = proxy_switch.current_node()
-    if current != ACTIVE_CHATGPT_NODE:
+    if current != expected:
         raise RuntimeError(
-            f"chatgpt_node_changed:{stage}: expected={ACTIVE_CHATGPT_NODE}, current={current}"
+            f"chatgpt_node_changed:{stage}: expected={expected}, current={current}"
         )
 
 
@@ -754,6 +922,59 @@ async def wait_for_chatgpt_auth_step(page, timeout=20):
     return "unknown"
 
 
+async def ensure_chatgpt_email_entry(page, retries=2):
+    """Recover an expired auth hand-off before looking for the email field."""
+    selector = 'input[type="email"], input[name="email"]'
+    for attempt in range(max(1, retries + 1)):
+        try:
+            field = page.locator(selector).first
+            if await field.count() > 0 and await field.is_visible():
+                return True
+            body = (await page.locator("body").inner_text(timeout=2500)).lower()
+        except Exception:
+            body = ""
+        expired = any(marker in body for marker in (
+            "your session has ended",
+            "session has expired",
+            "会话已结束",
+            "会話の有効期限",
+        ))
+        if not expired or attempt >= retries:
+            return False
+        print(f"  [1] auth hand-off expired; reopening ChatGPT login ({attempt + 1}/{retries})")
+        await page.goto(SIGNUP_URL, timeout=60000, wait_until="domcontentloaded")
+        await asyncio.sleep(4)
+    return False
+
+
+def create_chatgpt_icloud_mailbox():
+    """Allocate a service-filtered inbox; generic iCloud aliases are not code pools."""
+    return create_mailbox(
+        provider="icloud", mail_type="icloud-code", service="openai"
+    )
+
+
+async def check_chatgpt_plus_trial_after_registration(session, email):
+    """Run the single-account Plus label check without making it fatal."""
+    if not session:
+        return None
+    try:
+        from common.asset_scanner import check_chatgpt_plus_trial_for_session
+
+        result = await asyncio.to_thread(
+            check_chatgpt_plus_trial_for_session, session, email, 15
+        )
+        print(
+            f"  [plus-check] {email}: "
+            f"{result.get('plus_trial', 'unknown')} - "
+            f"{result.get('plus_trial_detail', '')}"
+        )
+        return result
+    except Exception as exc:
+        print(f"  [plus-check][WARN] {email}: {str(exc)[:120]}")
+        return None
+
+
 def should_use_browser_mail_fallback(has_graph_token, code_try, total_tries=3):
     """Use the slower Outlook UI only after the final Graph attempt fails."""
     return bool(has_graph_token and code_try >= total_tries - 1)
@@ -852,13 +1073,12 @@ async def extract_codex(page, email, p=None, ctx=None, release_current=None):
         if p is not None and ctx is not None:
             try:
                 cookies = await ctx.cookies()
-                use_clash = (CHATGPT_NODE or "auto").lower() not in {"none", "off", "direct"}
                 reset_fn = ox.make_reset_page(
                     p,
                     cookies,
                     account_email=email,
                     before_open=release_current,
-                    browser_options=clash_browser_proxy_fields() if use_clash else None,
+                    browser_options=chatgpt_browser_proxy_fields(),
                 )
             except Exception as e:
                 print(f"  [codex] 构造窗口重置器失败(退化为复用窗口): {str(e)[:60]}")
@@ -926,10 +1146,10 @@ async def register_one(index, total, p):
         client_id = FIXED_CLIENT_ID or ""
     elif EMAIL_PROVIDER == "icloud":
         try:
-            mailbox = create_mailbox(provider="icloud")
+            mailbox = create_chatgpt_icloud_mailbox()
             email = mailbox["email"]
             email_pw = refresh_token = client_id = ""
-            print(f"  [email] iCloud mailbox allocated: {email}")
+            print(f"  [email] iCloud OpenAI code mailbox allocated: {email}")
         except Exception as exc:
             print(f"  [email] iCloud mailbox unavailable: {str(exc)[:160]}")
             return None
@@ -946,11 +1166,10 @@ async def register_one(index, total, p):
     bb = pid = None
     success = False
     try:
-        use_clash = (CHATGPT_NODE or "auto").lower() not in {"none", "off", "direct"}
         bb, pid, browser, ctx, page = await open_and_connect(
             name=name,
             p=p,
-            browser_options=clash_browser_proxy_fields() if use_clash else None,
+            browser_options=chatgpt_browser_proxy_fields(),
         )
         await ctx.clear_cookies()
         auth_monitor = AuthResponseMonitor()
@@ -973,6 +1192,10 @@ async def register_one(index, total, p):
             return None
         await asyncio.sleep(5)
         await dump_state(page, "after-load")
+
+        # Recover an expired ChatGPT -> auth hand-off when present. A false
+        # result can still be a Cloudflare page, which is handled below.
+        await ensure_chatgpt_email_entry(page)
 
         # Step 1.2: CF 全页拦截处理。先尝试点 Turnstile 勾选框(临界 IP 上有可点框，点了能过)，
         # 点几次仍不放行(AWS 等死锁转圈)再换 CF 友好节点重载。两手都试，覆盖不同 IP 信誉档。
@@ -1012,6 +1235,12 @@ async def register_one(index, total, p):
                     await dump_state(page, "cf-blocked")
                     email_pool.mark_error(PLATFORM, email, email_pw, "cf_blocked")
                     return None
+
+        if not await ensure_chatgpt_email_entry(page):
+            print("  [1][FAIL] ChatGPT email entry unavailable")
+            await page.screenshot(path=f"screenshots/chatgpt_noemail_{index}.png")
+            email_pool.mark_error(PLATFORM, email, email_pw, "no_email_input")
+            return None
 
         assert_chatgpt_node("before_email")
 
@@ -1344,8 +1573,12 @@ async def register_one(index, total, p):
         try:
             from common.session_export import fetch_chatgpt_session, save_chatgpt_tokens
             sess = await fetch_chatgpt_session(page)
+            if sess:
+                sess["registration_country"] = _get_active_chatgpt_country() or ""
+                sess["network_node"] = chatgpt_network_label()
             if sess and save_chatgpt_tokens(sess, email):
                 print("  [OK] chatgpt 标准 token 已保存")
+                await check_chatgpt_plus_trial_after_registration(sess, email)
             else:
                 print("  [WARN] 未取到 chatgpt session（可能未完全登录）")
         except Exception as e:
@@ -2191,6 +2424,10 @@ async def main():
     parser.add_argument("--timeout", "-t", type=int, default=480)
     parser.add_argument("--node", default="auto",
                         help="固定 ChatGPT Clash 节点；auto 自动探测，none 直连")
+    parser.add_argument(
+        "--country", default="auto",
+        help="注册出口国家：auto 或 JP/SG/US 等两位 ISO 国家码",
+    )
     parser.add_argument("--keep-on-fail", action="store_true", help="失败时保留窗口便于排查")
     parser.add_argument("--email", default=None, help="指定邮箱(绕过邮箱池)")
     parser.add_argument("--password", default=None, help="指定邮箱密码")
@@ -2218,7 +2455,7 @@ async def main():
 
     global REGISTER_TIMEOUT, KEEP_ON_FAIL, FIXED_EMAIL, FIXED_PASSWORD, FIXED_REFRESH_TOKEN, FIXED_CLIENT_ID, EMAIL_PROVIDER
     global IMPORT_C2A, PLUS_SUBSCRIPTION, C2A_URL, C2A_KEY
-    global EXTRACT_CODEX, CODEX_GROUP, CODEX_MANUAL_PHONE, CODEX_SMS_PROVIDER, CODEX_TIMEOUT, CHATGPT_NODE
+    global EXTRACT_CODEX, CODEX_GROUP, CODEX_MANUAL_PHONE, CODEX_SMS_PROVIDER, CODEX_TIMEOUT, CHATGPT_NODE, CHATGPT_COUNTRY
     REGISTER_TIMEOUT = args.timeout
     KEEP_ON_FAIL = args.keep_on_fail
     FIXED_EMAIL = args.email
@@ -2239,6 +2476,7 @@ async def main():
     CODEX_SMS_PROVIDER = args.codex_sms_provider
     CODEX_TIMEOUT = args.codex_timeout
     CHATGPT_NODE = args.node
+    CHATGPT_COUNTRY = _normalize_chatgpt_country(args.country)
 
     if IMPORT_C2A and not ((C2A_URL or CHATGPT2API_URL) and (C2A_KEY or CHATGPT2API_KEY)):
         print("  [c2a][WARN] 已开 --import-c2a 但未配置 CHATGPT2API_URL/KEY（--c2a-url/--c2a-key 或 .env），导入会被跳过")
@@ -2247,33 +2485,60 @@ async def main():
         print("  [codex][WARN] 已开 --codex 但未配置 SUB2API_URL/EMAIL/PASSWORD（.env），Codex 提取会被跳过")
 
     try:
-        select_chatgpt_node(CHATGPT_NODE)
+        selected_node = select_chatgpt_node(CHATGPT_NODE, country=CHATGPT_COUNTRY)
+        requested_node = str(CHATGPT_NODE or "auto").strip().lower()
+        if (
+            selected_node
+            and requested_node not in {"auto", "none", "off", "direct"}
+            and proxy_switch.proxy_mode() == "clash_auto"
+        ):
+            proxy_switch.pin_fixed_node(selected_node, "chatgpt")
+            print(f"  [node] 当前批次固定节点并发: {selected_node}")
     except Exception as e:
         print(f"  [node][FAIL] {e}")
         return 2
 
-    if args.concurrency > 1:
-        print("  [node] ChatGPT 使用全局 Clash 出口，为避免注册中途换 IP，并发强制为 1")
-        args.concurrency = 1
+    from common.concurrency import build_worker_plan
+    from common.task_context import activate_worker
+
+    worker_plan = build_worker_plan("chatgpt", args.count, args.concurrency)
+    worker_plan.log()
 
     print("=" * 50)
-    print(f"  ChatGPT Auto Register  count={args.count} concurrency={args.concurrency}")
+    print(
+        f"  ChatGPT Auto Register  count={args.count} "
+        f"concurrency={worker_plan.effective_concurrency}"
+    )
     print("=" * 50)
 
-    sem = asyncio.Semaphore(args.concurrency)
+    slot_locks = [asyncio.Lock() for _ in range(worker_plan.effective_concurrency)]
     results = []
 
     async def run_one(i):
-        async with sem:
-            if i > 1:
-                await asyncio.sleep(random.uniform(2, 6) * (i - 1))
-            async with async_playwright() as p:
-                try:
-                    sk = await register_one(i, args.count, p)
-                    results.append(sk)
-                except Exception as e:
-                    print(f"  #{i} fatal: {e}")
-                    results.append(None)
+        stagger_slot = (i - 1) % worker_plan.effective_concurrency
+        if stagger_slot:
+            await asyncio.sleep(random.uniform(1.5, 3.5) * stagger_slot)
+        worker_context = worker_plan.worker(i)
+        async with slot_locks[worker_context.slot - 1]:
+            with activate_worker(worker_context) as worker:
+                _set_active_chatgpt_node(ACTIVE_CHATGPT_NODE)
+                if ACTIVE_CHATGPT_COUNTRY:
+                    _set_active_chatgpt_country(ACTIVE_CHATGPT_COUNTRY)
+                exit_country = await asyncio.to_thread(
+                    ensure_chatgpt_worker_country
+                )
+                _set_active_chatgpt_country(exit_country)
+                print(
+                    f"  [worker] {worker.worker_id} slot={worker.slot} "
+                    f"proxy={proxy_switch.current_node()} country={exit_country}"
+                )
+                async with async_playwright() as p:
+                    try:
+                        sk = await register_one(i, args.count, p)
+                        results.append(sk)
+                    except Exception as e:
+                        print(f"  #{i} fatal: {e}")
+                        results.append(None)
 
     await asyncio.gather(*[run_one(i) for i in range(1, args.count + 1)])
 

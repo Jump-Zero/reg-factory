@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
+from common.file_lock import file_lock
+from common.task_context import task_environment
+
 
 @dataclass(frozen=True)
 class ProxySpec:
@@ -60,7 +63,7 @@ def parse_proxy(value: str | None) -> ProxySpec | None:
 
 
 def _env(environ=None):
-    return os.environ if environ is None else environ
+    return task_environment(os.environ) if environ is None else environ
 
 
 def _pool_values(environ=None) -> list[str]:
@@ -114,12 +117,13 @@ def rotate_proxy_pool(environ=None) -> ProxySpec | None:
     pool = proxy_pool(env)
     if not pool:
         return configured_proxy(environ=env)
-    index = (_active_index(len(pool), env) + 1) % len(pool)
     path = _state_path(env)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(str(index), encoding="utf-8")
-    os.replace(tmp, path)
+    with file_lock(path):
+        index = (_active_index(len(pool), env) + 1) % len(pool)
+        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        tmp.write_text(str(index), encoding="utf-8")
+        os.replace(tmp, path)
     return pool[index]
 
 

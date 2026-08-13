@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 
@@ -89,6 +91,14 @@ class RuyiLocator:
             item.has_not_text.append(has_not_text)
         return item
 
+    def locator(self, selector, *, has_text=None, has_not_text=None):
+        return RuyiChildLocator(
+            self,
+            selector,
+            has_text=has_text,
+            has_not_text=has_not_text,
+        )
+
     @staticmethod
     def _matches(value, pattern, *, exact=False):
         if hasattr(pattern, "search"):
@@ -151,11 +161,12 @@ class RuyiLocator:
         await asyncio.sleep(0.15)
         await self.page._refresh_url()
 
-    async def fill(self, value):
-        element = await self._one()
+    async def fill(self, value, timeout=30000):
+        element = await self._one(timeout=max(0.1, timeout / 1000))
         if element is None:
             raise RuntimeError(f"RuyiPage element not found: {self.selector}")
-        await element.input(str(value), clear=True, by_js=True)
+        await element.input(str(value), clear=True, by_js=False)
+        await asyncio.sleep(0.05)
 
     async def type(self, value, delay=0):
         element = await self._one()
@@ -219,8 +230,46 @@ class RuyiLocator:
         if not await self.is_checked():
             await self.click(timeout=timeout)
 
-    async def evaluate(self, script, arg=None):
+    async def select_option(self, value=None, *, label=None, index=None):
+        """Select a native option using the Playwright argument forms Outlook uses."""
+        if isinstance(value, dict):
+            label = value.get("label", label)
+            index = value.get("index", index)
+            value = value.get("value")
         element = await self._one()
+        if element is None:
+            raise RuntimeError(f"RuyiPage element not found: {self.selector}")
+        selected = await element.run_js(
+            """function(value, label, index) {
+                const options = Array.from(this.options || []);
+                let option = null;
+                if (index !== null && index !== undefined) {
+                    option = options[Number(index)] || null;
+                } else if (label !== null && label !== undefined) {
+                    option = options.find(item =>
+                        String(item.label || item.textContent || '').trim() === String(label).trim()
+                    ) || null;
+                } else {
+                    option = options.find(item => String(item.value) === String(value)) || null;
+                }
+                if (!option) return null;
+                this.value = option.value;
+                option.selected = true;
+                this.dispatchEvent(new Event('input', {bubbles: true}));
+                this.dispatchEvent(new Event('change', {bubbles: true}));
+                return option.value;
+            }""",
+            value,
+            label,
+            index,
+        )
+        if selected is None:
+            target = label if label is not None else index if index is not None else value
+            raise RuntimeError(f"RuyiPage option not found: {target}")
+        return [str(selected)]
+
+    async def evaluate(self, script, arg=None, timeout=30000):
+        element = await self._one(timeout=max(0.1, timeout / 1000))
         if element is None:
             raise RuntimeError(f"RuyiPage element not found: {self.selector}")
         wrapped = f"function(){{ return ({script})(this, ...arguments); }}"
@@ -234,9 +283,10 @@ class RuyiLocator:
             return None
         location = await element.get_location()
         size = await element.get_size()
+        offset = getattr(self.page, "_frame_offset", {}) or {}
         return {
-            "x": float(location.get("x", 0)),
-            "y": float(location.get("y", 0)),
+            "x": float(location.get("x", 0)) + float(offset.get("x", 0)),
+            "y": float(location.get("y", 0)) + float(offset.get("y", 0)),
             "width": float(size.get("width", 0)),
             "height": float(size.get("height", 0)),
         }
@@ -258,6 +308,50 @@ class RuyiLocator:
         raise RuntimeError(f"RuyiPage wait_for timeout: {self.selector} ({state})")
 
 
+class RuyiChildLocator(RuyiLocator):
+    def __init__(self, parent, selector, **kwargs):
+        super().__init__(parent.page, selector, **kwargs)
+        self.parent = parent
+
+    def _copy(self, **updates):
+        values = {
+            "parent": self.parent,
+            "selector": self.selector,
+            "index": self.index,
+            "exact": self.exact,
+        }
+        values.update(updates)
+        item = type(self)(**values)
+        item.has_text = list(updates.get("has_text", self.has_text))
+        item.has_not_text = list(updates.get("has_not_text", self.has_not_text))
+        return item
+
+    async def _resolve(self, timeout=0.25):
+        parents = await self.parent._resolve(timeout=timeout)
+        if not parents:
+            return []
+        scope = RuyiLocatorScope(parents[0], self.page)
+        locator = RuyiLocator(
+            scope,
+            self.selector,
+            index=self.index,
+            exact=self.exact,
+        )
+        locator.has_text = list(self.has_text)
+        locator.has_not_text = list(self.has_not_text)
+        return await locator._resolve(timeout=timeout)
+
+    async def evaluate_all(self, script, arg=None):
+        parent = await self.parent._one()
+        if parent is None:
+            return []
+        wrapped = (
+            "function(arg){ return (" + str(script) + ")"
+            "(Array.from(this.querySelectorAll(" + json.dumps(self.selector) + ")), arg); }"
+        )
+        return await parent.run_js(wrapped, arg)
+
+
 class RuyiKeyboard:
     def __init__(self, page):
         self.page = page
@@ -272,6 +366,10 @@ class RuyiKeyboard:
             "backspace": Keys.BACKSPACE,
             "tab": Keys.TAB,
             "escape": Keys.ESCAPE,
+            "arrowdown": Keys.ARROW_DOWN,
+            "arrowup": Keys.ARROW_UP,
+            "home": Keys.HOME,
+            "space": Keys.SPACE,
         }.get(str(key).lower(), str(key))
 
     async def type(self, text, delay=0):
@@ -294,6 +392,71 @@ class RuyiMouse:
         actions = await actions.click()
         await actions.perform()
 
+    async def move(self, x, y, steps=1):
+        duration = max(8, min(250, int(steps or 1) * 12))
+        actions = await self.page._ruyi.actions.move_to(
+            (int(x), int(y)), duration=duration
+        )
+        await actions.perform()
+
+    @staticmethod
+    def _button(button):
+        return {"left": 0, "middle": 1, "right": 2}.get(str(button).lower(), 0)
+
+    async def down(self, button="left"):
+        actions = await self.page._ruyi.actions.hold(button=self._button(button))
+        await actions.perform()
+
+    async def up(self, button="left"):
+        actions = await self.page._ruyi.actions.release(button=self._button(button))
+        await actions.perform()
+
+
+class RuyiFrameAdapter:
+    """Playwright-like frame view backed by a RuyiPage frame context."""
+
+    def __init__(self, raw_frame, *, url="", offset=None):
+        self._ruyi = raw_frame
+        self._url = str(url or "about:blank")
+        self._frame_offset = dict(offset or {"x": 0, "y": 0})
+
+    @property
+    def url(self):
+        return self._url
+
+    def locator(self, selector, *, has_text=None, has_not_text=None):
+        return RuyiLocator(
+            self, selector, has_text=has_text, has_not_text=has_not_text
+        )
+
+    async def evaluate(self, script, arg=None):
+        stripped = str(script).lstrip()
+        callable_script = stripped.startswith(("(", "function", "async"))
+        if arg is None:
+            return await self._ruyi.run_js(
+                script, as_expr=False if callable_script else None
+            )
+        return await self._ruyi.run_js(script, arg, as_expr=False)
+
+    async def _refresh_url(self):
+        try:
+            self._url = str(await self._ruyi.get_url() or self._url)
+        except Exception:
+            pass
+        return self._url
+
+
+class RuyiLocatorScope:
+    """Keep scoped element/frame queries from swapping the live page backend."""
+
+    def __init__(self, raw_scope, root_page, *, offset=None):
+        self._ruyi = raw_scope
+        self._root_page = root_page
+        self._frame_offset = dict(offset or {})
+
+    async def _refresh_url(self):
+        return await self._root_page._refresh_url()
+
 
 class RuyiFrameLocator:
     def __init__(self, page, selector):
@@ -313,24 +476,51 @@ class RuyiFrameElementLocator(RuyiLocator):
         super().__init__(page, selector, **kwargs)
         self.frame_selector = frame_selector
 
+    def _copy(self, **updates):
+        values = {
+            "page": self.page,
+            "frame_selector": self.frame_selector,
+            "selector": self.selector,
+            "index": self.index,
+            "exact": self.exact,
+        }
+        values.update(updates)
+        item = type(self)(**values)
+        item.has_text = list(updates.get("has_text", self.has_text))
+        item.has_not_text = list(updates.get("has_not_text", self.has_not_text))
+        return item
+
     async def _resolve(self, timeout=0.25):
         try:
             frame = await self.page._ruyi.get_frame(
-                locator="css:" + self.frame_selector, index=1
+                locator="css:" + self.frame_selector
             )
         except Exception:
             return []
         if not frame:
             return []
-        original = self.page._ruyi
-        self.page._ruyi = frame
+        offset = {}
         try:
-            return await super()._resolve(timeout=timeout)
-        finally:
-            self.page._ruyi = original
+            box = await self.page.locator(self.frame_selector).first.bounding_box()
+            if box:
+                offset = {"x": box["x"], "y": box["y"]}
+        except Exception:
+            pass
+        scope = RuyiLocatorScope(frame, self.page, offset=offset)
+        locator = RuyiLocator(
+            scope,
+            self.selector,
+            index=self.index,
+            exact=self.exact,
+        )
+        locator.has_text = list(self.has_text)
+        locator.has_not_text = list(self.has_not_text)
+        return await locator._resolve(timeout=timeout)
 
 
 class RuyiContext:
+    _reg_factory_route_support = False
+
     def __init__(self, root):
         self.root = root
         self.pages = []
@@ -401,6 +591,8 @@ class RuyiPageAdapter:
         self._closed = False
         self._navigating = False
         self._url = "about:blank"
+        self._frames = []
+        self._next_frame_refresh = 0.0
         self.context = context or RuyiContext(self)
         if self not in self.context.pages:
             self.context.pages.append(self)
@@ -412,6 +604,14 @@ class RuyiPageAdapter:
     def url(self):
         return self._url
 
+    @property
+    def main_frame(self):
+        return self
+
+    @property
+    def frames(self):
+        return [self, *self._frames]
+
     async def _refresh_url(self):
         try:
             self._url = str(await self._ruyi.get_url() or self._url)
@@ -419,10 +619,99 @@ class RuyiPageAdapter:
             pass
         return self._url
 
+    async def _refresh_frames(self, *, force=False):
+        now = time.monotonic()
+        if not force and now < self._next_frame_refresh:
+            return self._frames
+        self._next_frame_refresh = now + 0.75
+        try:
+            raw_frames = list(await self._ruyi.get_frames() or [])
+        except Exception:
+            return self._frames
+
+        viewport = {"width": 0.0, "height": 0.0}
+        try:
+            value = await self._ruyi.run_js(
+                "() => ({width: window.innerWidth, height: window.innerHeight})",
+                as_expr=False,
+            )
+            if isinstance(value, dict):
+                viewport = {
+                    "width": float(value.get("width") or 0),
+                    "height": float(value.get("height") or 0),
+                }
+        except Exception:
+            pass
+
+        frame_elements = []
+        try:
+            elements = await self._ruyi.eles("css:iframe,frame", timeout=0.1)
+            for element in elements:
+                location = await element.get_location()
+                size = await element.get_size()
+                src = str(await element.attr("src") or "")
+                x = float(location.get("x", 0))
+                y = float(location.get("y", 0))
+                width = float(size.get("width", 0))
+                height = float(size.get("height", 0))
+                visible = (
+                    width > 0
+                    and height > 0
+                    and viewport["width"] > 0
+                    and viewport["height"] > 0
+                    and 0 <= x + width / 2 < viewport["width"]
+                    and 0 <= y + height / 2 < viewport["height"]
+                )
+                frame_elements.append({
+                    "src": src, "x": x, "y": y, "visible": visible,
+                })
+        except Exception:
+            frame_elements = []
+
+        frames = []
+        used_elements = set()
+        for raw_frame in raw_frames:
+            frame = RuyiFrameAdapter(raw_frame)
+            await frame._refresh_url()
+            frame_host = urllib.parse.urlsplit(frame.url).hostname or ""
+            candidates = []
+            for element_index, element in enumerate(frame_elements):
+                if element_index in used_elements:
+                    continue
+                element_host = urllib.parse.urlsplit(element["src"]).hostname or ""
+                url_match = bool(
+                    frame.url
+                    and element["src"]
+                    and (
+                        frame.url == element["src"]
+                        or frame.url.startswith(element["src"])
+                        or element["src"].startswith(frame.url)
+                    )
+                )
+                host_match = bool(
+                    frame_host and element_host and frame_host == element_host
+                )
+                score = (20 if element["visible"] else 0)
+                score += 200 if url_match else 100 if host_match else 0
+                candidates.append((score, element_index, element))
+            if candidates:
+                score, element_index, element = max(
+                    candidates, key=lambda item: item[0]
+                )
+                if score >= 100 or len(candidates) == 1:
+                    frame._frame_offset = {
+                        "x": element["x"], "y": element["y"],
+                    }
+                    used_elements.add(element_index)
+            frames.append(frame)
+        self._frames = frames
+        return frames
+
     async def _watch_url(self):
         while not self._closed:
             if not self._navigating:
                 await self._refresh_url()
+                await self._refresh_frames()
             await asyncio.sleep(0.25)
 
     async def _stop_watcher(self):
@@ -486,6 +775,30 @@ class RuyiPageAdapter:
             self._navigating = False
             await self._refresh_url()
 
+    async def reload(self, timeout=30000, wait_until=None):
+        wait = "interactive" if wait_until == "domcontentloaded" else "complete"
+        seconds = max(0.001, timeout / 1000)
+        self._navigating = True
+        try:
+            reload_page = getattr(getattr(self._ruyi, "contexts", None), "reload", None)
+            if reload_page:
+                await asyncio.wait_for(reload_page(wait=wait), timeout=seconds)
+            else:
+                await self.goto(self.url, timeout=timeout, wait_until=wait_until)
+        finally:
+            self._navigating = False
+            await self._refresh_url()
+
+    async def go_back(self, timeout=30000, wait_until=None):
+        del wait_until
+        seconds = max(0.001, timeout / 1000)
+        self._navigating = True
+        try:
+            await asyncio.wait_for(self._ruyi.back(), timeout=seconds)
+        finally:
+            self._navigating = False
+            await self._refresh_url()
+
     async def evaluate(self, script, arg=None):
         stripped = str(script).lstrip()
         callable_script = stripped.startswith(("(", "function", "async"))
@@ -501,10 +814,14 @@ class RuyiPageAdapter:
     async def inner_text(self, selector):
         return await self.locator(selector).inner_text()
 
-    async def screenshot(self, path, full_page=False):
+    async def screenshot(self, path, full_page=False, timeout=30000, **kwargs):
+        del kwargs
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        return await self._ruyi.screenshot(path=str(target), full_page=full_page)
+        capture = self._ruyi.screenshot(path=str(target), full_page=full_page)
+        if timeout is None or timeout <= 0:
+            return await capture
+        return await asyncio.wait_for(capture, timeout=float(timeout) / 1000)
 
     async def bring_to_front(self):
         activate = getattr(self._ruyi, "activate", None)
@@ -550,6 +867,10 @@ class RuyiPageBrowser:
         return profile_id
 
     async def open_browser_async(self, profile_id):
+        existing = self.sessions.get(str(profile_id))
+        if existing:
+            _raw_page, page = existing
+            return RuyiBrowserFacade(page.context), page.context, page
         try:
             from ruyipage.aio import launch
         except ImportError as exc:

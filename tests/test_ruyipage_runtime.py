@@ -1,5 +1,7 @@
 import asyncio
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -139,6 +141,26 @@ class RuyiPageRuntimeTests(unittest.TestCase):
 
         ensure.assert_not_called()
         output.assert_called_once_with(f"[ruyipage] already installed: {path}")
+
+    def test_manual_installer_runs_outside_project_directory(self):
+        script = Path(__file__).resolve().parents[1] / "tools" / "install_ruyipage.py"
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "firefox.exe"
+            executable.write_bytes(b"fixture")
+            env = dict(os.environ)
+            env["RUYIPAGE_BROWSER_PATH"] = str(executable)
+            completed = subprocess.run(
+                [sys.executable, str(script)],
+                cwd=directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("[ruyipage] already installed:", completed.stdout)
 
 
 if __name__ == "__main__":

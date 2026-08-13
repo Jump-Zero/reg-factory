@@ -24,7 +24,12 @@ class ChatGPTPlusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             data_root = Path(temp)
             token_root = data_root / "tokens"
-            session = {"accessToken": "fixture-secret-access-token", "user": {"email": "one@example.com"}}
+            session = {
+                "accessToken": "fixture-secret-access-token",
+                "user": {"email": "one@example.com"},
+                "registration_country": "JP",
+                "network_node": "Japan 01",
+            }
             with patch.object(session_export, "TOKEN_OUTPUT_DIR", str(token_root)), patch.object(
                 chatgpt_plus, "chatgpt_session_path", session_export.chatgpt_session_path
             ), patch.dict(os.environ, {"REG_FACTORY_DATA_DIR": str(data_root)}, clear=False):
@@ -36,6 +41,11 @@ class ChatGPTPlusTests(unittest.TestCase):
             self.assertEqual(payload["max_concurrency"], 27)
             self.assertNotIn("fixture-secret-access-token", json.dumps(payload))
             self.assertTrue(Path(payload["items"][0]["session_path"]).is_file())
+            saved_session = json.loads(
+                Path(payload["items"][0]["session_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved_session["registration_country"], "JP")
+            self.assertEqual(saved_session["network_node"], "Japan 01")
 
     def test_codex_oauth_credentials_persist_phone_status(self):
         with tempfile.TemporaryDirectory() as temp:

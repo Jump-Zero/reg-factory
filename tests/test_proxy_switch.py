@@ -33,6 +33,30 @@ class ProxySwitchTests(unittest.TestCase):
             ]):
                 self.assertEqual(proxy_switch.concrete_nodes(), ["level4-japan01"])
 
+    def test_outlook_rotation_filters_subscription_nodes_and_prefers_region(self):
+        with patch.dict(
+            outlook_reg_loop.os.environ,
+            {"NODE_REGION_KEYWORDS": r"美国"},
+            clear=True,
+        ):
+            self.assertEqual(
+                outlook_reg_loop._filter_outlook_nodes_by_region(
+                    ["有问题重新从网站获取订阅", "🇭🇰 香港 | 01", "🇯🇵 日本 | 01", "🇺🇸 美国 | 01"]
+                ),
+                ["🇺🇸 美国 | 01"],
+            )
+        with patch.dict(
+            outlook_reg_loop.os.environ,
+            {"OUTLOOK_NODE_REGION_KEYWORDS": ""},
+            clear=True,
+        ):
+            self.assertEqual(
+                outlook_reg_loop._filter_outlook_nodes_by_region(
+                    ["🇭🇰 香港 | 01", "🇯🇵 日本 | 01"]
+                ),
+                ["🇯🇵 日本 | 01"],
+            )
+
     def test_proxy_mode_keeps_legacy_residential_configuration(self):
         with patch.dict(os.environ, {"REG_FACTORY_PROXY": "http://proxy.test:8080"}, clear=True):
             self.assertEqual(proxy_switch.proxy_mode(), "residential")

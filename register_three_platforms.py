@@ -55,6 +55,7 @@ def build_command(platform, args, account):
             "--email", email,
             "--password", password or "",
             "--node", args.node,
+            "--country", getattr(args, "chatgpt_country", "auto"),
         ]
         if token:
             cmd += ["--refresh-token", token]
@@ -233,6 +234,10 @@ async def main():
     parser.add_argument("--parallel", action="store_true", help="run platforms in parallel; default is sequential")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--node", default="auto", help="Claude/ChatGPT/Grok Clash node")
+    parser.add_argument(
+        "--chatgpt-country", default="auto",
+        help="ChatGPT 注册出口国家：auto 或两位 ISO 国家码",
+    )
     parser.add_argument("--keep-on-fail", action="store_true")
     parser.add_argument("--import-c2a", action="store_true",
                         help="chatgpt 注册成功后即时把 token 导入 chatgpt2api（透传给 register_chatgpt.py）")

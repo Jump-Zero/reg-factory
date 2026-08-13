@@ -58,6 +58,7 @@ record_cmd.py
 stop_recording.py
 recordings/
 *.log
+*.lock
 claude_node_usage.txt
 
 # 本地调试/运行期门控脚本与代理清单（不进库）

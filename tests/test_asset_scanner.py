@@ -20,6 +20,9 @@ class AssetScannerTests(unittest.TestCase):
                 "REG_FACTORY_DATA_DIR": str(self.root),
                 "REG_FACTORY_ENV_FILE": str(self.root / ".env"),
                 "TOKEN_OUTPUT_DIR": "tokens",
+                "ASSET_SCAN_CACHE_SECONDS": "0",
+                "ASSET_SCAN_MIN_INTERVAL": "0",
+                "ASSET_SCAN_MAX_INTERVAL": "0",
             },
         )
         self.env.start()
@@ -110,7 +113,7 @@ class AssetScannerTests(unittest.TestCase):
                         "status": "expired", "detail": "new", "evidence": "test"
                     }
                 }, clear=True):
-                    report = asset_scanner.scan_pool(platforms=["chatgpt"])
+                    report = asset_scanner.scan_pool(platforms=["chatgpt"], force=True)
 
         by_platform = {item["platform"]: item["status"] for item in report["items"]}
         self.assertEqual(by_platform["chatgpt"], "expired")
@@ -130,6 +133,23 @@ class AssetScannerTests(unittest.TestCase):
         self.assertEqual(report["items"][0]["status"], "unlock")
         self.assertIn("手机验证", report["items"][0]["detail"])
 
+    def test_outlook_scan_reports_cross_platform_registration_usage(self):
+        (self.root / "emails.txt").write_text(
+            "used@outlook.com----pw1\nclean@outlook.com----pw2\n",
+            encoding="utf-8",
+        )
+        (self.root / "emails_used_chatgpt.txt").write_text(
+            "used@outlook.com----pw1----ok\n",
+            encoding="utf-8",
+        )
+
+        report = asset_scanner.get_report()
+        by_email = {item["email"]: item for item in report["items"]}
+
+        self.assertFalse(by_email["used@outlook.com"]["pristine"])
+        self.assertEqual(by_email["used@outlook.com"]["registered_platforms"], ["chatgpt"])
+        self.assertTrue(by_email["clean@outlook.com"]["pristine"])
+
     def test_failed_preflight_short_circuits_platform_accounts(self):
         self._write_assets()
         failure = {"status": "error", "detail": "route timeout", "evidence": "preflight:timeout"}
@@ -142,6 +162,41 @@ class AssetScannerTests(unittest.TestCase):
         chatgpt = next(item for item in report["items"] if item["platform"] == "chatgpt")
         self.assertEqual(chatgpt["status"], "error")
         self.assertEqual(chatgpt["evidence"], "preflight:timeout")
+
+    def test_recent_scan_result_is_reused_without_live_request(self):
+        self._write_assets()
+        scanner = MagicMock(return_value={
+            "status": "normal", "detail": "mail ok", "evidence": "test:200",
+        })
+        with patch.dict(os.environ, {"ASSET_SCAN_CACHE_SECONDS": "21600"}):
+            with patch.object(asset_scanner, "_platform_preflight", return_value=None):
+                with patch.dict(asset_scanner._SCANNERS, {"outlook": scanner}, clear=True):
+                    first = asset_scanner.scan_pool(platforms=["outlook"], force=True)
+                    scanner.reset_mock()
+                    second = asset_scanner.scan_pool(platforms=["outlook"])
+
+        scanner.assert_not_called()
+        self.assertEqual(second["summary"]["statuses"]["normal"], 1)
+        self.assertEqual(second["items"][0]["checked_at"], first["items"][0]["checked_at"])
+
+    def test_rate_limit_pauses_remaining_platform_records(self):
+        records = [
+            {"id": f"mail-{index}", "platform": "outlook", "email": f"mail{index}@example.com"}
+            for index in range(3)
+        ]
+        limited = {
+            **records[0],
+            "status": "restricted",
+            "detail": "rate limited",
+            "evidence": "microsoft_graph:429",
+            "checked_at": "2026-08-11T00:00:00Z",
+        }
+        with patch.object(asset_scanner, "_scan_record", return_value=limited) as scan_record:
+            results = asset_scanner._scan_platform_safely("outlook", records, 15, 0, 0)
+
+        scan_record.assert_called_once_with(records[0], 15)
+        self.assertEqual([item["status"] for item in results], ["restricted", "unknown", "unknown"])
+        self.assertIn("circuit_breaker:rate_limited", results[1]["evidence"])
 
     def test_plain_403_is_restricted_not_banned(self):
         response = SimpleNamespace(status_code=403, text="Cloudflare challenge")
@@ -176,6 +231,55 @@ class AssetScannerTests(unittest.TestCase):
         self.assertIn("免费试用", result["plus_trial_detail"])
         self.assertEqual(session.get.call_args.kwargs["params"]["coupon"], "plus-1-month-free")
 
+    def test_chatgpt_explicit_zero_price_offer_is_labeled(self):
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "state": "available",
+            "offer": {"checkout": {"amount_due": 0, "currency": "USD"}},
+        }
+        session = MagicMock()
+        session.get.return_value = response
+        session.__enter__.return_value = session
+        session.__exit__.return_value = False
+        record = {"email": "zero@example.com", "_token": {"planType": "free"}}
+
+        with patch.object(asset_scanner, "_web_session", return_value=session):
+            result = asset_scanner._scan_chatgpt_plus_trial(
+                record, "access-token", 10
+            )
+
+        self.assertEqual(result["plus_trial"], "zero_price")
+        self.assertIn("0 元", result["plus_trial_detail"])
+        self.assertIn("offer.checkout.amount_due", result["plus_trial_evidence"])
+
+    def test_zero_discount_does_not_count_as_zero_price_offer(self):
+        payload = {
+            "state": "available",
+            "discount": {"total": 0},
+            "discount_amount": 0,
+        }
+
+        self.assertEqual(asset_scanner._zero_price_offer(payload), "")
+
+    def test_chatgpt_inventory_exposes_registration_country_and_network(self):
+        token_root = self.root / "tokens" / "chatgpt"
+        token_root.mkdir(parents=True)
+        (token_root / "country.session.json").write_text(
+            json.dumps({
+                "accessToken": "asset-token",
+                "user": {"email": "country@example.com"},
+                "registration_country": "jp",
+                "network_node": "Japan 01",
+            }),
+            encoding="utf-8",
+        )
+
+        report = asset_scanner.get_report()
+        item = next(entry for entry in report["items"] if entry["email"] == "country@example.com")
+
+        self.assertEqual(item["registration_country"], "JP")
+        self.assertEqual(item["network_node"], "Japan 01")
+
     def test_chatgpt_existing_paid_plan_skips_trial_request(self):
         record = {"email": "plus@example.com", "_token": {"account": {"planType": "plus"}}}
         with patch.object(asset_scanner, "_web_session") as session:
@@ -183,6 +287,45 @@ class AssetScannerTests(unittest.TestCase):
 
         self.assertEqual(result["plus_trial"], "active")
         session.assert_not_called()
+
+    def test_targeted_chatgpt_plus_check_updates_public_cache_without_token(self):
+        token_root = self.root / "tokens" / "chatgpt"
+        token_root.mkdir(parents=True)
+        session = {
+            "accessToken": "secret-access-token",
+            "user": {"email": "new-trial@example.com"},
+            "account": {"planType": "free"},
+            "registration_country": "SG",
+            "network_node": "Singapore 01",
+        }
+        (token_root / "new-trial@example.com.session.json").write_text(
+            json.dumps(session), encoding="utf-8"
+        )
+        with patch.object(
+            asset_scanner,
+            "_scan_chatgpt_plus_trial",
+            return_value={
+                "plus_trial": "eligible",
+                "plus_trial_detail": "命中 Plus 免费试用资格",
+                "plus_trial_evidence": "promo_campaign:200:eligible",
+            },
+        ) as check:
+            result = asset_scanner.check_chatgpt_plus_trial_for_session(
+                session, "new-trial@example.com", timeout=15
+            )
+
+        self.assertEqual(result["plus_trial"], "eligible")
+        check.assert_called_once()
+        report = asset_scanner.get_report()
+        item = next(
+            entry for entry in report["items"] if entry["email"] == "new-trial@example.com"
+        )
+        self.assertEqual(item["plus_trial"], "eligible")
+        self.assertEqual(item["registration_country"], "SG")
+        cache_text = (self.root / "runtime" / "state" / "asset_pool_scan.json").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("secret-access-token", cache_text)
 
     def test_outlook_service_abuse_is_reported_as_banned(self):
         response = MagicMock(status_code=400)

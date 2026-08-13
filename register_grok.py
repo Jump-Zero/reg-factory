@@ -36,6 +36,7 @@ from common.mailbox import get_code_by_token, get_code_outlook_pw, prelogin_outl
 from common.cookies import save_platform_cookies
 from common import emails as email_pool
 from common import proxy_switch
+from common.traffic_saver import install as install_traffic_saver
 
 # 打码平台 key（解 Cloudflare Turnstile）。config 顶部会加载 .env，真实环境变量优先。
 try:
@@ -223,16 +224,9 @@ async def inject_grok_stealth(context, page):
 
 def grok_browser_fingerprint():
     """Use the installed modern BitBrowser core and its native fingerprint."""
-    return {
-        "ostype": "PC",
-        "os": "Win32",
-        "coreVersion": GROK_BROWSER_CORE_VERSION,
-        "isIpCreateTimeZone": True,
-        "isIpCreateLanguage": True,
-        "isIpCreateDisplayLanguage": True,
-        "isIpCreatePosition": True,
-        "isIpCountry": True,
-    }
+    from common.fingerprint import browser_fingerprint
+
+    return browser_fingerprint("grok", GROK_BROWSER_CORE_VERSION)
 
 
 async def arm_turnstile_hook(context, page):
@@ -1076,6 +1070,7 @@ async def register_one(index, total, p, node):
         browser = await p.chromium.connect_over_cdp(data["ws"])
         ctx = browser.contexts[0]
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        await install_traffic_saver(ctx)
         print(f"  BitBrowser native fingerprint (core={GROK_BROWSER_CORE_VERSION})")
         email_rpc_statuses = []
 
@@ -1528,7 +1523,7 @@ async def main():
     # 选节点过 grok CF：--node 指定则用它，否则自动探测能过的节点
     try:
         if args.node and args.node.lower() != "auto":
-            proxy_switch.set_node(args.node)
+            proxy_switch.pin_fixed_node(args.node, "grok")
             time.sleep(2)
             print(f"  使用指定节点 -> {proxy_switch.current_node()}")
         else:
@@ -1546,20 +1541,32 @@ async def main():
         print(f"  切节点失败(确认 Clash 在跑): {e}")
         return False
 
-    sem = asyncio.Semaphore(args.concurrency)
+    from common.concurrency import build_worker_plan
+    from common.task_context import activate_worker
+
+    worker_plan = build_worker_plan("grok", args.count, args.concurrency)
+    worker_plan.log()
+    slot_locks = [asyncio.Lock() for _ in range(worker_plan.effective_concurrency)]
     results = []
 
     async def run_one(i):
-        async with sem:
-            if i > 1:
-                await asyncio.sleep(random.uniform(3, 8) * (i - 1))
-            async with async_playwright() as p:
-                try:
-                    sk = await register_one(i, args.count, p, args.node)
-                    results.append(sk)
-                except Exception as e:
-                    print(f"  #{i} fatal: {e}")
-                    results.append(None)
+        stagger_slot = (i - 1) % worker_plan.effective_concurrency
+        if stagger_slot:
+            await asyncio.sleep(random.uniform(2.0, 4.0) * stagger_slot)
+        worker_context = worker_plan.worker(i)
+        async with slot_locks[worker_context.slot - 1]:
+            with activate_worker(worker_context) as worker:
+                print(
+                    f"  [worker] {worker.worker_id} slot={worker.slot} "
+                    f"proxy={proxy_switch.current_node()}"
+                )
+                async with async_playwright() as p:
+                    try:
+                        sk = await register_one(i, args.count, p, args.node)
+                        results.append(sk)
+                    except Exception as e:
+                        print(f"  #{i} fatal: {e}")
+                        results.append(None)
 
     await asyncio.gather(*[run_one(i) for i in range(1, args.count + 1)])
 

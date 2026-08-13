@@ -223,12 +223,14 @@ def _advance_recovery_email(session, response, recovery, tag):
     return None, "no-field"
 
 
-def get_graph_token(email, password, idx=0):
+def get_graph_token(email, password, idx=0, proxy=""):
     """Get refresh_token via pure HTTP OAuth flow (no browser)."""
     tag = f"[#{idx}]"
     recovery = {}
     session = requests.Session()
-    session.trust_env = True  # Use system proxy (Clash) — avoids rate-limiting on account.live.com
+    session.trust_env = not bool(proxy)
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
         "Accept-Language": f"{MICROSOFT_UI_LOCALE},en;q=0.8",

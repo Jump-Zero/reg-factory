@@ -24,6 +24,9 @@ import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bitbrowser import BitBrowser
 from bitbrowser import selected_browser_provider
+from common.fingerprint import browser_fingerprint
+from common.task_context import active_worker
+from common.traffic_saver import install as install_traffic_saver
 
 # 与 register.py 完全一致的反检测脚本
 STEALTH_JS = r"""
@@ -124,23 +127,65 @@ STEALTH_JS = r"""
     }
 """
 
+# Keep the page supplement narrow.  The profile provider owns plugins,
+# language, hardware, canvas and WebGL; overriding those values in JavaScript
+# made every concurrent worker look identical and could contradict its proxy.
+NATIVE_STEALTH_JS = r"""
+(() => {
+  try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); } catch (e) {}
+  try { delete navigator.__proto__.webdriver; } catch (e) {}
+  if (!window.chrome) {
+    window.chrome = {runtime: {}, loadTimes() {}, csi() {}, app: {}};
+  }
+  for (const prop of Object.getOwnPropertyNames(window)) {
+    if (/^cdc_|^__cdc|^_cdp|^__cdp|^chrome_devtools/i.test(prop)) {
+      try { delete window[prop]; } catch (e) {}
+    }
+  }
+  try {
+    if (window.outerWidth === 0) {
+      Object.defineProperty(window, 'outerWidth', {get: () => innerWidth + 16});
+    }
+    if (window.outerHeight === 0) {
+      Object.defineProperty(window, 'outerHeight', {get: () => innerHeight + 88});
+    }
+  } catch (e) {}
+})();
+"""
+
 
 async def inject_stealth(context, page):
-    """注入反检测脚本（CDP + init_script 双保险）"""
+    """Hide automation markers without replacing the native fingerprint."""
     try:
         cdp = await context.new_cdp_session(page)
-        await cdp.send("Page.addScriptToEvaluateOnNewDocument", {"source": STEALTH_JS})
+        await cdp.send("Page.addScriptToEvaluateOnNewDocument", {"source": NATIVE_STEALTH_JS})
     except Exception as e:
         print(f"  stealth CDP inject failed: {e}")
     try:
-        await page.evaluate(f"() => {{{STEALTH_JS}}}")
+        await page.evaluate(NATIVE_STEALTH_JS)
     except Exception:
         pass
     try:
-        await context.add_init_script(f"() => {{{STEALTH_JS}}}")
+        await context.add_init_script(NATIVE_STEALTH_JS)
     except Exception:
         pass
-    print("  stealth injected")
+    print("  native fingerprint preserved; automation markers hidden")
+
+
+def _prepare_browser_options(browser_options=None):
+    options = dict(browser_options or {})
+    worker = active_worker()
+    platform = worker.platform if worker else "browser"
+    native = browser_fingerprint(platform)
+    configured = dict(options.get("browserFingerPrint") or {})
+    native.update(configured)
+    options["browserFingerPrint"] = native
+    if worker:
+        options.setdefault(
+            "remark",
+            f"reg-factory {platform} worker={worker.index} slot={worker.slot}",
+        )
+    return options
 
 
 def create_browser_with_retry(bb, name, retries=3, **browser_options):
@@ -166,6 +211,7 @@ async def open_and_connect(name, p=None, browser_options=None):
     """创建并打开 BitBrowser 窗口，连接 Playwright 并注入 stealth。
     返回 (bb, profile_id, browser, context, page)。
     注意：调用方需自行管理 async_playwright 生命周期，或传入 p。"""
+    browser_options = _prepare_browser_options(browser_options)
     if selected_browser_provider() in {"ruyipage", "ruyi", "firefox_bidi"}:
         from common.ruyipage_browser import RuyiPageBrowser
 
@@ -178,6 +224,7 @@ async def open_and_connect(name, p=None, browser_options=None):
             await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
         except Exception as e:
             print(f"  set Accept-Language failed: {e}")
+        await install_traffic_saver(context)
         print("  RuyiPage Firefox connected (WebDriver BiDi)")
         return bb, pid, browser, context, page
 
@@ -213,6 +260,7 @@ async def open_and_connect(name, p=None, browser_options=None):
         await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
     except Exception as e:
         print(f"  set Accept-Language failed: {e}")
+    await install_traffic_saver(context)
     await inject_stealth(context, page)
     return bb, pid, browser, context, page
 

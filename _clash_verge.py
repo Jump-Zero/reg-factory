@@ -66,14 +66,16 @@ SPECIAL_NAMES = {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "GLOBA
 FAKE_NODE_HINTS = (
     "剩余流量", "剩余", "到期", "重置", "距离", "套餐", "官网", "客服",
     "更新", "公告", "网址", "通知", "Expire", "Traffic", "Reset",
-    "expire", "traffic", "reset", "流量",
+    "expire", "traffic", "reset", "流量", "网站", "订阅", "返佣", "邀请",
+    "有问题", "获取订阅", "机场",
 )
 
 
 def is_fake_node(name: str) -> bool:
     """Heuristic: true for subscription-info pseudo-nodes that aren't real proxies."""
-    if not name:
+    if not str(name or "").strip():
         return True
+    name = str(name)
     for h in FAKE_NODE_HINTS:
         if h in name:
             return True

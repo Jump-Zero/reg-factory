@@ -216,11 +216,11 @@
           <div class="asset-section-head asset-pool-head">
             <div>
               <h3 id="asset-pool-title">号池状态</h3>
-              <p>按需扫描邮箱与平台登录凭据；扫描结果仅供人工参考，不阻塞资产领取。</p>
+              <p>同平台账号低频串行扫描，近期结果自动复用；遇到限流或连续风控响应会暂停该平台。</p>
             </div>
             <div class="asset-scan-actions">
-              <label class="asset-scan-concurrency"><span>并发</span>
-                <select id="asset-scan-concurrency"><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select>
+              <label class="asset-scan-concurrency"><span>平台并行</span>
+                <select id="asset-scan-concurrency"><option value="1" selected>1（最稳）</option><option value="2">2</option></select>
               </label>
               <button id="btn-scan-current" class="btn-secondary" type="button">扫描当前类型</button>
               <button id="btn-scan-all" class="btn-run" type="button">一键扫描全部</button>
@@ -294,7 +294,7 @@
             <table class="asset-scan-table">
               <thead><tr>
                 <th class="col-check"><input type="checkbox" id="asset-scan-check-all"></th>
-                <th class="col-type">类型</th><th class="col-account">账号</th><th class="col-cat">分类</th><th class="col-status">状态</th><th class="col-trial">Plus 试用</th><th class="col-reg">已注册账号</th><th class="col-detail">检测结果</th><th class="col-sub">Sub2API</th><th class="col-checked">检测时间</th>
+                <th class="col-type">类型</th><th class="col-account">账号</th><th class="col-cat">分类</th><th class="col-network">国家 / 网络</th><th class="col-status">状态</th><th class="col-trial">Plus 试用</th><th class="col-reg">已注册账号</th><th class="col-detail">检测结果</th><th class="col-sub">Sub2API</th><th class="col-checked">检测时间</th>
               </tr></thead>
               <tbody id="asset-scan-rows"></tbody>
             </table>
@@ -342,6 +342,10 @@
             </div>
             <label class="asset-field"><span>Index</span><input id="asset-index" type="number" min="0" step="1" value="0" disabled></label>
           </div>
+          <label class="asset-normal-only">
+            <input id="asset-normal-only" type="checkbox">
+            <span>仅领取最近一次扫描为正常的邮箱</span>
+          </label>
 
           <div class="asset-request">
             <div class="asset-request-head"><span>请求地址</span><button id="btn-copy-url" class="btn-inline" type="button">复制地址</button></div>
@@ -416,6 +420,7 @@
             <label class="network-field"><span>换 IP 接口</span><input id="proxy-rotate-url" type="password" autocomplete="off" placeholder="https://provider.example/rotate"></label>
             <label class="network-field"><span>请求方法</span><select id="proxy-rotate-method"><option>GET</option><option>POST</option></select></label>
             <label class="network-field"><span>ChatGPT 拦截轮换上限</span><input id="proxy-chatgpt-retries" type="number" min="1" step="1" value="3"></label>
+            <label class="network-field"><span>住宅流量模式</span><select id="proxy-traffic-mode"><option value="balanced">平衡节流</option><option value="aggressive">激进节流</option><option value="off">关闭节流</option></select></label>
           </div>
         </div>
 
@@ -428,6 +433,14 @@
             <label class="network-field"><span>Grok</span><select id="proxy-mode-grok" data-platform-proxy><option value="inherit">继承全局</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">动态住宅 IP</option></select></label>
             <label class="network-field"><span>Kiro</span><select id="proxy-mode-kiro" data-platform-proxy><option value="inherit">继承全局</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">动态住宅 IP</option></select></label>
             <label class="network-field"><span>轮换/测试目标</span><select id="proxy-platform-target"><option value="">全局出口</option><option value="outlook">Outlook</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="grok">Grok</option><option value="kiro">Kiro</option></select></label>
+          </div>
+        </div>
+
+        <div class="network-fields">
+          <div class="network-section-title">并发控制</div>
+          <div class="network-grid">
+            <label class="network-field"><span>最大并发数</span><input id="proxy-max-concurrency" type="number" min="1" max="100" step="1" value="10"></label>
+            <label class="network-field network-check-field"><span>允许共享出口</span><input id="proxy-allow-shared-egress" type="checkbox"></label>
           </div>
         </div>
 

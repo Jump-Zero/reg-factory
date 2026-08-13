@@ -13,7 +13,7 @@
 - AdsPower：默认 API 为 `http://127.0.0.1:50325`，启用鉴权时还需 API Key。
 - 其他指纹浏览器：`FINGERPRINT_BROWSER=custom_api` 并设置 `CUSTOM_BROWSER_API`；当前要求兼容 BitBrowser 的 `/browser/update|open|close|delete|list` 协议。
 
-在 `.env` 中用 `FINGERPRINT_BROWSER=ruyipage|bundled|custom|bitbrowser|adspower|custom_api` 切换。Claude、Grok 和 Outlook 的旧流程仍直接依赖 Playwright Chromium CDP；选择 RuyiPage 时这些流程自动使用 bundled Chromium，ChatGPT 与 Codex OAuth 使用 RuyiPage Firefox。
+在 `.env` 中用 `FINGERPRINT_BROWSER=ruyipage|bundled|custom|bitbrowser|adspower|custom_api` 切换。Outlook 注册、Graph 授权和账号恢复与 ChatGPT、Codex OAuth 一样支持 RuyiPage Firefox；Claude 和 Grok 的旧流程仍直接依赖 Playwright Chromium CDP，选择 RuyiPage 时会自动使用 bundled Chromium。
 
 ### 网络出口
 
@@ -115,7 +115,7 @@ cp .env.example .env
 
 真实进程环境变量优先于 `.env`。WebUI 保存配置后，新任务立即使用新值，不需要重启主服务。
 
-本地邮箱/Cookie 读取接口默认只允许回环地址调用。需要由其他本机服务统一携带密钥时，设置 `REG_FACTORY_ASSET_API_KEY`，并使用 `X-API-Key` 或 Bearer Token。ChatGPT 健康扫描默认通过 `ASSET_SCAN_CHATGPT_PLUS_TRIAL=true` 标注 Plus 免费试用资格，活动标识由 `ASSET_SCAN_CHATGPT_PLUS_CAMPAIGN` 控制；完整接口见 [本地资产 API](api.md)。
+本地邮箱/Cookie 读取接口默认只允许回环地址调用。需要由其他本机服务统一携带密钥时，设置 `REG_FACTORY_ASSET_API_KEY`，并使用 `X-API-Key` 或 Bearer Token。ChatGPT 健康扫描默认通过 `ASSET_SCAN_CHATGPT_PLUS_TRIAL=true` 标注 Plus 免费试用或明确 0 元优惠，活动标识由 `ASSET_SCAN_CHATGPT_PLUS_CAMPAIGN` 控制；完整接口见 [本地资产 API](api.md)。
 
 ## 配置分组
 

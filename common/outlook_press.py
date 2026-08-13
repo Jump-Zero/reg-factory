@@ -14,8 +14,39 @@ import random
 from common import human_mouse
 
 
+async def _viewport_size(page):
+    try:
+        value = await page.evaluate(
+            "() => ({width: window.innerWidth, height: window.innerHeight})"
+        )
+        if isinstance(value, dict):
+            width = float(value.get("width") or 0)
+            height = float(value.get("height") or 0)
+            if width > 0 and height > 0:
+                return width, height
+    except Exception:
+        pass
+    return None
+
+
+def _box_in_viewport(box, viewport, *, min_width=0, min_height=0):
+    if (
+        not box
+        or box.get("width", 0) <= min_width
+        or box.get("height", 0) <= min_height
+    ):
+        return False
+    if not viewport:
+        return box.get("x", 0) >= 0 and box.get("y", 0) >= 0
+    width, height = viewport
+    center_x = float(box.get("x", 0)) + float(box.get("width", 0)) / 2
+    center_y = float(box.get("y", 0)) + float(box.get("height", 0)) / 2
+    return 0 <= center_x < width and 0 <= center_y < height
+
+
 async def captcha_visible(page):
     """Return whether an interactive Outlook hold challenge is still visible."""
+    viewport = await _viewport_size(page)
     try:
         for selector in (
             'button:has-text("Press and hold")',
@@ -28,7 +59,7 @@ async def captcha_visible(page):
             element = page.locator(selector).first
             if await element.count() > 0:
                 box = await element.bounding_box()
-                if box and box["width"] > 30:
+                if _box_in_viewport(box, viewport, min_width=30, min_height=8):
                     return True
 
         frames = page.locator(
@@ -38,7 +69,7 @@ async def captcha_visible(page):
         )
         for index in range(await frames.count()):
             box = await frames.nth(index).bounding_box()
-            if box and box["width"] > 50 and box["height"] > 30:
+            if _box_in_viewport(box, viewport, min_width=50, min_height=30):
                 return True
     except Exception:
         pass
@@ -47,6 +78,13 @@ async def captcha_visible(page):
 
 async def find_hold_target(page):
     """Use the target lookup proven by the Outlook registration flow."""
+    viewport = await _viewport_size(page)
+    refresh_frames = getattr(page, "_refresh_frames", None)
+    if refresh_frames:
+        try:
+            await refresh_frames(force=True)
+        except Exception:
+            pass
     for frame in page.frames:
         if frame == page.main_frame or "hsprotect.net" not in (frame.url or ""):
             continue
@@ -54,7 +92,7 @@ async def find_hold_target(page):
             button = frame.locator("#px-captcha").first
             if await button.count() > 0:
                 box = await button.bounding_box()
-                if box and box["width"] > 30 and box["height"] > 8:
+                if _box_in_viewport(box, viewport, min_width=30, min_height=8):
                     return box, True
         except Exception:
             pass
@@ -63,7 +101,7 @@ async def find_hold_target(page):
         frames = page.locator('iframe[src*="hsprotect.net"]')
         for index in range(await frames.count()):
             box = await frames.nth(index).bounding_box()
-            if box and box["width"] > 50 and box["height"] > 30:
+            if _box_in_viewport(box, viewport, min_width=50, min_height=30):
                 return box, False
     except Exception:
         pass
@@ -105,7 +143,11 @@ async def press_and_hold(page, *, label="", press_number=1):
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
         print(f"{label} human_press_and_hold err: {message}")
-        if "closed" in message.lower() or "targetclosed" in message.lower():
+        message_lower = message.lower()
+        if "out of bounds" in message_lower or "outside viewport" in message_lower:
+            print(f"{label} discarded off-screen captcha target; rescanning")
+            return None
+        if "closed" in message_lower or "targetclosed" in message_lower:
             print(f"{label} page/context 已关闭，跳过重按，交外层判定")
             held, passed = 0.0, False
         else:

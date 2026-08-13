@@ -194,6 +194,7 @@ def stage_platforms(args, env, email, password, token="", client_id=""):
         "--token", (token or "fresh"),
         "--platforms", *args.platforms,
         "--node", args.node,
+        "--chatgpt-country", args.chatgpt_country,
         "--timeout", str(args.platform_timeout),
         "--broker", args.broker,
     ]
@@ -273,6 +274,10 @@ def main():
     ap.add_argument("--platforms", nargs="+", choices=["claude", "chatgpt", "grok", "kiro"],
                     default=["claude"], help="默认只跑 claude（最稳）；grok 已知死结")
     ap.add_argument("--node", default="auto", help="claude/chatgpt/grok 走的 Clash 节点")
+    ap.add_argument(
+        "--chatgpt-country", default="auto",
+        help="ChatGPT 注册出口国家：auto 或两位 ISO 国家码",
+    )
     ap.add_argument("--platform-timeout", type=int, default=600)
     ap.add_argument("--broker", default="", help="共享取码服务URL；默认空=各脚本自行开 Outlook 取码")
     ap.add_argument("--keep-on-fail", action="store_true")

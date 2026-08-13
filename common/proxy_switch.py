@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 
 from common import direct_proxy
+from common.task_context import active_worker, task_environment
 
 try:
     import config  # noqa: F401
@@ -56,7 +57,7 @@ _PLATFORMS = ("outlook", "claude", "chatgpt", "grok", "kiro")
 
 
 def _env(environ=None):
-    return os.environ if environ is None else environ
+    return task_environment(os.environ) if environ is None else environ
 
 
 def _truthy(value) -> bool:
@@ -195,7 +196,10 @@ def available_clash_nodes(group=None, environ=None):
 
 
 def _filter_concrete_nodes(names, environ=None):
-    metadata = ("套餐", "剩余", "重置", "到期", "官网", "http://", "https://")
+    metadata = (
+        "套餐", "剩余", "重置", "到期", "官网", "网站", "订阅", "返佣",
+        "邀请", "有问题", "获取订阅", "http://", "https://",
+    )
     try:
         catalog = (_get("/proxies", environ).get("proxies") or {})
         group_types = {"Selector", "URLTest", "Fallback", "LoadBalance"}
@@ -307,6 +311,29 @@ def ensure_proxy_mode(environ=None):
     }
 
 
+def pin_fixed_node(name: str, platform: str = "", environ=None):
+    """Select a Clash node and keep it stable for a concurrent task run."""
+    target = _env(environ)
+    mode = proxy_mode(target)
+    if mode not in {"clash_auto", "clash_fixed"}:
+        return False
+    node = str(name or "").strip()
+    if not node:
+        raise ValueError("a Clash node is required")
+    set_node(node, force=True, environ=target)
+    normalized = str(platform or platform_name(target)).strip().lower()
+    if normalized:
+        if normalized not in _PLATFORMS:
+            raise ValueError(f"unsupported proxy platform: {normalized}")
+        target["REG_FACTORY_PLATFORM"] = normalized
+        target[f"{normalized.upper()}_PROXY_MODE"] = "clash_fixed"
+        target[f"{normalized.upper()}_CLASH_FIXED_NODE"] = node
+    else:
+        target["PROXY_MODE"] = "clash_fixed"
+        target["CLASH_FIXED_NODE"] = node
+    return True
+
+
 def _call_rotate_url(environ=None):
     env = _env(environ)
     url = str(
@@ -332,6 +359,19 @@ def rotate_proxy(group=None, environ=None):
         ensure_proxy_mode(environ)
         return {"ok": True, "mode": mode, "node": current_node(environ=environ), "changed": False}
     if mode == "residential":
+        worker = active_worker() if environ is None else None
+        if worker and worker.proxy_candidates:
+            before = worker.proxy_url
+            after, changed = worker.rotate_proxy()
+            return {
+                "ok": bool(after),
+                "mode": mode,
+                "node": direct_proxy.redact_proxy(after) or "residential",
+                "changed": changed,
+                "requires_new_session": changed,
+                "worker": worker.worker_id,
+                "previous": direct_proxy.redact_proxy(before),
+            }
         before = effective_proxy_url(environ)
         active = direct_proxy.rotate_proxy_pool(environ)
         response = _call_rotate_url(environ)
