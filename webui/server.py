@@ -1553,12 +1553,27 @@ async def api_mailpool_import(request: Request):
     data = await request.json()
     text = (data or {}).get("text") or ""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    existing = _existing_emails()
-    added, skipped, bad = 0, 0, 0
+    added, skipped, bad, updated = 0, 0, 0, 0
     bad_samples = []
-    seen = set(existing)
-    out_lines = []
     imported_emails = []
+
+    # 读取已有行，构建 email -> (行号, 解析字段列表) 映射
+    existing_lines = []
+    existing_map: dict[str, int] = {}
+    if os.path.isfile(EMAILS_FILE):
+        existing_lines = [
+            raw.rstrip("\n") for raw in open(EMAILS_FILE, encoding="utf-8")
+        ]
+        for idx, raw in enumerate(existing_lines):
+            stripped = raw.strip()
+            if stripped and not stripped.startswith("#"):
+                email_key = stripped.split("----")[0].strip().lower()
+                if email_key and email_key not in existing_map:
+                    existing_map[email_key] = idx
+
+    new_lines = []  # 追加的新行
+    file_dirty = False  # 是否需要重写文件
+
     for ln in lines:
         if not ln.strip():
             continue
@@ -1569,28 +1584,38 @@ async def api_mailpool_import(request: Request):
                 bad_samples.append(ln.strip()[:60])
             continue
         email = parsed[0].lower()
-        if email in seen:
-            skipped += 1
-            continue
-        seen.add(email)
-        out_lines.append("----".join(parsed))
-        imported_emails.append(email)
-        added += 1
-    if out_lines:
-        # 追加(确保前面有换行)
-        need_nl = os.path.isfile(EMAILS_FILE) and os.path.getsize(EMAILS_FILE) > 0
-        with open(EMAILS_FILE, "a", encoding="utf-8") as f:
-            if need_nl:
+        normalized = "----".join(parsed)
+
+        if email in existing_map:
+            idx = existing_map[email]
+            old_line = existing_lines[idx].strip()
+            if old_line == normalized:
+                skipped += 1
+            else:
+                existing_lines[idx] = normalized
+                file_dirty = True
+                updated += 1
+                imported_emails.append(email)
+        else:
+            existing_map[email] = len(existing_lines)
+            existing_lines.append(normalized)
+            new_lines.append(normalized)
+            imported_emails.append(email)
+            added += 1
+            file_dirty = True
+
+    if file_dirty:
+        with open(EMAILS_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(existing_lines))
+            if existing_lines:
                 f.write("\n")
-            f.write("\n".join(out_lines) + "\n")
-        # 标记为"自主导入"
         meta = _load_emails_meta()
         for em in imported_emails:
             meta[em] = {"source": "imported"}
         _save_emails_meta(meta)
     total = len(_existing_emails())
     return {"ok": True, "added": added, "skipped": skipped, "bad": bad,
-            "bad_samples": bad_samples, "total": total}
+            "updated": updated, "bad_samples": bad_samples, "total": total}
 
 
 @app.get("/api/mailpool/list")

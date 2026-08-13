@@ -416,6 +416,8 @@ const ASSET_SCAN_PLATFORM_LABELS = {
 const ASSET_PLUS_TRIAL_LABELS = {
   eligible:'可试用', ineligible:'暂无试用', active:'已有套餐', unknown:'资格未知', disabled:'检测关闭',
 };
+const PLATFORM_REG_NUM = { claude:1, chatgpt:2, grok:3, kiro:4 };
+const PLATFORM_REG_LABELS = { 1:'Claude', 2:'ChatGPT', 3:'Grok', 4:'Kiro' };
 const ASSET_SCAN_PAGE_SIZE = 25;
 
 function assetHeaders(json=false){
@@ -509,6 +511,13 @@ function appendAssetScanCell(row, text, className=''){
   return cell;
 }
 
+function toggleAssetScanColumns(platform){
+  const table = document.querySelector('.asset-scan-table');
+  if(!table) return;
+  const isOutlook = platform === 'outlook';
+  table.classList.toggle('outlook-view', isOutlook);
+}
+
 function filteredAssetScanItems(){
   if(!assetScanData) return [];
   const platform = $('#asset-scan-platform').value;
@@ -526,6 +535,8 @@ function filteredAssetScanItems(){
 
 function renderAssetScanTable(){
   const items = filteredAssetScanItems();
+  const platform = $('#asset-scan-platform').value;
+  toggleAssetScanColumns(platform);
   const pages = Math.max(1, Math.ceil(items.length / ASSET_SCAN_PAGE_SIZE));
   assetScanPage = Math.min(Math.max(1, assetScanPage), pages);
   const start = (assetScanPage - 1) * ASSET_SCAN_PAGE_SIZE;
@@ -567,9 +578,11 @@ function renderAssetScanTable(){
     checkCell.appendChild(cb);
     row.appendChild(checkCell);
     // 类型
-    appendAssetScanCell(row, ASSET_SCAN_PLATFORM_LABELS[item.platform] || item.platform, 'asset-scan-platform');
+    const typeCell = appendAssetScanCell(row, ASSET_SCAN_PLATFORM_LABELS[item.platform] || item.platform, 'asset-scan-platform');
+    typeCell.classList.add('col-type');
     // 账号
     const account = appendAssetScanCell(row, item.email || item.source, 'asset-scan-account');
+    account.classList.add('col-account');
     account.title = item.source || '';
     // 母/子邮箱标记
     if(item.platform === 'outlook'){
@@ -594,7 +607,7 @@ function renderAssetScanTable(){
     }
     // 分类
     const catCell = document.createElement('td');
-    catCell.className = 'col-source';
+    catCell.className = 'col-source col-cat';
     if(item.mail_source === 'imported'){
       const badge = document.createElement('span');
       badge.className = 'mail-source-badge imported';
@@ -611,12 +624,15 @@ function renderAssetScanTable(){
     row.appendChild(catCell);
     // 状态
     const statusCell = document.createElement('td');
+    statusCell.className = 'col-status';
     const badge = document.createElement('span');
     badge.className = `asset-status-badge ${item.status || 'unknown'}`;
     badge.textContent = ASSET_SCAN_STATUS_LABELS[item.status] || item.status || '未知';
     statusCell.appendChild(badge);
     row.appendChild(statusCell);
+    // Plus 试用 (outlook 视图隐藏)
     const trialCell = document.createElement('td');
+    trialCell.className = 'col-trial';
     if(item.platform === 'chatgpt'){
       const trial = document.createElement('span');
       trial.className = `asset-trial-badge ${item.plus_trial || 'unknown'}`;
@@ -627,11 +643,33 @@ function renderAssetScanTable(){
       trialCell.textContent = '--';
     }
     row.appendChild(trialCell);
+    // 已注册账号 (仅 outlook 视图显示)
+    const regCell = document.createElement('td');
+    regCell.className = 'col-reg';
+    const platforms = item.registered_platforms || [];
+    if(platforms.length){
+      const nums = platforms.map(p => PLATFORM_REG_NUM[p]).filter(n => n).sort((a,b)=>a-b);
+      const container = document.createElement('span');
+      container.className = 'reg-platforms';
+      nums.forEach(n => {
+        const tag = document.createElement('span');
+        tag.className = `reg-tag reg-${n}`;
+        tag.textContent = n;
+        tag.title = PLATFORM_REG_LABELS[n] || '';
+        container.appendChild(tag);
+      });
+      regCell.appendChild(container);
+    } else {
+      regCell.textContent = '—';
+    }
+    row.appendChild(regCell);
+    // 检测结果
     const detail = appendAssetScanCell(row, item.detail || '尚未扫描', 'asset-scan-detail');
+    detail.classList.add('col-detail');
     detail.title = `${item.evidence || 'none'} · ${item.source || ''}`;
-    // Sub2API 导入状态
+    // Sub2API 导入状态 (outlook 视图隐藏)
     const subCell = document.createElement('td');
-    subCell.className = 'asset-sub-cell';
+    subCell.className = 'asset-sub-cell col-sub';
     const subBadge = document.createElement('span');
     if(item.sub2api_uploaded){
       subBadge.className = 'asset-sub-badge imported';
@@ -645,7 +683,8 @@ function renderAssetScanTable(){
     subCell.appendChild(subBadge);
     row.appendChild(subCell);
     // 检测时间
-    appendAssetScanCell(row, formatAssetScanTime(item.checked_at), 'asset-scan-checked');
+    const checkedCell = appendAssetScanCell(row, formatAssetScanTime(item.checked_at), 'asset-scan-checked');
+    checkedCell.classList.add('col-checked');
     return row;
   }
 
@@ -2075,7 +2114,7 @@ $('#btn-import-mail').onclick = async ()=>{
     const r = await (await fetch('/api/mailpool',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({text})})).json();
     if(r.ok){
-      let m = `✓ 导入 ${r.added}，跳过重复 ${r.skipped}`;
+      let m = `✓ 导入 ${r.added}，覆盖更新 ${r.updated||0}，跳过重复 ${r.skipped}`;
       if(r.bad) m += `，格式错误 ${r.bad}`;
       m += `，池中共 ${r.total}`;
       msg.textContent = m;

@@ -424,17 +424,33 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .asset-scan-table .col-check{width:38px;text-align:center}
 .asset-scan-table .col-check input{cursor:pointer}
 .asset-scan-table .col-source{width:80px}
-.asset-scan-table th:nth-child(2),.asset-scan-table td:nth-child(2){width:7%}
-.asset-scan-table th:nth-child(3),.asset-scan-table td:nth-child(3){width:18%}
-.asset-scan-table th:nth-child(5),.asset-scan-table td:nth-child(5){width:8%}
-.asset-scan-table th:nth-child(6),.asset-scan-table td:nth-child(6){width:10%}
-.asset-scan-table th:nth-child(7),.asset-scan-table td:nth-child(7){width:20%}
-.asset-scan-table th:nth-child(8),.asset-scan-table td:nth-child(8){width:8%}
-.asset-scan-table th:nth-child(9),.asset-scan-table td:nth-child(9){width:13%}
+.asset-scan-table .col-type{width:7%}
+.asset-scan-table .col-account{width:18%}
+.asset-scan-table .col-cat{width:80px}
+.asset-scan-table .col-status{width:8%}
+.asset-scan-table .col-trial{width:10%}
+.asset-scan-table .col-reg{width:10%}
+.asset-scan-table .col-detail{width:20%}
+.asset-scan-table .col-sub{width:8%}
+.asset-scan-table .col-checked{width:13%}
+/* Outlook 视图：隐藏 类型/Plus试用/Sub2API，显示 已注册账号 */
+.asset-scan-table .col-reg{display:none}
+.asset-scan-table.outlook-view .col-type,
+.asset-scan-table.outlook-view .col-trial,
+.asset-scan-table.outlook-view .col-sub{display:none}
+.asset-scan-table.outlook-view .col-reg{display:table-cell}
+.asset-scan-table.outlook-view{min-width:860px}
 .asset-sub-cell{text-align:center}
 .asset-sub-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:9.5px;font-weight:600;white-space:nowrap}
 .asset-sub-badge.imported{background:rgba(65,184,120,.12);color:var(--green);border:1px solid rgba(65,184,120,.4)}
 .asset-sub-badge.not-imported{background:rgba(116,123,133,.1);color:var(--quiet);border:1px solid rgba(116,123,133,.3)}
+/* 已注册账号 badge */
+.reg-platforms{display:inline-flex;gap:3px;align-items:center}
+.reg-tag{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;border-radius:4px;font-size:9.5px;font-weight:700;cursor:default}
+.reg-tag.reg-1{background:rgba(230,126,34,.15);color:#e67e22;border:1px solid rgba(230,126,34,.35)}
+.reg-tag.reg-2{background:rgba(65,184,120,.12);color:var(--green);border:1px solid rgba(65,184,120,.35)}
+.reg-tag.reg-3{background:rgba(77,141,247,.12);color:#6fa8ff;border:1px solid rgba(77,141,247,.35)}
+.reg-tag.reg-4{background:rgba(155,89,182,.12);color:#c39bd3;border:1px solid rgba(155,89,182,.35)}
 .asset-status-divider{width:1px;background:var(--line);margin:4px 2px;align-self:stretch}
 .mail-source-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600}
 .mail-source-badge.imported{background:rgba(56,132,247,.15);color:#6fa8ff}

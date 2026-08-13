@@ -171,9 +171,22 @@ def _merge_platform_records(platform: str) -> list[dict]:
     return sorted(records, key=lambda item: (item["email"].lower(), item["source"].lower()))
 
 
+def _build_email_platform_map() -> dict[str, list[str]]:
+    """Build {email_lower: [platform, ...]} from token/cookie records."""
+    mapping: dict[str, list[str]] = {}
+    for platform in ("chatgpt", "claude", "grok", "kiro"):
+        records = _merge_platform_records(platform)
+        for record in records:
+            email = str(record.get("email") or "").strip().lower()
+            if email and email not in mapping:
+                mapping.setdefault(email, []).append(platform)
+    return mapping
+
+
 def _inventory_records() -> list[dict]:
     records = []
     history = _history_outcomes()
+    email_platform_map = _build_email_platform_map()
     seen_mailboxes = set()
     for index, mailbox in enumerate(asset_store._mailboxes()):
         email = mailbox.get("email", "").strip()
@@ -191,6 +204,7 @@ def _inventory_records() -> list[dict]:
             "source": source,
             "_mailbox": mailbox,
             "_history": history.get(identity),
+            "registered_platforms": email_platform_map.get(identity, []),
         })
     for platform in ("chatgpt", "claude", "grok"):
         records.extend(_merge_platform_records(platform))
