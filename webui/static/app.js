@@ -531,6 +531,29 @@ function toggleAssetScanColumns(platform){
   table.classList.toggle('outlook-view', isOutlook);
 }
 
+function updateAssetStatusSummary(){
+  if(!assetScanData) return;
+  const platform = $('#asset-scan-platform')?.value || 'all';
+  const source = $('#asset-scan-source') ? $('#asset-scan-source').value : 'all';
+  const items = (assetScanData.items || []).filter(item=>
+    (platform === 'all' || item.platform === platform) &&
+    (source === 'all' || item.mail_source === source)
+  );
+  const counts = {};
+  let subImported = 0, subNotImported = 0;
+  items.forEach(item=>{
+    const status = item.status || 'unknown';
+    counts[status] = (counts[status] || 0) + 1;
+    if(item.sub2api_uploaded) subImported++; else subNotImported++;
+  });
+  Object.keys(ASSET_SCAN_STATUS_LABELS).forEach(status=>{
+    const el = $(`#asset-status-${status}`);
+    if(el) el.textContent = counts[status] || 0;
+  });
+  $('#asset-status-sub_imported').textContent = subImported;
+  $('#asset-status-sub_not_imported').textContent = subNotImported;
+}
+
 function filteredAssetScanItems(){
   if(!assetScanData) return [];
   const platform = $('#asset-scan-platform').value;
@@ -744,13 +767,7 @@ function renderAssetScanTable(){
 
 function renderAssetScan(data){
   assetScanData = data;
-  const statuses = data.summary?.statuses || {};
-  Object.keys(ASSET_SCAN_STATUS_LABELS).forEach(status=>{
-    $(`#asset-status-${status}`).textContent = statuses[status] || 0;
-  });
-  const sub2apiCounts = data.sub2api_counts || {};
-  $('#asset-status-sub_imported').textContent = sub2apiCounts.imported || 0;
-  $('#asset-status-sub_not_imported').textContent = sub2apiCounts.not_imported || 0;
+  updateAssetStatusSummary();
   const scan = data.scan || {};
   const progress = scan.progress || {};
   const completed = progress.completed || 0;
@@ -769,7 +786,7 @@ function renderAssetScan(data){
   }else if(scan.error){
     $('#asset-scan-progress-text').textContent = `扫描失败：${scan.error}`;
   }else if(data.last_scan_at){
-    $('#asset-scan-progress-text').textContent = `扫描完成 ${statuses.normal || 0}/${data.summary?.total || 0} 正常`;
+    $('#asset-scan-progress-text').textContent = `扫描完成 ${(data.summary?.statuses?.normal) || 0}/${data.summary?.total || 0} 正常`;
   }else{
     $('#asset-scan-progress-text').textContent = '尚未扫描';
   }
@@ -817,6 +834,11 @@ async function startAssetScanSelected(){
   const platform = $('#asset-scan-platform').value;
   const platforms = platform === 'all' ? ['outlook','chatgpt','claude','grok'] : [platform];
   setAssetMessage('#asset-scan-msg', `正在启动选中扫描（${emails.length} 个）…`);
+  // 立即显示进度条（total=选中数, completed=0）
+  const bar = $('#asset-scan-progress-bar');
+  if(bar){ bar.max = Math.max(1, emails.length); bar.value = 0; }
+  const progressText = $('#asset-scan-progress-text');
+  if(progressText) progressText.textContent = `扫描中 0/${emails.length}`;
   try{
     const response = await fetch('/api/assets/scan', {method:'POST', headers:assetHeaders(true), body:JSON.stringify({
       platforms,
@@ -829,6 +851,8 @@ async function startAssetScanSelected(){
     await loadAssetScan();
   }catch(error){
     setAssetMessage('#asset-scan-msg', error.message || String(error), false);
+    // 即使 POST 失败（如 409 已有扫描在运行），仍加载当前扫描状态以显示进度条
+    await loadAssetScan();
   }
 }
 
@@ -920,7 +944,7 @@ $('#btn-copy-curl').onclick = ()=>copyText($('#asset-curl-example').textContent,
 $('#btn-scan-all').onclick = ()=>startAssetScan(true);
 $('#btn-scan-current').onclick = ()=>startAssetScan(false);
 $('#btn-scan-selected').onclick = ()=>startAssetScanSelected();
-$('#asset-scan-platform').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); updateScanSelectAllState(); };
+$('#asset-scan-platform').onchange = ()=>{ assetScanPage = 1; updateAssetStatusSummary(); renderAssetScanTable(); updateScanSelectAllState(); };
 $('#asset-scan-status').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); };
 $$('[data-scan-status]').forEach(button=>button.onclick=()=>{
   $('#asset-scan-status').value = button.dataset.scanStatus;
@@ -929,7 +953,7 @@ $$('[data-scan-status]').forEach(button=>button.onclick=()=>{
 });
 $('#btn-scan-prev').onclick = ()=>{ assetScanPage -= 1; renderAssetScanTable(); };
 $('#btn-scan-next').onclick = ()=>{ assetScanPage += 1; renderAssetScanTable(); };
-$('#asset-scan-source').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); };
+$('#asset-scan-source').onchange = ()=>{ assetScanPage = 1; updateAssetStatusSummary(); renderAssetScanTable(); };
 
 // 扫描表格复选框 + 批量删除
 function getCheckedScanEmails(){
