@@ -403,7 +403,7 @@ def build_parser():
     parser.add_argument("--group", default=SUB2API_GROUP, help="SUB2API OpenAI 分组")
     parser.add_argument("--concurrency", type=int, default=1, choices=range(1, 6))
     parser.add_argument("--node", default="auto", help="ChatGPT Clash 节点；auto 自动探测")
-    parser.add_argument("--sms-provider", choices=("auto", "smsman", "firefox", "hero"), default="auto")
+    parser.add_argument("--sms-provider", choices=("auto", "custom", "smsman", "firefox", "hero"), default="auto")
     parser.add_argument("--phone-attempts", type=int, default=3, choices=range(1, 11))
     parser.add_argument("--sms-timeout", type=int, default=180)
     parser.add_argument("--timeout", type=int, default=600)

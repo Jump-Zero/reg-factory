@@ -1,5 +1,4 @@
 playwright
-ruyiPage[async]>=1.2.61
 requests
 Pillow
 aiohttp

@@ -582,6 +582,14 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .plus-field textarea{height:220px;padding:10px;resize:vertical;font:11px/1.55 var(--mono);overflow-wrap:anywhere}
 .plus-field input:hover,.plus-field select:hover,.plus-field textarea:hover{border-color:var(--line-strong)}
 .plus-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 14px;margin-top:14px}
+.custom-sms-import{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.custom-sms-import>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px;color:#d9dce1;font-size:11px;font-weight:650;cursor:pointer}
+.custom-sms-import>summary span{color:var(--quiet);font:10.5px var(--mono)}
+.custom-sms-import .plus-field{margin-top:10px}
+.custom-sms-import textarea{height:116px}
+.custom-sms-actions{display:flex;align-items:center;gap:10px;margin-top:9px}
+#custom-sms-message{min-width:0;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}
+#custom-sms-message.bad{color:var(--red)}
 .plus-toggle{display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--muted);font-size:11px}
 .plus-toggle input{width:16px;height:16px;margin:0;accent-color:var(--accent)}
 .plus-import-actions{display:flex;align-items:center;gap:9px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}

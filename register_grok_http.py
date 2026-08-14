@@ -3,7 +3,7 @@
 Grok (x.ai) 自动注册 —— 纯 HTTP 协议版（集成 HM2899/grokcli-2api 的 xconsole_client）。
 
 为什么用纯 HTTP：
-  - 早期的浏览器版(BitBrowser+CDP / ruyiPage+Firefox)都卡在 accounts.x.ai 的验证码
+  - 早期的浏览器版会卡在 accounts.x.ai 的验证码
     XXX-XXX 掩码输入框——在浏览器里逐字敲会被掩码打乱、弹回 Retry。
   - 本版完全不开浏览器：用 curl_cffi 浏览器指纹直连 accounts.x.ai，走 gRPC-web 发码/验码
     + Next.js server action 建号。验证码是**字符串直传** gRPC，从根上绕开掩码输入框；

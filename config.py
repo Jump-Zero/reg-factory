@@ -50,8 +50,8 @@ def _env_int(name, default):
 
 
 # ---------------------------------------------------------------- 本地基建
-# Fingerprint browser provider: ruyipage / bundled / bitbrowser / adspower
-FINGERPRINT_BROWSER = _env("FINGERPRINT_BROWSER", "ruyipage").strip().lower()
+# Fingerprint browser provider: bitbrowser / bundled / custom / adspower / custom_api
+FINGERPRINT_BROWSER = _env("FINGERPRINT_BROWSER", "bitbrowser").strip().lower()
 
 # BitBrowser 本地 API 地址
 BITBROWSER_API = _env("BITBROWSER_API", "http://127.0.0.1:54345")

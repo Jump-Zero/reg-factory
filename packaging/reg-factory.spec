@@ -24,7 +24,7 @@ TASK_FILES = [
     "tools/upload_tokens.py",
     "tools/export_chatgpt2api.py",
     "tools/export_accounts.py",
-    "tools/install_ruyipage.py",
+    "tools/export_kiro_credentials.py",
 ]
 
 datas = [
@@ -39,10 +39,8 @@ datas.extend((str(ROOT / item), str(Path(item).parent)) for item in TASK_FILES)
 
 playwright_datas, playwright_binaries, playwright_hidden = collect_all("playwright")
 datas.extend(playwright_datas)
-ruyipage_datas, ruyipage_binaries, ruyipage_hidden = collect_all("ruyipage")
-datas.extend(ruyipage_datas)
 
-hiddenimports = playwright_hidden + ruyipage_hidden + [
+hiddenimports = playwright_hidden + [
     "webui.server",
     "webui.scripts",
     "run_full_flow",
@@ -66,7 +64,7 @@ for package in ("common", "vision_solver", "xconsole_client"):
 a = Analysis(
     [str(ROOT / "scripts" / "reg-factory-server.py")],
     pathex=[str(ROOT)],
-    binaries=playwright_binaries + ruyipage_binaries,
+    binaries=playwright_binaries,
     datas=datas,
     hiddenimports=sorted(set(hiddenimports)),
     hookspath=[],

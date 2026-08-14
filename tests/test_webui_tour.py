@@ -45,7 +45,7 @@ class WebUiTourTests(unittest.TestCase):
         self.assertIn("住宅代理填写方法", APP)
         self.assertIn("继承全局", APP)
         self.assertIn("提取 RT 前配置辅助邮箱", APP)
-        self.assertIn("首次启动会在后台自动安装 Firefox runtime", APP)
+        self.assertIn("<strong>bitbrowser</strong> 是默认值", APP)
         self.assertIn("同一平台账号即使切换输出格式也不会再次返回", APP)
         self.assertIn("Plus 免费试用资格", APP)
         self.assertIn("按需查看号池状态", APP)

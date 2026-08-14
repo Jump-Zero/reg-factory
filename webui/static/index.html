@@ -152,13 +152,24 @@
                 placeholder="Outlook: email----password----refresh_token----client_id&#10;iCloud: email@icloud.com&#10;Cookie: __Secure-next-auth.session-token=...&#10;OAuth JSON: {&quot;access_token&quot;:&quot;...&quot;,&quot;refresh_token&quot;:&quot;...&quot;,...}"></textarea>
             </label>
             <div class="plus-controls">
-              <label class="plus-field"><span>手机号接码平台</span><select id="plus-sms-provider"><option value="auto">自动切换</option><option value="smsman">SMS-Man</option><option value="firefox">firefox.fun</option><option value="hero">Hero SMS</option></select></label>
+              <label class="plus-field"><span>手机号接码平台</span><select id="plus-sms-provider"><option value="auto">自动切换</option><option value="custom">自定义号码池</option><option value="smsman">SMS-Man</option><option value="firefox">firefox.fun</option><option value="hero">Hero SMS</option></select></label>
               <label class="plus-field"><span>单账号换号次数</span><input id="plus-phone-attempts" type="number" min="1" max="10" value="3"></label>
               <label class="plus-field"><span>单号等码秒数</span><input id="plus-sms-timeout" type="number" min="30" max="600" value="180"></label>
               <label class="plus-field"><span>并发账号数</span><input id="plus-concurrency" type="number" min="1" max="5" value="1"></label>
               <label class="plus-field"><span>SUB2API 分组</span><input id="plus-group" type="text" value="codex"></label>
               <label class="plus-field"><span>ChatGPT 节点</span><input id="plus-node" type="text" value="auto"></label>
             </div>
+            <details id="custom-sms-import" class="custom-sms-import">
+              <summary>自定义号码池 <span id="custom-sms-summary">正在读取</span></summary>
+              <label class="plus-field plus-field-wide">
+                <span>号码与短信记录 URL（每行一个）</span>
+                <textarea id="custom-sms-input" spellcheck="false" autocomplete="off" placeholder="+13435775857----https://example.com/smsrecord?token=..."></textarea>
+              </label>
+              <div class="custom-sms-actions">
+                <button id="btn-custom-sms-import" class="btn-secondary" type="button">批量导入号码</button>
+                <span id="custom-sms-message" role="status" aria-live="polite"></span>
+              </div>
+            </details>
             <label class="plus-toggle"><input id="plus-keep-on-fail" type="checkbox"><span>失败时保留浏览器</span></label>
             <div class="plus-import-actions">
               <button id="btn-plus-import" class="btn-run" type="button">开始登录并接码</button>
@@ -420,7 +431,7 @@
             <label class="network-field"><span>换 IP 接口</span><input id="proxy-rotate-url" type="password" autocomplete="off" placeholder="https://provider.example/rotate"></label>
             <label class="network-field"><span>请求方法</span><select id="proxy-rotate-method"><option>GET</option><option>POST</option></select></label>
             <label class="network-field"><span>ChatGPT 拦截轮换上限</span><input id="proxy-chatgpt-retries" type="number" min="1" step="1" value="3"></label>
-            <label class="network-field"><span>住宅流量模式</span><select id="proxy-traffic-mode"><option value="balanced">平衡节流</option><option value="aggressive">激进节流</option><option value="off">关闭节流</option></select></label>
+            <label class="network-field"><span>住宅流量模式</span><select id="proxy-traffic-mode"><option value="extreme">极限节流</option><option value="aggressive">激进节流</option><option value="balanced">平衡节流</option><option value="off">关闭节流</option></select></label>
           </div>
         </div>
 

@@ -69,7 +69,7 @@ C2A_KEY = None  # chatgpt2api admin key（默认取 config.CHATGPT2API_KEY）
 EXTRACT_CODEX = False  # 注册成功后顺手走 Codex OAuth 提取 rt 导入 SUB2API（--codex 开启）
 CODEX_GROUP = None  # SUB2API 目标分组（默认取 config.SUB2API_GROUP）
 CODEX_MANUAL_PHONE = False  # add-phone 手动模式（不接码，自己在浏览器填号收码）
-CODEX_SMS_PROVIDER = "auto"  # auto / smsman / firefox / hero
+CODEX_SMS_PROVIDER = "auto"  # auto / custom / smsman / firefox / hero
 CODEX_TIMEOUT = 120  # Codex 授权捕获超时秒
 CHATGPT_NODE = "auto"
 CHATGPT_COUNTRY = "auto"
@@ -2447,7 +2447,7 @@ async def main():
                         help="SUB2API 目标分组名 (默认取 config.SUB2API_GROUP)")
     parser.add_argument("--codex-manual-phone", action="store_true",
                         help="Codex add-phone 手动模式: 不接码, 自己在浏览器填号收码")
-    parser.add_argument("--codex-sms-provider", choices=["auto", "smsman", "firefox", "hero"], default="auto",
+    parser.add_argument("--codex-sms-provider", choices=["auto", "custom", "smsman", "firefox", "hero"], default="auto",
                         help="Codex 自动接码平台；auto 按默认顺序")
     parser.add_argument("--codex-timeout", type=int, default=120,
                         help="Codex 授权捕获超时秒 (手动填号会自动抬到至少 300)")

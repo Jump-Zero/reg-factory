@@ -14,7 +14,9 @@ import re
 import sys
 import time
 import asyncio
+import html
 from datetime import datetime
+from urllib.parse import parse_qs, unquote, urlsplit
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -41,6 +43,15 @@ MICROSOFT_RECOVERY_SUBJECTS = (
 # 一律【直连】(显式禁用代理 + trust_env=False，绕开 HTTP(S)_PROXY 环境变量)，浏览器仍走代理。
 # 实测：直连打 MS 端点干净(HTTP 400 即可达)，经代理则首发 SSLEOFError。
 _MS_NO_PROXY = {"http": None, "https": None}
+
+
+class GraphMailboxAccessError(RuntimeError):
+    """Graph accepted the token request but the mailbox cannot be read."""
+
+    def __init__(self, reason, *, permanent=False):
+        self.reason = str(reason or "graph_mailbox_unavailable")
+        self.permanent = bool(permanent)
+        super().__init__(self.reason)
 
 
 def _ms_session():
@@ -130,6 +141,115 @@ def _get_access_token(refresh_token, client_id=DEFAULT_CLIENT_ID,
     return check_refresh_token(refresh_token, client_id, scope)["access_token"] or None
 
 
+def _graph_failure(status_code):
+    status = int(status_code or 0)
+    return {
+        "reason": f"graph_http_{status}" if status else "graph_network_error",
+        "permanent": status in {400, 401, 403, 404},
+    }
+
+
+def _graph_get(session, url, headers, *, timeout=15):
+    last_error = None
+    for attempt in range(3):
+        try:
+            return session.get(url, headers=headers, timeout=timeout)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1.0)
+                continue
+        except Exception as exc:
+            raise GraphMailboxAccessError("graph_unexpected_error") from exc
+    raise GraphMailboxAccessError("graph_network_error") from last_error
+
+
+def check_mailbox_access(
+    email,
+    refresh_token,
+    client_id=DEFAULT_CLIENT_ID,
+    *,
+    folders=GRAPH_FOLDERS,
+):
+    """Verify token ownership and actual inbox/junk message access."""
+    validation = check_refresh_token(refresh_token, client_id)
+    if not validation.get("ok"):
+        return validation
+
+    access_token = validation.get("access_token") or ""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    session = _ms_session()
+
+    # Detect a copied RT/client-id pair belonging to a different mailbox. The
+    # profile endpoint is best-effort because some Mail.Read-only grants omit
+    # profile fields; folder access below remains authoritative.
+    expected = str(email or "").strip().lower()
+    try:
+        profile = _graph_get(
+            session,
+            "https://graph.microsoft.com/v1.0/me"
+            "?$select=mail,userPrincipalName,proxyAddresses",
+            headers,
+        )
+        if profile.status_code == 200 and expected:
+            payload = profile.json()
+            identities = {
+                str(payload.get("mail") or "").strip().lower(),
+                str(payload.get("userPrincipalName") or "").strip().lower(),
+            }
+            identities.update(
+                str(value or "").split(":", 1)[-1].strip().lower()
+                for value in (payload.get("proxyAddresses") or [])
+            )
+            identities.discard("")
+            if identities and expected not in identities:
+                return {
+                    "ok": False,
+                    "access_token": "",
+                    "permanent": True,
+                    "reason": "graph_identity_mismatch",
+                }
+    except GraphMailboxAccessError:
+        pass
+    except Exception:
+        pass
+
+    folder_status = {}
+    for folder in folders:
+        try:
+            response = _graph_get(
+                session,
+                f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
+                "?$top=1&$select=id",
+                headers,
+            )
+        except GraphMailboxAccessError as exc:
+            return {
+                "ok": False,
+                "access_token": "",
+                "permanent": exc.permanent,
+                "reason": exc.reason,
+                "folder_status": folder_status,
+            }
+        folder_status[folder] = response.status_code
+        if response.status_code != 200:
+            failure = _graph_failure(response.status_code)
+            return {
+                "ok": False,
+                "access_token": "",
+                "folder_status": folder_status,
+                **failure,
+            }
+
+    return {
+        "ok": True,
+        "access_token": access_token,
+        "permanent": False,
+        "reason": "",
+        "folder_status": folder_status,
+    }
+
+
 def parse_outlook_recovery_mailbox(record):
     """Parse a user-supplied Graph mailbox without logging its credentials."""
     parts = [part.strip() for part in str(record or "").strip().split("----")]
@@ -175,8 +295,8 @@ def create_graph_recovery_mailbox(provider, outlook_record=""):
         if candidate in {OUTLOOK_RECOVERY_PROVIDER, "graph", "microsoft"}:
             try:
                 mailbox = parse_outlook_recovery_mailbox(outlook_record)
-                validation = check_refresh_token(
-                    mailbox["refresh_token"], mailbox["client_id"]
+                validation = check_mailbox_access(
+                    mailbox["email"], mailbox["refresh_token"], mailbox["client_id"]
                 )
                 if not validation.get("ok"):
                     raise RuntimeError(
@@ -222,7 +342,7 @@ def poll_graph_recovery_code(mailbox, max_wait=120, poll_interval=5,
     )
 
 
-def fetch_messages(access_token, folder, top=10):
+def fetch_messages(access_token, folder, top=10, *, raise_on_error=False):
     """拉取某文件夹最新邮件，返回 [{subject, from, body, received}]"""
     headers = {"Authorization": f"Bearer {access_token}"}
     url = (
@@ -232,22 +352,19 @@ def fetch_messages(access_token, folder, top=10):
     )
     # 直连打 graph(绕代理)；直连仍偶发瞬时抖动，连接类错误快速重试 3 次。
     sess = _ms_session()
-    r = None
-    for attempt in range(3):
-        try:
-            r = sess.get(url, headers=headers, timeout=15)
-            break
-        except (requests.ConnectionError, requests.Timeout) as e:
-            if attempt < 2:
-                time.sleep(1.5)
-                continue
-            print(f"  [mail] fetch {folder} 连接抖动(重试用尽): {str(e)[:70]}")
-            return []
-        except Exception as e:
-            print(f"  [mail] fetch {folder} error: {e}")
-            return []
     try:
-        if r is None or r.status_code != 200:
+        r = _graph_get(sess, url, headers)
+    except GraphMailboxAccessError as exc:
+        print(f"  [mail] {folder} unreadable: {exc.reason}")
+        if raise_on_error:
+            raise
+        return []
+    try:
+        if r.status_code != 200:
+            failure = _graph_failure(r.status_code)
+            print(f"  [mail] {folder} unreadable: HTTP {r.status_code}")
+            if raise_on_error:
+                raise GraphMailboxAccessError(**failure)
             return []
         out = []
         for m in r.json().get("value", []):
@@ -258,6 +375,8 @@ def fetch_messages(access_token, folder, top=10):
                 "received": m.get("receivedDateTime", ""),
             })
         return out
+    except GraphMailboxAccessError:
+        raise
     except Exception as e:
         print(f"  [mail] fetch {folder} parse error: {e}")
         return []
@@ -303,7 +422,14 @@ def get_code_by_token(
     start = time.time()
     while time.time() - start < max_wait:
         for folder in GRAPH_FOLDERS:
-            for m in fetch_messages(token, folder, top=10):
+            try:
+                messages = fetch_messages(token, folder, top=10, raise_on_error=True)
+            except GraphMailboxAccessError as exc:
+                if exc.permanent:
+                    raise
+                print(f"  [mail] transient {folder} read failure: {exc.reason}")
+                continue
+            for m in messages:
                 subj = (m["subject"] or "").lower()
                 frm = (m["from"] or "").lower()
                 hit_sender = any(s.lower() in frm for s in sender_contains) if sender_contains else False
@@ -354,7 +480,14 @@ def get_link_by_token(
     start = time.time()
     while time.time() - start < max_wait:
         for folder in GRAPH_FOLDERS:
-            for m in fetch_messages(token, folder, top=10):
+            try:
+                messages = fetch_messages(token, folder, top=10, raise_on_error=True)
+            except GraphMailboxAccessError as exc:
+                if exc.permanent:
+                    raise
+                print(f"  [mail] transient {folder} read failure: {exc.reason}")
+                continue
+            for m in messages:
                 subj = (m["subject"] or "").lower()
                 frm = (m["from"] or "").lower()
                 hit = (any(s.lower() in frm for s in sender_contains) if sender_contains else False) or \
@@ -363,7 +496,11 @@ def get_link_by_token(
                     continue
                 if _message_too_old(m, received_after):
                     continue
-                for link in pat.findall(m["body"] or ""):
+                for candidate in _message_links(m["body"] or ""):
+                    match = pat.search(candidate)
+                    if not match:
+                        continue
+                    link = match.group(0)
                     if must_contain and must_contain not in link:
                         continue
                     print(f"  [mail] link found in {folder}: {link[:80]}...")
@@ -524,6 +661,27 @@ def _strip_html(text):
     text = re.sub(r"<(style|script)[^>]*>.*?</\1>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
     return text
+
+
+def _message_links(body):
+    """Yield direct links and decoded Outlook SafeLinks from an HTML body."""
+    decoded = html.unescape(str(body or "")).replace("\\/", "/")
+    seen = set()
+    for raw in re.findall(r"https?://[^\s\"'<>]+", decoded, flags=re.IGNORECASE):
+        candidate = raw.rstrip("),.;")
+        queue = [candidate]
+        try:
+            parsed = urlsplit(candidate)
+            if "safelinks.protection.outlook.com" in parsed.netloc.lower():
+                wrapped = (parse_qs(parsed.query).get("url") or [""])[0]
+                if wrapped:
+                    queue.insert(0, html.unescape(unquote(wrapped)))
+        except Exception:
+            pass
+        for value in queue:
+            if value and value not in seen:
+                seen.add(value)
+                yield value
 
 
 async def _scan_current_folder(page, pat, sender_hint, subject_hint):

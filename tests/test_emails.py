@@ -7,6 +7,40 @@ from common import emails
 
 
 class EmailPoolTests(unittest.TestCase):
+    def test_platform_reservation_permanently_excludes_outlook_sale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.join(tmp, "emails.txt")
+            registration = os.path.join(tmp, "outlook_registration_emails.txt")
+            with open(pool, "w", encoding="utf-8") as f:
+                f.write("used@outlook.com----pw----rt----cid\n")
+            with patch.object(emails, "EMAILS_FILE", pool), \
+                    patch.object(emails, "_used_file", return_value=os.path.join(tmp, "used.txt")), \
+                    patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")), \
+                    patch.object(emails, "_outlook_sale_file", return_value=os.path.join(tmp, "sold.txt")), \
+                    patch.object(emails, "_outlook_registration_file", return_value=registration):
+                selected = emails.next_email("claude")
+
+            self.assertEqual(selected[0], "used@outlook.com")
+            with open(registration, encoding="utf-8") as handle:
+                self.assertEqual(handle.read().strip(), "used@outlook.com")
+
+    def test_platform_pool_reads_permanent_registration_exclusion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.join(tmp, "emails.txt")
+            registration = os.path.join(tmp, "outlook_registration_emails.txt")
+            with open(pool, "w", encoding="utf-8") as f:
+                f.write("used@outlook.com----pw----rt----cid\n")
+                f.write("clean@outlook.com----pw2----rt2----cid2\n")
+            with open(registration, "w", encoding="utf-8") as f:
+                f.write("used@outlook.com\n")
+            with patch.object(emails, "EMAILS_FILE", pool), \
+                    patch.object(emails, "_used_file", return_value=os.path.join(tmp, "used.txt")), \
+                    patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")), \
+                    patch.object(emails, "_outlook_sale_file", return_value=os.path.join(tmp, "sold.txt")), \
+                    patch.object(emails, "_outlook_registration_file", return_value=registration):
+                selected = emails.next_email("chatgpt")
+
+            self.assertEqual(selected[0], "clean@outlook.com")
     def test_platform_pool_skips_outlook_mailboxes_already_sold_standalone(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = os.path.join(tmp, "emails.txt")
@@ -20,7 +54,8 @@ class EmailPoolTests(unittest.TestCase):
                 with patch.object(emails, "_used_file", return_value=os.path.join(tmp, "used.txt")):
                     with patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")):
                         with patch.object(emails, "_outlook_sale_file", return_value=sold):
-                            selected = emails.next_email("chatgpt")
+                            with patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")):
+                                selected = emails.next_email("chatgpt")
 
             self.assertEqual(selected[0], "clean@outlook.com")
 
@@ -35,7 +70,8 @@ class EmailPoolTests(unittest.TestCase):
             with patch.object(emails, "EMAILS_FILE", pool):
                 with patch.object(emails, "_used_file", return_value=used):
                     with patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")):
-                        selected = emails.latest_email("grok", require_token=True)
+                        with patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")):
+                            selected = emails.latest_email("grok", require_token=True)
             self.assertEqual(selected[0], "new@example.com")
             with open(used, encoding="utf-8") as f:
                 self.assertIn("new@example.com", f.read())
@@ -50,18 +86,19 @@ class EmailPoolTests(unittest.TestCase):
             with patch.object(emails, "EMAILS_FILE", pool):
                 with patch.object(emails, "_used_file", return_value=used):
                     with patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")):
-                        with patch(
-                            "common.mailbox.check_refresh_token",
-                            side_effect=lambda token, _client: {
-                                "ok": token == "good-rt",
-                                "access_token": "access" if token == "good-rt" else "",
-                                "permanent": token != "good-rt",
-                                "reason": "invalid_grant" if token != "good-rt" else "",
-                            },
-                        ):
-                            selected = emails.latest_email(
-                                "grok", require_token=True, validate_token=True
-                            )
+                        with patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")):
+                            with patch(
+                                "common.mailbox.check_mailbox_access",
+                                side_effect=lambda _email, token, _client: {
+                                    "ok": token == "good-rt",
+                                    "access_token": "access" if token == "good-rt" else "",
+                                    "permanent": token != "good-rt",
+                                    "reason": "invalid_grant" if token != "good-rt" else "",
+                                },
+                            ):
+                                selected = emails.latest_email(
+                                    "grok", require_token=True, validate_token=True
+                                )
             self.assertEqual(selected[0], "working@example.com")
 
     def test_latest_email_quarantines_permanently_invalid_refresh_token(self):
@@ -73,18 +110,19 @@ class EmailPoolTests(unittest.TestCase):
             with patch.object(emails, "EMAILS_FILE", pool):
                 with patch.object(emails, "_used_file", return_value=os.path.join(tmp, "used.txt")):
                     with patch.object(emails, "_error_file", return_value=errors):
-                        with patch(
-                            "common.mailbox.check_refresh_token",
-                            return_value={
-                                "ok": False,
-                                "access_token": "",
-                                "permanent": True,
-                                "reason": "service_abuse",
-                            },
-                        ):
-                            selected = emails.latest_email(
-                                "claude", require_token=True, validate_token=True
-                            )
+                        with patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")):
+                            with patch(
+                                "common.mailbox.check_mailbox_access",
+                                return_value={
+                                    "ok": False,
+                                    "access_token": "",
+                                    "permanent": True,
+                                    "reason": "service_abuse",
+                                },
+                            ):
+                                selected = emails.latest_email(
+                                    "claude", require_token=True, validate_token=True
+                                )
             self.assertIsNone(selected)
             with open(errors, encoding="utf-8") as f:
                 self.assertEqual(
@@ -101,18 +139,19 @@ class EmailPoolTests(unittest.TestCase):
             with patch.object(emails, "EMAILS_FILE", pool):
                 with patch.object(emails, "_used_file", return_value=os.path.join(tmp, "used.txt")):
                     with patch.object(emails, "_error_file", return_value=errors):
-                        with patch(
-                            "common.mailbox.check_refresh_token",
-                            return_value={
-                                "ok": False,
-                                "access_token": "",
-                                "permanent": False,
-                                "reason": "network_error",
-                            },
-                        ):
-                            selected = emails.latest_email(
-                                "claude", require_token=True, validate_token=True
-                            )
+                        with patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")):
+                            with patch(
+                                "common.mailbox.check_mailbox_access",
+                                return_value={
+                                    "ok": False,
+                                    "access_token": "",
+                                    "permanent": False,
+                                    "reason": "network_error",
+                                },
+                            ):
+                                selected = emails.latest_email(
+                                    "claude", require_token=True, validate_token=True
+                                )
             self.assertIsNone(selected)
             self.assertFalse(os.path.exists(errors))
 

@@ -33,9 +33,34 @@ def _outlook_sale_file():
     return os.path.join(root, "runtime", "state", "outlook_sale_emails.txt")
 
 
+def _outlook_registration_file():
+    root = os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or "."
+    return os.path.join(root, "runtime", "state", "outlook_registration_emails.txt")
+
+
+def _exclude_from_outlook_sale(platform, email):
+    if str(platform or "").strip().lower() in {"", "email", "outlook"}:
+        return
+    append_line(_outlook_registration_file(), str(email or "").strip().lower())
+
+
+def mark_registration_started(platform, email, password=""):
+    """Permanently reserve an explicit mailbox for a platform registration."""
+    normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform in {"", "email", "outlook"}:
+        return
+    _exclude_from_outlook_sale(normalized_platform, email)
+    append_line(_used_file(normalized_platform), f"{email}----{password}----reserved")
+
+
 def _load_used(platform):
     used = set()
-    for fp in [_used_file(platform), _error_file(platform), _outlook_sale_file()]:
+    for fp in [
+        _used_file(platform),
+        _error_file(platform),
+        _outlook_sale_file(),
+        _outlook_registration_file(),
+    ]:
         if os.path.exists(fp):
             with open(fp, "r", encoding="utf-8") as f:
                 for line in f:
@@ -66,6 +91,7 @@ def next_email(platform):
                 token = parts[2].strip() if len(parts) >= 3 else ""
                 client_id = parts[3].strip() if len(parts) >= 4 else ""
                 append_line(_used_file(platform), f"{email}----{password}----reserved")
+                _exclude_from_outlook_sale(platform, email)
                 print(f"  [email] picked for {platform}: {email}")
                 return email, password, token, client_id
         print(f"  [email] no unused emails left for {platform}")
@@ -92,8 +118,8 @@ def latest_email(platform, require_token=False, validate_token=False):
             if require_token and (not token or not client_id):
                 continue
             if validate_token:
-                from common.mailbox import check_refresh_token
-                validation = check_refresh_token(token, client_id) if token else {
+                from common.mailbox import check_mailbox_access
+                validation = check_mailbox_access(email, token, client_id) if token else {
                     "ok": False, "permanent": True, "reason": "missing_refresh_token"
                 }
                 if not validation["ok"]:
@@ -105,7 +131,14 @@ def latest_email(platform, require_token=False, validate_token=False):
                     else:
                         print(f"  [email] skip mailbox after transient rt check: {email} ({reason})")
                     continue
+                folders = validation.get("folder_status") or {}
+                folder_log = ", ".join(
+                    f"{name}={status}" for name, status in folders.items()
+                )
+                if folder_log:
+                    print(f"  [email] Graph mailbox readable: {email} ({folder_log})")
             append_line(_used_file(platform), f"{email}----{password}----reserved")
+            _exclude_from_outlook_sale(platform, email)
             print(f"  [email] picked latest for {platform}: {email} (rt={'yes' if token else 'no'})")
             return email, password, token, client_id
         print(f"  [email] no unused latest mailbox for {platform} "
@@ -115,7 +148,9 @@ def latest_email(platform, require_token=False, validate_token=False):
 
 def mark_used(platform, email, password=""):
     append_line(_used_file(platform), f"{email}----{password}----ok")
+    _exclude_from_outlook_sale(platform, email)
 
 
 def mark_error(platform, email, password="", reason=""):
     append_line(_error_file(platform), f"{email}----{password}----{reason}")
+    _exclude_from_outlook_sale(platform, email)

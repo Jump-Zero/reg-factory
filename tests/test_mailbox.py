@@ -20,7 +20,7 @@ class MailboxTests(unittest.TestCase):
     def test_create_outlook_recovery_mailbox_validates_graph_api(self):
         with patch.object(
             mailbox,
-            "check_refresh_token",
+            "check_mailbox_access",
             return_value={"ok": True, "access_token": "access"},
         ) as validator:
             result = mailbox.create_graph_recovery_mailbox(
@@ -28,14 +28,16 @@ class MailboxTests(unittest.TestCase):
                 "helper@outlook.com----password----refresh-token----client-id",
             )
 
-        validator.assert_called_once_with("refresh-token", "client-id")
+        validator.assert_called_once_with(
+            "helper@outlook.com", "refresh-token", "client-id"
+        )
         self.assertEqual(result["email"], "helper@outlook.com")
         self.assertEqual(result["refresh_token"], "refresh-token")
 
     def test_create_outlook_recovery_mailbox_rejects_invalid_graph_api(self):
         with patch.object(
             mailbox,
-            "check_refresh_token",
+            "check_mailbox_access",
             return_value={"ok": False, "reason": "invalid_grant"},
         ):
             with self.assertRaisesRegex(RuntimeError, "validation failed"):
@@ -112,6 +114,100 @@ class MailboxTests(unittest.TestCase):
                     received_after=cutoff,
                 )
         self.assertEqual(link, "https://claude.ai/magic-link#fresh")
+
+    def test_link_reader_decodes_claude_safelink_from_junk(self):
+        from urllib.parse import quote
+
+        direct = "https://claude.ai/magic-link#fresh-token"
+        wrapped = (
+            "https://nam01.safelinks.protection.outlook.com/"
+            f"?url={quote(direct, safe='')}&data=tracking"
+        )
+        messages = [{
+            "subject": "Sign in to Claude",
+            "from": "login@claude.ai",
+            "body": f'<a href="{wrapped.replace("&", "&amp;")}">Sign in</a>',
+            "received": "2026-08-13T12:00:00Z",
+        }]
+
+        def folders(_token, folder, top=10, raise_on_error=False):
+            return messages if folder == "junkemail" else []
+
+        with (
+            patch.object(mailbox, "_get_access_token", return_value="access"),
+            patch.object(mailbox, "fetch_messages", side_effect=folders),
+        ):
+            link = mailbox.get_link_by_token(
+                "user@outlook.com",
+                "refresh-token",
+                link_regex=r"https://claude\.ai/magic-link#[A-Za-z0-9_-]+",
+                sender_contains=("claude",),
+                max_wait=1,
+                poll=0,
+            )
+
+        self.assertEqual(link, direct)
+
+    def test_link_reader_surfaces_permanent_junk_access_failure(self):
+        def folders(_token, folder, top=10, raise_on_error=False):
+            if folder == "junkemail":
+                raise mailbox.GraphMailboxAccessError(
+                    "graph_http_403", permanent=True
+                )
+            return []
+
+        with (
+            patch.object(mailbox, "_get_access_token", return_value="access"),
+            patch.object(mailbox, "fetch_messages", side_effect=folders),
+            self.assertRaisesRegex(mailbox.GraphMailboxAccessError, "graph_http_403"),
+        ):
+            mailbox.get_link_by_token(
+                "user@outlook.com",
+                "refresh-token",
+                max_wait=1,
+                poll=0,
+            )
+
+    def test_fetch_messages_does_not_hide_graph_403(self):
+        response = MagicMock(status_code=403)
+        session = MagicMock()
+        session.get.return_value = response
+
+        with (
+            patch.object(mailbox, "_ms_session", return_value=session),
+            self.assertRaisesRegex(mailbox.GraphMailboxAccessError, "graph_http_403"),
+        ):
+            mailbox.fetch_messages(
+                "access", "junkemail", raise_on_error=True
+            )
+
+    def test_mailbox_access_requires_inbox_and_junk(self):
+        response_profile = MagicMock(status_code=200)
+        response_profile.json.return_value = {
+            "mail": "user@outlook.com",
+            "userPrincipalName": "user@outlook.com",
+        }
+        response_inbox = MagicMock(status_code=200)
+        response_junk = MagicMock(status_code=403)
+        session = MagicMock()
+        session.get.side_effect = [response_profile, response_inbox, response_junk]
+
+        with (
+            patch.object(
+                mailbox,
+                "check_refresh_token",
+                return_value={"ok": True, "access_token": "access"},
+            ),
+            patch.object(mailbox, "_ms_session", return_value=session),
+        ):
+            result = mailbox.check_mailbox_access(
+                "user@outlook.com", "refresh-token", "client-id"
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["permanent"])
+        self.assertEqual(result["reason"], "graph_http_403")
+        self.assertEqual(result["folder_status"], {"inbox": 200, "junkemail": 403})
 
 
 if __name__ == "__main__":

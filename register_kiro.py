@@ -11,6 +11,7 @@ import random
 import secrets
 import string
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -24,7 +25,7 @@ from common import emails as email_pool
 from common import proxy_switch
 from common.kiro_crypto import FingerprintBuilder, _b64url, encrypt_password
 from common.mailbox import get_code_by_token
-from common.session_export import save_kiro_token
+from common.session_export import build_kiro_rs_credentials, save_kiro_token
 
 
 OIDC_BASE = "https://oidc.us-east-1.amazonaws.com"
@@ -36,6 +37,9 @@ DIRECTORY_ID = "d-9067642ac7"
 START_URL = f"{VIEW_BASE}/start"
 SCOPES = ["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations",
           "codewhisperer:transformations", "codewhisperer:taskassist"]
+
+_APP_CONFIG_LOCK = threading.Lock()
+_APP_CONFIG_CACHE = None
 
 
 class KiroError(RuntimeError):
@@ -186,14 +190,29 @@ class KiroClient:
         print(f"  [kiro] device code ready: {self.user_code}")
 
     def fetch_app_config(self):
+        global _APP_CONFIG_CACHE
+
         try:
-            response = self.get(f"{SIGNIN_BASE}/assets/js/app.js", headers={"Accept": "*/*", "Referer": f"{SIGNIN_BASE}/"})
-            old_key = self.fp.key
-            self.fp.update_app_js(response.text)
-            if self.fp.key != old_key:
-                print("  [kiro] fingerprint key updated from app.js")
-            else:
-                print("  [kiro] warning: using fallback fingerprint key (app.js regex may be outdated)")
+            # app.js is large and identical for every account in one batch.
+            with _APP_CONFIG_LOCK:
+                if _APP_CONFIG_CACHE is None:
+                    response = self.get(
+                        f"{SIGNIN_BASE}/assets/js/app.js",
+                        headers={"Accept": "*/*", "Referer": f"{SIGNIN_BASE}/"},
+                    )
+                    old_key = self.fp.key
+                    self.fp.update_app_js(response.text)
+                    if self.fp.key != old_key:
+                        print("  [kiro] fingerprint key updated from app.js")
+                    else:
+                        print("  [kiro] warning: using fallback fingerprint key (app.js regex may be outdated)")
+                    _APP_CONFIG_CACHE = (
+                        self.fp.key,
+                        self.fp.identifier,
+                        self.fp.version,
+                    )
+                else:
+                    self.fp.key, self.fp.identifier, self.fp.version = _APP_CONFIG_CACHE
         except Exception as e:
             print(f"  [kiro] warning: failed to fetch app.js: {str(e)[:80]}")
 
@@ -575,12 +594,15 @@ def register_one(email, mailbox_password, mailbox_token, mailbox_client_id, args
         sso_token = client.sso_token()
         aws_token = client.device_token()
         kiro_token = client.kiro_authorize(sso_token)
-        record = {"email": email, "password": target_password, "provider": "BuilderId", "region": "us-east-1",
+        raw_record = {"email": email, "provider": "BuilderId", "region": "us-east-1",
                   "clientId": client.client_id, "clientSecret": client.client_secret,
                   "refreshToken": aws_token.get("refreshToken"), "accessToken": aws_token.get("accessToken"),
-                  "expiresIn": aws_token.get("expiresIn"), "kiro": kiro_token, "createdAt": int(time.time())}
-        if not save_kiro_token(record, email):
+                  "expiresIn": aws_token.get("expiresIn")}
+        if kiro_token.get("profileArn"):
+            raw_record["profileArn"] = kiro_token["profileArn"]
+        if not save_kiro_token(raw_record, email):
             raise KiroError("Kiro 凭据落盘失败")
+        record = build_kiro_rs_credentials(raw_record, email)
         return {"status": "success", "email": email, "record": record}
     except Exception as exc:
         return {"status": "failed", "email": email, "error": str(exc)[:300]}

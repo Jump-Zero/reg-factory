@@ -133,15 +133,12 @@ function renderUpdateState(update, version){
 async function pollStatus(){
   try{
     const s = await (await fetch('/api/status')).json();
-    const browserRuntime = s.browser_runtime || {};
-    $('#dot-bb').classList.toggle('pending', browserRuntime.state === 'installing');
+    $('#dot-bb').classList.remove('pending');
     $('#dot-bb').classList.toggle('on', s.bitbrowser);
-    const browserLabels = {ruyipage:'RuyiPage Firefox', adspower:'AdsPower', bundled:'内置浏览器', custom:'自定义 Chrome', custom_api:'自定义指纹浏览器'};
+    const browserLabels = {adspower:'AdsPower', bundled:'内置浏览器', custom:'自定义 Chrome', custom_api:'自定义指纹浏览器'};
     let label = browserLabels[s.browser_provider] || 'BitBrowser';
-    if(s.browser_provider === 'ruyipage' && browserRuntime.state === 'installing') label = 'RuyiPage 安装中';
-    else if(s.browser_provider === 'ruyipage' && browserRuntime.state === 'failed') label = 'RuyiPage 安装失败';
     $('#browser-label').textContent = label;
-    $('#browser-label').title = browserRuntime.message || label;
+    $('#browser-label').title = label;
     const networkOnline = s.network ?? s.clash;
     $('#dot-clash').classList.toggle('on', !!networkOnline);
     const modeLabels = {clash_auto:'Clash 自动', clash_fixed:'Clash 固定', residential:'住宅代理', direct:'直连'};
@@ -1242,7 +1239,62 @@ function setPlusRunControls(running){
   $$('#view-plus input, #view-plus select').forEach(element=>{
     if(element.id !== 'plus-keep-on-fail') element.disabled = running;
   });
+  $('#custom-sms-input').disabled = running;
+  $('#btn-custom-sms-import').disabled = running;
 }
+
+function renderCustomSmsSummary(pool){
+  $('#custom-sms-summary').textContent = `可用 ${pool.available || 0} / 占用 ${pool.leased || 0} / 已用 ${pool.used || 0}`;
+}
+
+async function loadCustomSmsPool(){
+  try{
+    const response = await fetch('/api/sms/custom');
+    const pool = await readJsonResponse(response);
+    if(!response.ok) throw new Error(pool.error || `HTTP ${response.status}`);
+    renderCustomSmsSummary(pool);
+    return pool;
+  }catch(error){
+    $('#custom-sms-summary').textContent = '读取失败';
+    return null;
+  }
+}
+
+async function importCustomSmsPool(){
+  const text = $('#custom-sms-input').value.trim();
+  const message = $('#custom-sms-message');
+  message.className = '';
+  if(!text){
+    message.textContent = '请先粘贴号码与记录 URL';
+    message.className = 'bad';
+    return;
+  }
+  const button = $('#btn-custom-sms-import');
+  button.disabled = true;
+  try{
+    const response = await fetch('/api/sms/custom', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text}),
+    });
+    const result = await readJsonResponse(response);
+    if(!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    renderCustomSmsSummary(result);
+    message.textContent = `新增 ${result.added}，更新 ${result.updated}，跳过 ${result.skipped}，格式错误 ${result.bad}`;
+    message.className = result.bad ? 'bad' : '';
+    if(result.added || result.updated) $('#custom-sms-input').value = '';
+  }catch(error){
+    message.textContent = error.message || String(error);
+    message.className = 'bad';
+  }finally{
+    button.disabled = !!plusRun;
+  }
+}
+
+$('#btn-custom-sms-import').onclick = importCustomSmsPool;
+$('#custom-sms-import').addEventListener('toggle', event=>{
+  if(event.currentTarget.open) loadCustomSmsPool();
+});
 
 function monitorPlusRun(runId, accepted){
   if(plusEventSource) plusEventSource.close();
@@ -1271,6 +1323,7 @@ function monitorPlusRun(runId, accepted){
     plusRun = null;
     setPlusRunControls(false);
     loadPlusImportStatus();
+    loadCustomSmsPool();
   });
   plusEventSource.onerror = ()=>{
     if(plusRun) setPlusImportState('日志连接中断，正在等待任务状态', 'bad');
@@ -1847,11 +1900,10 @@ const GUIDE_STEPS = [
     id:'browser', section:'浏览器', title:'选择浏览器方式', target:'[data-guide-group="browser"]', placement:'left',
     prepare:async()=>ensureGuideView('env'),
     skipLabel:'跳过浏览器配置', skipTo:'outlook-recovery',
-    body:`<p><strong>ruyipage</strong> 是默认值，使用 Firefox WebDriver BiDi 指纹内核。便携包首次启动会在后台自动安装 Firefox runtime，首次任务打开时也会自动补装；以后升级直接复用，无需重复安装。</p>
-      <p>顶栏状态显示“RuyiPage 安装中”时等待下载完成。自动安装失败可在任务库运行“安装 RuyiPage Firefox”重试，或在本组填写已有 Firefox 路径后点击连通测试。</p>
-      <p><strong>bundled</strong> 使用程序自带或系统可用的 Chromium；Claude、Grok 和 Outlook 等仍依赖 Chromium CDP 的旧流程会自动回退到它。</p>
+    body:`<p><strong>bitbrowser</strong> 是默认值，需要先启动比特浏览器，并确认本地 API 通常为 <code>http://127.0.0.1:54345</code>。它为每个账号提供独立 Profile、Cookie 和指纹。</p>
+      <p><strong>bundled</strong> 使用程序自带或系统可用的 Chromium。</p>
       <p><strong>custom</strong> 使用普通 Chrome，填写 <code>CUSTOM_BROWSER_PATH</code>。Windows 常见路径是 <code>C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe</code>。</p>
-      <p><strong>bitbrowser</strong> 需要先启动比特浏览器，并确认本地 API 通常为 <code>http://127.0.0.1:54345</code>。填写后使用本组的连通测试。</p>`,
+      <p>填写后使用本组的连通测试确认浏览器可用。</p>`,
   },
   {
     id:'outlook-recovery', section:'Outlook', title:'提取 RT 前配置辅助邮箱', target:'[data-guide-group="outlook-recovery"]', placement:'left',
@@ -2190,3 +2242,4 @@ scriptsReady.then(()=>{
   if(!guideStorageCompleted()) setTimeout(()=>startGuide(0), 500);
 }).catch(()=>{});
 pollStatus();
+loadCustomSmsPool();

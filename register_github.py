@@ -44,6 +44,7 @@ from playwright.async_api import async_playwright
 import requests
 
 from common.browser import open_and_connect, teardown, human_type, react_fill
+from common import proxy_switch
 from common.mailbox import get_code_outlook_pw
 from common.cookies import save_platform_cookies
 from common.agent_captcha import solve_puzzle_voting
@@ -489,7 +490,9 @@ async def click_create_account(page):
     return False
 
 
-async def register_one(email, password, cookies, p, auto=False, keep=True):
+async def register_one(
+    email, password, cookies, p, auto=False, keep=True, index=1, total=1
+):
     start = time.time()
 
     def check_timeout():
@@ -498,13 +501,20 @@ async def register_one(email, password, cookies, p, auto=False, keep=True):
 
     gh_password = rand_password()
     username = rand_username()
-    print(f"\n>>> github signup: email={email} user={username} pass={gh_password}")
+    print(
+        f"\n>>> github signup #{index}/{total}: "
+        f"email={email} user={username} pass={gh_password}"
+    )
 
-    name = f"github_{time.strftime('%m%d_%H%M%S')}"
+    name = f"github_{time.strftime('%m%d_%H%M%S')}_{index}"
     bb = pid = None
     skip_variant = False
     try:
-        bb, pid, browser, ctx, page = await open_and_connect(name=name, p=p)
+        bb, pid, browser, ctx, page = await open_and_connect(
+            name=name,
+            p=p,
+            browser_options=proxy_switch.browser_proxy_fields(),
+        )
         await ctx.clear_cookies()
 
         # Step 1: 打开注册页（带重试）
@@ -665,6 +675,8 @@ async def register_one(email, password, cookies, p, auto=False, keep=True):
 
 async def main():
     parser = argparse.ArgumentParser(description="GitHub Auto Register (explore)")
+    parser.add_argument("--count", "-n", type=int, default=1)
+    parser.add_argument("--concurrency", "-c", type=int, default=1)
     parser.add_argument("--email", default=None, help="指定邮箱（默认从 _outlook_pool 随机取）")
     parser.add_argument("--password", default=None, help="指定邮箱密码")
     parser.add_argument("--auto", action="store_true", help="尝试走完整流程（含取 launch code）")
@@ -674,37 +686,84 @@ async def main():
 
     global REGISTER_TIMEOUT
     REGISTER_TIMEOUT = args.timeout
+    return await _run_batch(args)
 
+
+async def _run_batch(args):
     if args.email:
-        email, password, cookies = args.email, args.password or "", None
+        accounts = [(args.email, args.password or "", None)]
+        if args.count > 1:
+            print("  [github] a fixed mailbox can only be scheduled once; count reduced to 1")
     else:
         accounts = load_pool_accounts()
         if not accounts:
-            print(f"  没有可用邮箱：{POOL_DIR} 为空")
-            return
-        email, password, cookies = random.choice(accounts)
-        print(f"  从池中随机选中: {email} (池中共 {len(accounts)} 个)")
+            print(f"  no available mailbox in {POOL_DIR}")
+            return 1
+        random.shuffle(accounts)
+        accounts = accounts[:max(1, args.count)]
+        print(f"  allocated {len(accounts)} distinct mailbox(es) from the pool")
 
-    print("=" * 56)
-    print(f"  GitHub Auto Register  auto={args.auto} keep={not args.no_keep}")
-    print("=" * 56)
+    from common.concurrency import build_worker_plan
+    from common.task_context import activate_worker
 
-    async with async_playwright() as p:
-        # 遇到难变体(character)自动换窗口重试，最多 N 次，赌到 sequence/rotate 变体
-        max_attempts = 8
+    total = len(accounts)
+    worker_plan = build_worker_plan("github", total, args.concurrency)
+    worker_plan.log()
+    print("=" * 56)
+    print(
+        f"  GitHub Auto Register  count={total} "
+        f"concurrency={worker_plan.effective_concurrency} "
+        f"auto={args.auto} keep={not args.no_keep}"
+    )
+    print("=" * 56)
+    slot_locks = [asyncio.Lock() for _ in range(worker_plan.effective_concurrency)]
+
+    async def run_attempts(index, account, p):
+        email, password, cookies = account
         result = None
-        for attempt in range(1, max_attempts + 1):
-            print(f"\n----- 尝试 {attempt}/{max_attempts} -----")
+        for attempt in range(1, 9):
+            print(f"\n----- #{index} attempt {attempt}/8 -----")
             result = await register_one(
                 email, password, cookies, p,
                 auto=args.auto, keep=not args.no_keep,
+                index=index, total=total,
             )
             if result != "SKIP_VARIANT":
                 break
-            print(f"  难变体跳过，{2}s 后换新窗口重试...")
+            print("  challenge variant skipped; creating a fresh profile in 2s")
             await asyncio.sleep(2)
-    print(f"\n{'='*56}\n  result: {result}\n{'='*56}")
+        return result
+
+    async def run_one(index, account):
+        worker_context = worker_plan.worker(index)
+        stagger_slot = (index - 1) % worker_plan.effective_concurrency
+        if stagger_slot:
+            await asyncio.sleep(random.uniform(1.5, 3.5) * stagger_slot)
+        async with slot_locks[worker_context.slot - 1]:
+            with activate_worker(worker_context) as worker:
+                print(
+                    f"  [worker] {worker.worker_id} slot={worker.slot} "
+                    f"proxy={proxy_switch.current_node()}"
+                )
+                async with async_playwright() as p:
+                    return await run_attempts(index, account, p)
+
+    results = await asyncio.gather(*(
+        run_one(index, account)
+        for index, account in enumerate(accounts, 1)
+    ))
+    if args.auto:
+        completed = sum(bool(result and result != "SKIP_VARIANT") for result in results)
+        label = "success"
+    else:
+        # Explore mode deliberately keeps the profile at the registration
+        # checkpoint; reaching it is a completed diagnostic, not an account.
+        completed = sum(result in {"CAPTCHA_REACHED", "FORM_DONE"} for result in results)
+        label = "checkpoints reached"
+    print(f"\n{'='*56}\n  {label}: {completed}/{len(results)}\n{'='*56}")
+    return 0 if completed == len(results) else 1
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    proxy_switch.apply_platform_environment("github")
+    raise SystemExit(asyncio.run(main()))

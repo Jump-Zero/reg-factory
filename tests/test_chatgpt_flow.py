@@ -44,7 +44,7 @@ class ChatGPTFlowTests(unittest.TestCase):
         self.assertEqual(result["plus_trial"], "zero_price")
         check.assert_called_once_with({"accessToken": "token"}, "trial@example.com", 15)
 
-    def test_expired_auth_entry_is_reopened_for_ruyipage(self):
+    def test_expired_auth_entry_is_reopened(self):
         async def exercise():
             field = MagicMock()
             field.first = field
@@ -635,6 +635,28 @@ class ChatGPTFlowTests(unittest.TestCase):
         country_index = command.index("--country")
         self.assertEqual(command[country_index + 1], "JP")
 
+    def test_three_platform_claude_command_keeps_matching_client_id(self):
+        args = argparse.Namespace(timeout=600, node="auto")
+        command = register_three_platforms.build_command(
+            "claude",
+            args,
+            ("mail@outlook.com", "password", "refresh-token", "client-id"),
+        )
+
+        self.assertEqual(command[command.index("--token") + 1], "refresh-token")
+        self.assertEqual(command[command.index("--client-id") + 1], "client-id")
+
+    def test_multi_platform_command_runs_full_github_registration(self):
+        args = argparse.Namespace(timeout=600, keep_on_fail=False)
+        command = register_three_platforms.build_command(
+            "github",
+            args,
+            ("mail@example.com", "password", "refresh-token", "client-id"),
+        )
+        self.assertIn("register_github.py", command)
+        self.assertIn("--auto", command)
+        self.assertIn("--no-keep", command)
+
     def test_platform_failure_returns_nonzero(self):
         results = [("chatgpt", False, 1, "chatgpt.log")]
         self.assertEqual(register_three_platforms.results_exit_code(results), 1)
@@ -652,6 +674,29 @@ class ChatGPTFlowTests(unittest.TestCase):
         self.assertNotIn("mail-pass", rendered)
         self.assertNotIn("graph-token", rendered)
         self.assertEqual(rendered.count("***"), 2)
+
+    def test_full_flow_platform_stage_is_parallel_by_default(self):
+        args = argparse.Namespace(
+            platforms=["claude", "chatgpt"],
+            node="auto",
+            chatgpt_country="auto",
+            platform_timeout=600,
+            broker="",
+            keep_on_fail=False,
+            import_c2a=False,
+            plus_subscription=False,
+            codex=False,
+            grok_sub2api=False,
+            dry_run=True,
+            sequential_platforms=False,
+        )
+        with patch.object(run_full_flow, "log") as logger:
+            self.assertEqual(
+                run_full_flow.stage_platforms(args, {}, "mail@example.com", "secret"),
+                0,
+            )
+        command_line = " ".join(call.args[0] for call in logger.call_args_list)
+        self.assertIn("--parallel", command_line)
 
     def test_standalone_oauth_propagates_failure_exit_code(self):
         source = inspect.getsource(oauth_codex.main)

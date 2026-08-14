@@ -87,6 +87,18 @@ class RegistrationSchemaTests(unittest.TestCase):
             self.assertIs(args[flag]["choices"], CHATGPT_COUNTRY_CHOICES)
             self.assertTrue(args[flag]["countryNames"])
 
+    def test_end_to_end_exposes_concurrent_parallel_pipeline(self):
+        args = {item["flag"]: item for item in _script("run_full_flow")["args"]}
+        self.assertEqual(args["--concurrency"]["default"], 1)
+        self.assertFalse(args["--sequential-platforms"]["default"])
+        self.assertIn("github", args["--platforms"]["choices"])
+        consumer_args = {
+            item["flag"]: item
+            for item in _script("register_three_platforms")["args"]
+        }
+        self.assertIn("--max-inflight", consumer_args)
+        self.assertIn("github", consumer_args["--platforms"]["choices"])
+
     def test_chatgpt_promotes_direct_sub2api_import(self):
         script = _script("register_chatgpt")
         primary_flags = [item["flag"] for item in script["args"][:6]]
@@ -96,27 +108,29 @@ class RegistrationSchemaTests(unittest.TestCase):
         self.assertIn("--codex", primary_flags)
         self.assertIn("SUB2API", args["--codex"]["help"])
         self.assertIn("--codex-group", args)
+        self.assertIn("custom", args["--codex-sms-provider"]["choices"])
 
-    def test_ruyipage_is_the_default_browser(self):
+        oauth_args = {item["flag"]: item for item in _script("oauth_codex")["args"]}
+        self.assertIn("custom", oauth_args["--sms-provider"]["choices"])
+
+    def test_bitbrowser_is_the_default_browser(self):
         browser_group = next(
             group for group in ENV_SCHEMA if group["group"] == "指纹浏览器"
         )
         items = {item["key"]: item for item in browser_group["items"]}
 
-        self.assertEqual(items["FINGERPRINT_BROWSER"]["default"], "ruyipage")
+        self.assertEqual(items["FINGERPRINT_BROWSER"]["default"], "bitbrowser")
         self.assertEqual(
-            items["FINGERPRINT_BROWSER"]["choices"][0], "ruyipage"
+            items["FINGERPRINT_BROWSER"]["choices"][0], "bitbrowser"
         )
-        self.assertIn("RUYIPAGE_BROWSER_PATH", items)
 
-    def test_legacy_cdp_tasks_explain_ruyipage_chromium_fallback(self):
+    def test_browser_task_warnings_describe_chromium_provider(self):
         outlook_warning = _script("outlook_reg_loop").get("warning", "")
-        self.assertIn("Firefox WebDriver BiDi", outlook_warning)
-        self.assertNotIn("Chromium CDP", outlook_warning)
+        self.assertIn("Chromium", outlook_warning)
+        self.assertIn("BitBrowser", outlook_warning)
         for script_id in ("register_claude", "register_grok"):
             warning = _script(script_id).get("warning", "")
             self.assertIn("Chromium CDP", warning)
-            self.assertIn("RuyiPage", warning)
 
     def test_claude_defaults_to_latest_rt(self):
         args = {item["flag"]: item for item in _script("register_claude")["args"]}

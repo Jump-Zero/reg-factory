@@ -50,6 +50,8 @@
 
 项目将 Outlook 邮箱、ChatGPT、Grok、Claude、Kiro 注册，Codex OAuth、账号导出和下游导入整合到同一个 Web 控制台，同时保留可组合的命令行入口。
 
+当前主版本为 `2.0.0`，重点是低成本并发和极致省流：任务按槽位隔离浏览器与住宅出口，代理池不足时自动降并发；住宅流量模式支持 `extreme`，会抑制后台联网并跳过非关键资源。详见 [2.0.0 更新日志](CHANGELOG.md)。
+
 > 仅用于学习、开发和经授权的测试。密钥、账号、Cookie、Token 和运行日志均应保留在本机，不要提交到仓库。
 
 ## 快速开始
@@ -73,7 +75,7 @@
 运行前需要：
 
 - Python 3.10+
-- 默认使用 [RuyiPage](https://github.com/LoseNine/ruyipage) Firefox WebDriver BiDi 指纹浏览器，也支持内置 Chromium、自定义 Chrome/Chromium、BitBrowser 和 AdsPower
+- 默认使用 [BitBrowser](https://www.bitbrowser.cn/download)，也支持内置 Chromium、自定义 Chrome/Chromium 和 AdsPower
 - [Clash Verge 2.5.2 Windows x64](https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.2/Clash.Verge_2.5.2_x64-setup.exe)（自动/固定节点模式），或一个住宅代理服务
 - Node.js 20+（仅 Codex K12 控制台需要）
 
@@ -81,7 +83,7 @@ Windows：
 
 ```text
 1. 双击 install.bat
-2. 首次启动会在后台自动下载 RuyiPage Firefox；启动 Clash Verge
+2. 启动 BitBrowser；使用 Clash 网络模式时同时启动 Clash Verge
 3. 双击 start.bat
 4. 打开 http://127.0.0.1:8799/
 ```
@@ -112,7 +114,7 @@ macOS / Linux：
 
 控制台只监听本机。Codex K12 的独立说明见 [codex_k12/README.md](codex_k12/README.md)。
 
-动态住宅 IP 会在创建新浏览器窗口时写入完整代理认证；轮换后的代理从下一个新窗口开始使用。网络页可分别设置 Outlook、Claude、ChatGPT、Grok 和 Kiro 的出口，例如 Outlook 使用 Clash、其他平台使用住宅代理，并可按平台测试真实公网 IP。
+动态住宅 IP 会在创建新浏览器窗口时写入完整代理认证；轮换后的代理从下一个新窗口开始使用。网络页可分别设置 Outlook、Claude、ChatGPT、Grok、Kiro 和 GitHub 的出口，例如 Outlook 使用 Clash、其他平台使用住宅代理，并可按平台测试真实公网 IP。
 
 住宅模式默认启用“平衡节流”，浏览器会跳过普通图片、字体和音视频，并保留脚本、样式表以及 Cloudflare、hCaptcha、Arkose、PerimeterX 等验证资源。网络页可以切换到“激进节流”进一步拦截样式表和常见统计请求；Microsoft 登录与 Graph 授权页会保留必要样式表，避免可见状态判断失真。该设置只影响浏览器页面资源，不改变账号 API、代理分配和出口粘性。
 
@@ -145,11 +147,14 @@ curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=cpa" \
 ## 常用命令
 
 ```bash
-# Outlook -> Claude / ChatGPT / Grok / Kiro
-python run_full_flow.py --platforms claude chatgpt grok kiro
+# Outlook -> Claude / ChatGPT / Grok / Kiro / GitHub
+python run_full_flow.py --platforms claude chatgpt grok kiro github
 
-# 使用已有邮箱池注册三个平台
-python register_three_platforms.py --from-pool
+# 同时处理 3 个邮箱；每个邮箱内的所选平台默认并行
+python run_full_flow.py --rounds 12 --concurrency 3 --platforms claude chatgpt kiro
+
+# 使用已有邮箱池并行注册多个平台
+python register_three_platforms.py --from-pool --parallel
 
 # 常驻注册 Outlook
 python outlook_reg_loop.py

@@ -214,9 +214,6 @@ class BitBrowserClient:
 
     def __new__(cls, api_base=None):
         provider = _fingerprint_provider()
-        if cls is BitBrowserClient and provider in {"ruyipage", "ruyi", "firefox_bidi"}:
-            from common.ruyipage_browser import RuyiPageBrowser
-            return RuyiPageBrowser()
         if cls is BitBrowserClient and provider not in {"bitbrowser", "bit"}:
             from bitbrowser import BitBrowser
             return BitBrowser(api_base=api_base)
@@ -238,6 +235,8 @@ class BitBrowserClient:
         """Create a new browser profile with optional proxy.
         proxy_str format: user:pass@host:port
         """
+        from common.traffic_saver import bitbrowser_profile_defaults
+
         data = {
             "name": name,
             "remark": "outlook standalone registration",
@@ -245,6 +244,7 @@ class BitBrowserClient:
             "browserFingerPrint": {
                 "coreVersion": "130",
             },
+            **bitbrowser_profile_defaults(),
         }
 
         if proxy_str:
@@ -271,7 +271,16 @@ class BitBrowserClient:
 
     def open_browser(self, profile_id):
         """Open browser window, returns WebSocket debug URL"""
-        result = self._post("/browser/open", {"id": profile_id})
+        from common.traffic_saver import bitbrowser_open_payload
+
+        payload = bitbrowser_open_payload(profile_id)
+        try:
+            result = self._post("/browser/open", payload)
+        except Exception:
+            if "args" not in payload:
+                raise
+            print("  BitBrowser rejected traffic-saving launch args; retrying normally")
+            result = self._post("/browser/open", {"id": profile_id})
         return result["data"]
 
     def close_browser(self, profile_id):
@@ -722,9 +731,52 @@ async def _signup_email_suffix_domains(email_input):
     return _domains_from_values((field,))
 
 
+async def _signup_email_domains_after_blur(email_input):
+    """Let Microsoft's controlled field render its suffix before submission."""
+    try:
+        await email_input.press("Tab", timeout=1500)
+    except Exception:
+        pass
+    await asyncio.sleep(0.6)
+    return await _signup_email_suffix_domains(email_input)
+
+
+_SIGNUP_EMAIL_SELECTOR = (
+    'input[type="email"]:visible, input[name="MemberName"]:visible, '
+    'input[id="MemberName"]:visible, input[id="usernameInput"]:visible, '
+    'input[name="Username"]:visible'
+)
+_SIGNUP_PASSWORD_SELECTOR = (
+    'input[type="password"]:visible, input[name="Password"]:visible, '
+    'input[id="PasswordInput"]:visible, input[name="passwd"]:visible'
+)
+
+
+def _signup_email_input(page):
+    """Return the active field, excluding stale controls kept by React."""
+    return page.locator(_SIGNUP_EMAIL_SELECTOR).first
+
+
+def _signup_password_input(page):
+    """Return the visible password field after the email-page transition."""
+    return page.locator(_SIGNUP_PASSWORD_SELECTOR).first
+
+
+async def _signup_email_submission_result(page):
+    """Classify the page without consulting a stale hidden email control."""
+    password_input = _signup_password_input(page)
+    if await password_input.count() > 0:
+        return "accepted"
+    email_input = _signup_email_input(page)
+    if await email_input.count() == 0:
+        return "pending"
+    return await _signup_email_rejected(page, email_input)
+
+
 def _signup_email_entry_value(prefix, domain, page_manages_domain):
-    """Return the text the visible field expects, without duplicating its suffix."""
-    return prefix if page_manages_domain else f"{prefix}@{domain}"
+    """Match the value to the active Microsoft signup form variant."""
+    alias = str(prefix or "").split("@", 1)[0].strip()
+    return alias if page_manages_domain else f"{alias}@{domain}"
 
 
 async def _select_signup_domain(domain_dropdown, preferred):
@@ -1141,27 +1193,29 @@ async def _signup_email_rejected(page, email_input):
                 .map(id => document.getElementById(id)?.innerText || '').join(' ');
             const nearby = el.closest('form, [role="main"], main')?.innerText || '';
             return {
-                invalid: el.getAttribute('aria-invalid') === 'true'
-                    || (el.validity && !el.validity.valid),
+                ariaInvalid: el.getAttribute('aria-invalid') === 'true',
+                typeMismatch: !!el.validity?.typeMismatch,
+                patternMismatch: !!el.validity?.patternMismatch,
+                customError: !!el.validity?.customError,
                 message: [el.validationMessage, described, nearby].join(' ').toLowerCase(),
                 visible: !!el.offsetParent,
             };
         }""", timeout=1000)
     except Exception:
         state = {}
-    if state.get("invalid"):
+    message = state.get("message") or ""
+    format_markers = (
+        "valid", "format", "letter", "caractère", "formato", "gültig",
+        "válido", "valido", "corretto", "geldig", "prawidł", "допустим",
+        "geçerli", "मान्य", "अक्षर", "huruf", "格式", "有效", "文字", "올바른",
+    )
+    if (
+        state.get("typeMismatch")
+        or state.get("patternMismatch")
+        or any(marker in message for marker in format_markers)
+    ):
         return "format"
-    # Remaining on the alias field after submit normally means the alias was rejected.
-    if state.get("visible"):
-        message = state.get("message") or ""
-        format_markers = (
-            "valid", "format", "letter", "caractère", "formato", "gültig",
-            "válido", "valido", "corretto", "geldig", "prawidł", "допустим",
-            "geçerli", "मान्य", "अक्षर", "format", "valid", "huruf",
-            "格式", "有效", "文字", "올바른",
-        )
-        if any(marker in message for marker in format_markers):
-            return "format"
+    if state.get("ariaInvalid") or state.get("customError"):
         return "taken"
     return ""
 
@@ -2008,7 +2062,7 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
     try:
         print(f"  {tag} navigating to signup page...")
         signup_url = _microsoft_url_with_locale("https://signup.live.com/signup?lic=1")
-        await page.goto(signup_url, timeout=60000, wait_until="domcontentloaded")
+        await _navigate_to_signup(page, signup_url, tag)
         await asyncio.sleep(3)
         await _safe_screenshot(page, f"{SCREENSHOT_DIR}/outlook_{idx}_start.png")
         await _maybe_confirm_before_register(page, tag, captcha_early_abort)
@@ -2062,12 +2116,8 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
 
         # Step 1: Enter email
         email_ok = False
-        force_prefix_only = False
         for retry in range(5):
-            email_input = page.locator(
-                'input[type="email"], input[name="MemberName"], input[id="MemberName"], '
-                'input[id="usernameInput"], input[name="Username"]'
-            ).first
+            email_input = _signup_email_input(page)
             if await email_input.count() == 0:
                 print(f"  {tag} email input not found")
                 await _safe_screenshot(page, f"{SCREENSHOT_DIR}/outlook_{idx}_no_email.png")
@@ -2078,9 +2128,7 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
             ).first
             has_domain_dropdown = await domain_dropdown.count() > 0
             suffix_domains = await _signup_email_suffix_domains(email_input)
-            page_manages_domain = (
-                has_domain_dropdown or bool(suffix_domains) or force_prefix_only
-            )
+            page_manages_domain = has_domain_dropdown or bool(suffix_domains)
 
             if has_domain_dropdown:
                 available_domains = await _signup_domain_options(domain_dropdown)
@@ -2095,8 +2143,7 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
                 )
                 committed = await react_fill(
                     page,
-                    'input[type="email"], input[name="MemberName"], input[id="MemberName"], '
-                    'input[id="usernameInput"], input[name="Username"]',
+                    _SIGNUP_EMAIL_SELECTOR,
                     entry_value,
                     tries=3,
                 )
@@ -2111,8 +2158,7 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
                 )
                 committed = await react_fill(
                     page,
-                    'input[type="email"], input[name="MemberName"], input[id="MemberName"], '
-                    'input[id="usernameInput"], input[name="Username"]',
+                    _SIGNUP_EMAIL_SELECTOR,
                     entry_value,
                     tries=3,
                 )
@@ -2125,17 +2171,44 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
                 )
                 committed = await react_fill(
                     page,
-                    'input[type="email"], input[name="MemberName"], input[id="MemberName"], '
-                    'input[id="usernameInput"], input[name="Username"]',
+                    _SIGNUP_EMAIL_SELECTOR,
                     entry_value,
                     tries=3,
                 )
-                input_kind = "prefix fallback" if force_prefix_only else "full email"
-                print(f"  {tag} filled {input_kind}: {entry_value}")
+                print(f"  {tag} filled full email: {entry_value}")
+
+            # The current Microsoft control can start as a plain type=email
+            # field, then split into alias + @outlook.com only after blur. If
+            # that happens, rewrite the left side before clicking Next so the
+            # suffix is not submitted twice.
+            if not page_manages_domain and committed:
+                rendered_domains = await _signup_email_domains_after_blur(email_input)
+                if rendered_domains:
+                    selected_domain = rendered_domains[0]
+                    email = f"{prefix}@{selected_domain}"
+                    page_manages_domain = True
+                    entry_value = _signup_email_entry_value(
+                        prefix, selected_domain, page_manages_domain
+                    )
+                    committed = await react_fill(
+                        page,
+                        _SIGNUP_EMAIL_SELECTOR,
+                        entry_value,
+                        tries=3,
+                    )
+                    print(
+                        f"  {tag} normalized dynamic suffix: "
+                        f"{entry_value} ({selected_domain})"
+                    )
 
             await asyncio.sleep(0.5)
+            email_input = _signup_email_input(page)
             expected_value = entry_value
-            actual_value = (await email_input.input_value()).strip()
+            actual_value = (
+                (await email_input.input_value()).strip()
+                if await email_input.count() > 0
+                else ""
+            )
             if not committed or actual_value != expected_value:
                 print(
                     f"  {tag} email input did not commit "
@@ -2151,9 +2224,16 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
 
             page_text = await page.evaluate("() => document.body.innerText")
             page_lower = page_text.lower()
-            rejection = await _signup_email_rejected(page, email_input)
+            submission_result = await _signup_email_submission_result(page)
+            if submission_result == "pending":
+                await asyncio.sleep(2)
+                submission_result = await _signup_email_submission_result(page)
+            if submission_result == "accepted":
+                email_ok = True
+                break
+            rejection = submission_result
 
-            if rejection == "taken" or ("already" in page_lower and "email" in page_lower) or "taken" in page_lower:
+            if rejection == "taken":
                 prefix = random.choice(string.ascii_lowercase) + "".join(
                     random.choices(string.ascii_lowercase + string.digits, k=11)
                 )
@@ -2162,9 +2242,6 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
                 continue
 
             if rejection == "format" or "needs to start" in page_lower or "in the format" in page_lower or "enter a valid" in page_lower or "use letters" in page_lower:
-                if not page_manages_domain:
-                    force_prefix_only = True
-                    print(f"  {tag} Microsoft expects a page-managed suffix; switching to prefix-only input")
                 prefix = random.choice(string.ascii_lowercase) + "".join(
                     random.choices(string.ascii_lowercase + string.digits, k=9)
                 )
@@ -2186,10 +2263,7 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
         await asyncio.sleep(2)
         pwd_input = None
         for _ in range(10):
-            pwd_input = page.locator(
-                'input[type="password"], input[name="Password"], '
-                'input[id="PasswordInput"], input[name="passwd"]'
-            ).first
+            pwd_input = _signup_password_input(page)
             if await pwd_input.count() > 0:
                 break
             await asyncio.sleep(1)
@@ -2958,10 +3032,16 @@ async def _browser_page(context, fresh=False):
             pass
         live_pages.append(page)
     if fresh:
-        page = await context.new_page()
+        try:
+            page = await asyncio.wait_for(context.new_page(), timeout=20)
+        except asyncio.TimeoutError:
+            if live_pages:
+                print("  [browser] new tab timed out; reusing the startup tab")
+                return live_pages[0]
+            raise RuntimeError("BitBrowser did not create a registration tab within 20 seconds")
         for extra in live_pages:
             try:
-                await extra.close()
+                await asyncio.wait_for(extra.close(), timeout=5)
             except Exception:
                 pass
         return page
@@ -2974,6 +3054,42 @@ async def _browser_page(context, fresh=False):
         except Exception:
             pass
     return page
+
+
+async def _navigate_to_signup(page, signup_url, tag, attempts=3):
+    """Leave a stale startup tab and retry transient signup navigation failures."""
+    attempts = max(1, int(attempts))
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await page.goto(signup_url, timeout=45000, wait_until="domcontentloaded")
+            current_url = str(getattr(page, "url", "") or "").lower()
+            if current_url and not current_url.startswith(("about:blank", "chrome-error://")):
+                return
+            raise RuntimeError(f"navigation remained on {current_url or 'an empty URL'}")
+        except Exception as exc:
+            last_error = exc
+            current_url = str(getattr(page, "url", "") or "")
+            normalized_url = current_url.lower()
+            if normalized_url and not normalized_url.startswith(("about:blank", "chrome-error://")):
+                print(
+                    f"  {tag} signup page committed despite {type(exc).__name__}; continuing"
+                )
+                return
+            if attempt >= attempts:
+                break
+            print(
+                f"  {tag} signup navigation retry {attempt}/{attempts - 1}: "
+                f"{type(exc).__name__}: {str(exc)[:100]} (url={current_url[:100]})"
+            )
+            try:
+                await page.evaluate("() => window.stop()")
+            except Exception:
+                pass
+            await asyncio.sleep(min(4, attempt * 2))
+    raise RuntimeError(
+        f"signup page did not open after {attempts} attempts: {last_error}"
+    )
 
 
 async def _safe_screenshot(page, path):
@@ -3154,7 +3270,6 @@ async def _register_one_browser(bb, idx, proxy_str, keep_profile=False):
         ts = datetime.now().strftime("%m%d_%H%M%S")
         name = f"outlook_{ts}_{idx}"
 
-        is_async_browser = hasattr(bb, "open_browser_async")
         for _retry in range(5):
             try:
                 browser_options = {"proxy_str": proxy_str} if proxy_str else {"proxyType": "noproxy"}
@@ -3182,26 +3297,19 @@ async def _register_one_browser(bb, idx, proxy_str, keep_profile=False):
             print(f"  {tag} create browser failed")
             return _result(None, None)
 
-        if is_async_browser:
-            _browser, context, _page = await bb.open_browser_async(profile_id)
-            print(f"  {tag} RuyiPage Firefox connected (WebDriver BiDi)")
-            page = await _browser_page(context, fresh=True)
-            await install_traffic_saver(context)
-            email, password = await register_outlook(page, context, idx)
-        else:
-            info = bb.open_browser(profile_id)
-            ws = info.get("ws", "")
-            if not ws:
-                print(f"  {tag} no WebSocket URL")
-                return _result(None, None)
+        info = bb.open_browser(profile_id)
+        ws = info.get("ws", "")
+        if not ws:
+            print(f"  {tag} no WebSocket URL")
+            return _result(None, None)
 
-            print(f"  {tag} browser connected")
-            async with async_playwright() as p:
-                browser = await p.chromium.connect_over_cdp(ws)
-                context = browser.contexts[0] if browser.contexts else await browser.new_context()
-                page = await _browser_page(context, fresh=True)
-                await install_traffic_saver(context)
-                email, password = await register_outlook(page, context, idx)
+        print(f"  {tag} browser connected")
+        async with async_playwright() as p:
+            browser = await p.chromium.connect_over_cdp(ws)
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            await install_traffic_saver(context)
+            page = await _browser_page(context, fresh=True)
+            email, password = await register_outlook(page, context, idx)
 
         if keep_profile and email and password:
             retained_id = profile_id
@@ -3216,13 +3324,9 @@ async def _register_one_browser(bb, idx, proxy_str, keep_profile=False):
     finally:
         if profile_id:
             try:
-                if hasattr(bb, "close_browser_async"):
-                    await bb.close_browser_async(profile_id)
-                    bb.delete_browser(profile_id)
-                else:
-                    bb.close_browser(profile_id)
-                    await asyncio.sleep(2)
-                    bb.delete_browser(profile_id)
+                bb.close_browser(profile_id)
+                await asyncio.sleep(2)
+                bb.delete_browser(profile_id)
                 print(f"  {tag} browser cleaned up")
             except Exception:
                 pass
@@ -3249,11 +3353,6 @@ async def extract_graph_token_browser(
             if not profile_id:
                 return None
         print(f"  {tag} using {'registration' if reused_profile else 'new'} browser profile for Graph")
-        if hasattr(bb, "open_browser_async"):
-            _browser, context, _page = await bb.open_browser_async(profile_id)
-            page = await _browser_page(context)
-            await install_traffic_saver(context)
-            return await extract_graph_token(page, context, email, password, idx)
         if not ws:
             info = bb.open_browser(profile_id)
             ws = info.get("ws", "")
@@ -3272,13 +3371,9 @@ async def extract_graph_token_browser(
     finally:
         if profile_id:
             try:
-                if hasattr(bb, "close_browser_async"):
-                    await bb.close_browser_async(profile_id)
-                    bb.delete_browser(profile_id)
-                else:
-                    bb.close_browser(profile_id)
-                    await asyncio.sleep(2)
-                    bb.delete_browser(profile_id)
+                bb.close_browser(profile_id)
+                await asyncio.sleep(2)
+                bb.delete_browser(profile_id)
                 print(f"  {tag} browser cleaned up")
             except Exception:
                 pass

@@ -44,6 +44,8 @@ def build_command(platform, args, account):
         ]
         if token:
             cmd += ["--token", token]
+        if client_id:
+            cmd += ["--client-id", client_id]
         return cmd
 
     if platform == "chatgpt":
@@ -114,6 +116,20 @@ def build_command(platform, args, account):
             cmd += ["--account-password", args.kiro_account_password]
         return cmd
 
+    if platform == "github":
+        cmd = [
+            sys.executable, "-u", "register_github.py",
+            "--count", "1",
+            "--concurrency", "1",
+            "--timeout", timeout,
+            "--email", email,
+            "--password", password or "",
+            "--auto",
+        ]
+        if not getattr(args, "keep_on_fail", False):
+            cmd.append("--no-keep")
+        return cmd
+
     raise ValueError(f"unknown platform: {platform}")
 
 
@@ -159,9 +175,11 @@ async def run_platform(platform, cmd, run_id, child_env=None):
 
 def parse_account(args):
     if args.from_pool:
-        em = email_pool.next_email("tri")
+        em = email_pool.latest_email(
+            "tri", require_token=True, validate_token=True
+        )
         if not em:
-            raise SystemExit("no email available in emails.txt")
+            raise SystemExit("no readable Outlook mailbox available in emails.txt")
         return em
 
     if not args.email:
@@ -203,6 +221,12 @@ def results_exit_code(results):
 
 async def process_account(account, args, child_env):
     email = account[0]
+    # Explicit/端到端邮箱不会经过 next_email；仍需从 Outlook 单独售卖中永久排除。
+    try:
+        from common.emails import mark_registration_started
+        mark_registration_started("tri", email, account[1] or "")
+    except Exception as exc:
+        print(f"  [email] sale exclusion warning for {email}: {str(exc)[:100]}")
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + email.split("@")[0][:8]
     print("=" * 60)
     print(f"  account: {email}  platforms={','.join(args.platforms)}  mode={'parallel' if args.parallel else 'sequential'}")
@@ -230,7 +254,7 @@ async def main():
     parser.add_argument("--token", default="", help="Outlook refresh_token")
     parser.add_argument("--client-id", default="", help="Outlook OAuth client_id")
     parser.add_argument("--from-pool", action="store_true", help="reserve one mailbox from emails.txt")
-    parser.add_argument("--platforms", nargs="+", choices=["claude", "chatgpt", "grok", "kiro"], default=["claude", "chatgpt", "grok"])
+    parser.add_argument("--platforms", nargs="+", choices=["claude", "chatgpt", "grok", "kiro", "github"], default=["claude", "chatgpt", "grok"])
     parser.add_argument("--parallel", action="store_true", help="run platforms in parallel; default is sequential")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--node", default="auto", help="Claude/ChatGPT/Grok Clash node")
@@ -278,7 +302,9 @@ async def main():
             # 节流：处理中的邮箱达到上限就等空位，避免把池里的号一次性 reserve 光
             while len(tasks) >= args.max_inflight:
                 await asyncio.sleep(2)
-            acc = email_pool.next_email("tri")
+            acc = email_pool.latest_email(
+                "tri", require_token=True, validate_token=True
+            )
             if not acc:
                 print(f"  [loop] pool empty, waiting for producer... ({args.poll_wait}s)")
                 await asyncio.sleep(args.poll_wait)

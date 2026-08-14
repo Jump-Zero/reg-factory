@@ -83,6 +83,82 @@ class AssetStoreTests(unittest.TestCase):
             "used@outlook.com": ("tri",),
         })
 
+    def test_default_outlook_sale_excludes_platform_reserved_mailbox(self):
+        (self.root / "emails.txt").write_text(
+            "used@outlook.com----pw1----rt1----cid1\n"
+            "clean@outlook.com----pw2----rt2----cid2\n",
+            encoding="utf-8",
+        )
+        (self.root / "emails_used_claude.txt").write_text(
+            "used@outlook.com----pw1----reserved\n",
+            encoding="utf-8",
+        )
+
+        result = asset_store.get_email(claim_once=True)
+
+        self.assertEqual(result["data"]["email"], "clean@outlook.com")
+
+    def test_outlook_sale_stops_when_every_mailbox_was_used_for_registration(self):
+        (self.root / "emails.txt").write_text(
+            "used@outlook.com----pw1----rt1----cid1\n",
+            encoding="utf-8",
+        )
+        (self.root / "emails_error_chatgpt.txt").write_text(
+            "used@outlook.com----pw1----challenge_after_email\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(asset_store.AssetNotFound, "单独售卖"):
+            asset_store.get_email(claim_once=True)
+
+    def test_outlook_sale_reads_permanent_registration_exclusion_ledger(self):
+        (self.root / "emails.txt").write_text(
+            "used@outlook.com----pw1----rt1----cid1\n"
+            "clean@outlook.com----pw2----rt2----cid2\n",
+            encoding="utf-8",
+        )
+        state = self.root / "runtime" / "state"
+        state.mkdir(parents=True)
+        (state / "outlook_registration_emails.txt").write_text(
+            "\ufeffused@outlook.com\n", encoding="utf-8"
+        )
+
+        result = asset_store.get_email(claim_once=True)
+
+        self.assertEqual(result["data"]["email"], "clean@outlook.com")
+
+    def test_no_graph_mailbox_claim_delivers_only_email_and_password(self):
+        (self.root / "outlook_no_graph.txt").write_text(
+            "registered@outlook.com----password----ignored-extra\n",
+            encoding="utf-8",
+        )
+
+        result = asset_store.get_email(
+            output_format="password", claim_once=True, no_graph_only=True
+        )
+
+        self.assertEqual(result["data"], "registered@outlook.com----password")
+        self.assertTrue(result["no_graph_only"])
+        self.assertTrue(result["claim_recorded"])
+        self.assertEqual(result["claim_scope"], "outlook")
+        self.assertEqual(
+            (self.root / "runtime" / "state" / "outlook_sale_emails.txt").read_text(encoding="utf-8").strip(),
+            "registered@outlook.com",
+        )
+
+    def test_no_graph_claim_prevents_later_four_field_sale(self):
+        (self.root / "outlook_no_graph.txt").write_text(
+            "same@outlook.com----password\n", encoding="utf-8"
+        )
+        (self.root / "emails.txt").write_text(
+            "same@outlook.com----password----rt----client\n", encoding="utf-8"
+        )
+        asset_store.get_email(
+            output_format="password", claim_once=True, no_graph_only=True
+        )
+        with self.assertRaises(asset_store.AssetExhausted):
+            asset_store.get_email(output_format="line", claim_once=True)
+
     def test_pristine_email_claim_conservatively_excludes_failed_usage(self):
         (self.root / "emails.txt").write_text(
             "attempted@outlook.com----pw----rt----cid\n",

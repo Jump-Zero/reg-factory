@@ -109,6 +109,10 @@ def _outlook_sale_exclusion_path() -> Path:
     return _data_root() / "runtime" / "state" / "outlook_sale_emails.txt"
 
 
+def _outlook_registration_exclusion_path() -> Path:
+    return _data_root() / "runtime" / "state" / "outlook_registration_emails.txt"
+
+
 def _exclude_outlook_sale_from_registration(email: str) -> None:
     normalized = str(email or "").strip().lower()
     if "@" not in normalized:
@@ -304,16 +308,47 @@ def _mailboxes() -> list[dict]:
     return records
 
 
+def _no_graph_mailboxes() -> list[dict]:
+    path = _data_root() / "outlook_no_graph.txt"
+    if not path.is_file():
+        return []
+    records = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("----")
+        if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
+            continue
+        email = parts[0].strip()
+        password = parts[1].strip()
+        records.append({
+            "email": email,
+            "email_provider": classify_email_provider(email),
+            "password": password,
+            "refresh_token": "",
+            "client_id": "",
+            "line": f"{email}----{password}",
+        })
+    return records
+
+
 def registered_mailbox_usage() -> dict[str, tuple[str, ...]]:
     """Return mailboxes that were reserved or attempted for another platform."""
     usage: dict[str, set[str]] = {}
 
     def record(email: str, platform: str) -> None:
-        normalized = str(email or "").strip().lower()
+        normalized = str(email or "").lstrip("\ufeff").strip().lower()
         if "@" in normalized:
             usage.setdefault(normalized, set()).add(platform)
 
     root = _data_root()
+    registration_path = _outlook_registration_exclusion_path()
+    if registration_path.is_file():
+        for raw in registration_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            record(raw.strip(), "registration")
     for pattern, prefix in (
         ("emails_used_*.txt", "emails_used_"),
         ("emails_error_*.txt", "emails_error_"),
@@ -424,10 +459,11 @@ def get_email(
     claim_once: bool = False,
     email_provider: str = "",
     pristine_only: bool = False,
+    no_graph_only: bool = False,
 ) -> dict:
     output_format = str(output_format or "json").strip().lower()
-    if output_format not in {"json", "line"}:
-        raise AssetError("邮箱 format 仅支持 json、line")
+    if output_format not in {"json", "line", "password"}:
+        raise AssetError("邮箱 format 仅支持 json、line、password")
     provider_filter = str(email_provider or "").strip().lower()
     if provider_filter and provider_filter not in EMAIL_PROVIDERS:
         raise AssetError("email_provider must be outlook, icloud, temporary, or other")
@@ -435,16 +471,22 @@ def get_email(
         {**record, "_asset_source": f"emails.txt:{line_number}"}
         for line_number, record in enumerate(_mailboxes(), start=1)
     ]
+    if no_graph_only:
+        records = [
+            {**record, "_asset_source": f"outlook_no_graph.txt:{line_number}"}
+            for line_number, record in enumerate(_no_graph_mailboxes(), start=1)
+        ]
     if provider_filter:
         records = [record for record in records if record.get("email_provider") == provider_filter]
-    if pristine_only:
-        registered = registered_mailbox_usage()
-        records = [
-            record for record in records
-            if str(record.get("email") or "").strip().lower() not in registered
-        ]
-        if not records:
-            raise AssetNotFound("没有未被其他平台注册或尝试使用的邮箱")
+    registered = registered_mailbox_usage()
+    records = [
+        record for record in records
+        if str(record.get("email") or "").strip().lower() not in registered
+    ]
+    if not records and registered:
+        raise AssetNotFound("没有可单独售卖的邮箱；号池邮箱已被平台注册或尝试使用")
+    if no_graph_only and verified_only:
+        raise AssetError("no_graph_only 不能与 normal_only 同时使用")
     if verified_only:
         records = _verified_records("outlook", records, lambda record: record["_asset_source"])
     if verified_only or claim_once:
@@ -459,7 +501,7 @@ def get_email(
         selected, next_index, advanced = _select_index(len(records), "email", index)
         record = records[selected]
         total = len(records)
-    data = record["line"] if output_format == "line" else {
+    data = record["line"] if output_format in {"line", "password"} else {
         key: value for key, value in record.items() if key != "line" and not key.startswith("_")
     }
     result = {
@@ -484,6 +526,10 @@ def get_email(
         if verified_only or claim_once:
             _exclude_outlook_sale_from_registration(record.get("email", ""))
         result["pristine"] = True
+    if no_graph_only:
+        if verified_only or claim_once:
+            _exclude_outlook_sale_from_registration(record.get("email", ""))
+        result["no_graph_only"] = True
     return result
 
 

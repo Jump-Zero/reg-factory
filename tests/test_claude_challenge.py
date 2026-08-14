@@ -11,6 +11,129 @@ from common import proxy_switch
 
 
 class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
+    def test_claude_account_requires_terms_name_and_finished_onboarding(self):
+        incomplete = {
+            "status": 200,
+            "full_name": "",
+            "display_name": "",
+            "accepted_clickwrap_versions": {},
+            "has_started": True,
+            "has_finished": False,
+        }
+        self.assertFalse(register._claude_account_onboarding_is_complete(incomplete))
+
+        complete = {
+            "status": 200,
+            "full_name": "Ada Lovelace",
+            "accepted_clickwrap_versions": {"consumer_terms": "2026-01-01"},
+            "has_finished": True,
+        }
+        self.assertTrue(register._claude_account_onboarding_is_complete(complete))
+
+    def test_claude_account_rejects_chat_route_session_without_terms(self):
+        state = {
+            "status": 200,
+            "full_name": "Ada Lovelace",
+            "accepted_clickwrap_versions": {},
+            "has_finished": True,
+        }
+        self.assertFalse(register._claude_account_onboarding_is_complete(state))
+
+    async def test_incomplete_account_on_new_route_reopens_onboarding(self):
+        page = MagicMock()
+        page.url = "https://claude.ai/new"
+        page.context = MagicMock()
+        page.goto = AsyncMock()
+        page.evaluate = AsyncMock(return_value={
+            "status": 200,
+            "full_name": "",
+            "accepted_clickwrap_versions": {},
+            "has_finished": False,
+        })
+
+        with (
+            patch.object(register, "dismiss_claude_cookie_banner", AsyncMock()),
+            patch.object(register, "_claude_app_shell_state", AsyncMock(return_value={
+                "textLength": 10,
+                "htmlLength": 100,
+                "elements": 10,
+                "interactive": 1,
+            })),
+            patch.object(register.asyncio, "sleep", AsyncMock()),
+        ):
+            result = await register.handle_onboarding(
+                page, "Ada", "Lovelace", max_rounds=1
+            )
+
+        self.assertFalse(result)
+        page.goto.assert_awaited_once_with(
+            "https://claude.ai/",
+            timeout=60000,
+            wait_until="domcontentloaded",
+        )
+
+    def test_blank_claude_app_shell_requires_no_content_or_controls(self):
+        self.assertTrue(register._claude_app_shell_is_blank({
+            "textLength": 0,
+            "htmlLength": 13,
+            "elements": 1,
+            "interactive": 0,
+        }))
+        self.assertTrue(register._claude_app_shell_is_blank({
+            "textLength": 0,
+            "htmlLength": 12000,
+            "elements": 80,
+            "interactive": 0,
+        }))
+        self.assertFalse(register._claude_app_shell_is_blank({
+            "textLength": 0,
+            "htmlLength": 500,
+            "elements": 20,
+            "interactive": 1,
+        }))
+        self.assertTrue(register._claude_app_shell_is_blank({
+            "textLength": 0,
+            "htmlLength": 500,
+            "elements": 20,
+            "interactive": 6,
+            "visibleInteractive": 0,
+        }))
+        self.assertFalse(register._claude_app_shell_is_blank({
+            "textLength": 12,
+            "htmlLength": 100,
+            "elements": 2,
+            "interactive": 0,
+        }))
+
+    def test_graph_access_error_becomes_replaceable_claude_mailbox_error(self):
+        from common.mailbox import GraphMailboxAccessError
+
+        with (
+            patch(
+                "common.mailbox.get_link_by_token",
+                side_effect=GraphMailboxAccessError(
+                    "graph_http_403", permanent=True
+                ),
+            ),
+            self.assertRaises(register.ClaudeMailboxDeliveryError) as raised,
+        ):
+            register.get_magic_link_by_token(
+                "user@outlook.com", "refresh-token", max_wait=1
+            )
+
+        self.assertEqual(raised.exception.reason, "graph_http_403")
+
+    def test_magic_link_loading_challenge_requires_fresh_residential_profile(self):
+        self.assertTrue(register._claude_challenge_requires_fresh_profile(
+            "Claude magic-link page stayed in loading state"
+        ))
+        self.assertTrue(register._claude_challenge_requires_fresh_profile(
+            "Claude native magic-link verification rejected HTTP 403"
+        ))
+        self.assertTrue(register._claude_challenge_requires_fresh_profile(
+            "Claude hCaptcha was not solved"
+        ))
+
     def setUp(self):
         self.proxy_env = patch.dict(os.environ, {"PROXY_MODE": "clash_auto"})
         self.proxy_env.start()
@@ -178,6 +301,12 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("squirrels", prompt)
+        self.assertIn("PICK=[a,b,c]", prompt)
+
+    def test_missing_hcaptcha_instruction_infers_repeated_object(self):
+        prompt = register._claude_hcaptcha_inferred_grid_prompt()
+
+        self.assertIn("repeated across multiple tiles", prompt)
         self.assertIn("PICK=[a,b,c]", prompt)
 
     def test_korean_shortest_chain_challenge_gets_click_target_prompt(self):
@@ -700,7 +829,7 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(prepared)
         present.assert_not_awaited()
         page.goto.assert_awaited_once_with(
-            "https://claude.ai/", timeout=60000
+            "https://claude.ai/", timeout=60000, wait_until="domcontentloaded"
         )
 
     async def test_native_200_after_slow_captcha_beats_deadline(self):
@@ -727,6 +856,80 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(prepared)
+
+    async def test_native_200_after_hidden_captcha_beats_deadline(self):
+        page = MagicMock()
+        page._rf_magic_verify_status = None
+        page._rf_magic_verify_response_body = ""
+        page.goto = AsyncMock()
+
+        async def hide_after_accept(_page):
+            page._rf_magic_verify_status = 200
+            page._rf_magic_verify_response_body = '{"success":true}'
+            return None
+
+        with (
+            patch.object(
+                register, "_claude_hcaptcha_present", AsyncMock(return_value=True)
+            ),
+            patch.object(register, "solve_claude_hcaptcha", hide_after_accept),
+            patch.object(register.asyncio, "sleep", AsyncMock()),
+            patch.object(register.time, "monotonic", side_effect=[0, 0]),
+        ):
+            prepared = await register.prepare_claude_post_magic(
+                page, max_wait=25
+            )
+
+        self.assertTrue(prepared)
+
+    async def test_fallback_rechecks_native_success_before_token_solver(self):
+        page = MagicMock()
+        page._rf_magic_verify_status = 200
+        page._rf_magic_verify_response_body = '{"success":true}'
+        page.goto = AsyncMock()
+
+        with (
+            patch.object(
+                register,
+                "prepare_claude_post_magic",
+                AsyncMock(side_effect=register.ClaudeChallengeError(
+                    "Claude magic-link page stayed in loading state"
+                )),
+            ),
+            patch.object(
+                register,
+                "verify_claude_magic_link_with_browser_token",
+                AsyncMock(),
+            ) as token_fallback,
+            patch.object(register.asyncio, "sleep", AsyncMock()),
+        ):
+            prepared = await register.prepare_claude_post_magic_with_http_fallback(
+                page, "https://claude.ai/magic-link#nonce:email"
+            )
+
+        self.assertTrue(prepared)
+        token_fallback.assert_not_awaited()
+
+    async def test_hcaptcha_driver_close_after_native_success_is_accepted(self):
+        page = MagicMock()
+        page._rf_magic_verify_status = 200
+        page._rf_magic_verify_response_body = '{"success":true}'
+        page.frames = []
+        page.screenshot = AsyncMock()
+
+        with (
+            patch.object(
+                register, "_claude_hcaptcha_present", AsyncMock(return_value=True)
+            ),
+            patch.object(
+                register,
+                "_solve_claude_hcaptcha_vision",
+                AsyncMock(side_effect=RuntimeError("Target page has been closed")),
+            ),
+        ):
+            solved = await register.solve_claude_hcaptcha(page)
+
+        self.assertTrue(solved)
 
     async def test_native_403_after_slow_captcha_is_not_hidden_as_loading(self):
         page = MagicMock()
@@ -818,6 +1021,26 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(register._warm_claude_http_session(session, "test"))
+
+    async def test_japanese_new_user_capacity_page_is_not_a_challenge(self):
+        page = MagicMock()
+        page.locator.return_value.inner_text = AsyncMock(return_value=(
+            "申し訳ありませんが、現在Claudeは新規ユーザーにはご利用いただけません。"
+            "近日中にサービスを拡大できるよう努めています。"
+        ))
+
+        self.assertTrue(await register._claude_new_user_unavailable(page))
+
+    async def test_new_user_capacity_page_stops_before_challenge_retry(self):
+        page = MagicMock()
+        page.locator.return_value.inner_text = AsyncMock(return_value=(
+            "申し訳ありませんが、現在Claudeは新規ユーザーにはご利用いただけません。"
+        ))
+        with patch.object(register, "dismiss_claude_cookie_banner", AsyncMock()):
+            with self.assertRaises(register.ClaudeNewUserUnavailable):
+                await register.ensure_claude_login_form(
+                    page, challenge_wait=0, node_retries=2, manual_timeout=0
+                )
 
     def test_api_response_rejects_200_html_challenge(self):
         response = MagicMock(
@@ -940,6 +1163,119 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(point)
         self.assertAlmostEqual(point[0], 131.5, delta=1)
         self.assertAlmostEqual(point[1], 221.5, delta=1)
+
+    def test_turnstile_detector_rejects_viewport_center_loader(self):
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (800, 500), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((388, 238, 411, 261), outline="black", width=2)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+
+        point = register._find_turnstile_checkbox_center(buffer.getvalue())
+
+        self.assertIsNone(point)
+
+    async def test_hcaptcha_checkbox_frame_never_clicks_body_fallback(self):
+        checkbox = MagicMock()
+        checkbox.first = checkbox
+        checkbox.count = AsyncMock(return_value=0)
+        body = MagicMock()
+        body.click = AsyncMock()
+        frame = MagicMock()
+        frame.url = "https://newassets.hcaptcha.com/captcha/?frame=checkbox"
+        frame.frame_element = AsyncMock()
+        frame.frame_element.return_value.bounding_box = AsyncMock(return_value=None)
+        frame.locator.side_effect = lambda selector: body if selector == "body" else checkbox
+        frame.evaluate = AsyncMock(return_value=False)
+        page = MagicMock()
+        page.frames = [frame]
+
+        with (
+            patch.object(register.time, "monotonic", side_effect=[0, 0, 2]),
+            patch.object(register.asyncio, "sleep", AsyncMock()),
+        ):
+            result = await register._visible_claude_hcaptcha_frame(page, timeout=1)
+
+        self.assertIsNone(result)
+        body.click.assert_not_awaited()
+
+    async def test_canvas_single_choice_without_model_answer_does_not_click_center(self):
+        from vision_solver import drivers
+        from vision_solver.schema import CaptchaSpec
+
+        frame = MagicMock()
+        spec = CaptchaSpec(
+            frame_match=["hcaptcha"],
+            mode="canvas_grid",
+            canvas_sel="canvas",
+            max_rounds=1,
+            settle_ms=0,
+            rows=1,
+            cols=3,
+            answer_format="ANSWER_INDEX",
+        )
+        geometry = {
+            "cells_xy": [(100, 100), (200, 100), (300, 100)],
+            "boxes": [(50, 50, 100, 100)] * 3,
+        }
+        with (
+            tempfile.TemporaryDirectory() as shot_dir,
+            patch.object(drivers, "_find_frame", AsyncMock(return_value=frame)),
+            patch.object(drivers, "_wait_canvas", AsyncMock(return_value=True)),
+            patch.object(
+                drivers,
+                "_read_instruction",
+                AsyncMock(return_value="click the image that does not belong"),
+            ),
+            patch.object(
+                drivers,
+                "_shot_canvas_stable",
+                AsyncMock(return_value=("aW1hZ2U=", 400, 200)),
+            ),
+            patch.object(
+                drivers,
+                "overlay_grid_numbers",
+                return_value=("aW1hZ2U=", geometry),
+            ),
+            patch.object(drivers, "enhance_local", return_value="aW1hZ2U="),
+            patch.object(
+                drivers,
+                "vote_answer",
+                return_value=(None, {}, [("model", None, "unavailable")]),
+            ),
+            patch.object(drivers, "_click_canvas_cell", AsyncMock()) as click,
+            patch.object(drivers.asyncio, "sleep", AsyncMock()),
+        ):
+            solved = await drivers.solve_canvas_grid(MagicMock(), spec, shot_dir)
+
+        self.assertFalse(solved)
+        click.assert_not_awaited()
+
+    async def test_embedded_turnstile_without_checkbox_never_clicks_coordinates(self):
+        candidates = MagicMock()
+        candidates.count = AsyncMock(return_value=0)
+        frame = MagicMock()
+        frame.url = "https://challenges.cloudflare.com/turnstile/v0/"
+        frame.locator.return_value = candidates
+        page = MagicMock()
+        page.frames = [frame]
+        page.evaluate = AsyncMock(return_value=[])
+        page.mouse.click = AsyncMock()
+
+        with (
+            patch.object(
+                register,
+                "_claude_managed_challenge_present",
+                AsyncMock(return_value=False),
+            ),
+            patch.object(register.asyncio, "sleep", AsyncMock()),
+        ):
+            solved = await register.solve_turnstile(page, max_wait=3)
+
+        self.assertFalse(solved)
+        page.mouse.click.assert_not_awaited()
 
     async def test_managed_challenge_clicks_only_detected_checkbox(self):
         page = MagicMock()
@@ -1118,6 +1454,7 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload, {"email": "mail@example.com"})
         script = page.evaluate.call_args.args[0]
         self.assertIn("/api/auth/send_magic_link", script)
+        self.assertIn("locale: 'en-US'", script)
         self.assertIn("source: 'claude'", script)
 
     async def test_magic_link_navigation_arms_hcaptcha_hook_first(self):
@@ -1135,7 +1472,9 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
 
         install.assert_awaited_once_with(page)
         page.goto.assert_awaited_once_with(
-            "https://claude.ai/magic-link#nonce:email", timeout=60000
+            "https://claude.ai/magic-link#nonce:email",
+            timeout=30000,
+            wait_until="commit",
         )
 
     async def test_email_submission_prefers_visible_form_state(self):
@@ -1237,7 +1576,9 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({cookie["name"] for cookie in added}, {
             "sessionKey", "activitySessionId"
         })
-        page.goto.assert_awaited_once_with("https://claude.ai/", timeout=60000)
+        page.goto.assert_awaited_once_with(
+            "https://claude.ai/", timeout=60000, wait_until="domcontentloaded"
+        )
 
     def test_node_picker_excludes_failed_nodes(self):
         switch = MagicMock()
@@ -1531,6 +1872,61 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(solved)
 
+    async def test_claude_hcaptcha_instruction_reads_current_prompt_selector(self):
+        frame = MagicMock()
+        prompt = MagicMock()
+        prompt.first = prompt
+        prompt.count = AsyncMock(return_value=1)
+        prompt.inner_text = AsyncMock(
+            return_value="Select all images containing a tennis ball"
+        )
+        frame.locator.side_effect = lambda selector: prompt
+
+        result = await register._read_claude_hcaptcha_instruction(frame, timeout=0)
+
+        self.assertIn("tennis ball", result)
+
+    async def test_dom_tile_hcaptcha_keeps_requested_gemini_as_only_voter(self):
+        from vision_solver import vision as vision_backend
+
+        challenge_frame = MagicMock()
+        prompt = MagicMock()
+        prompt.first = prompt
+        prompt.inner_text = AsyncMock(return_value="")
+        tiles = MagicMock()
+        tiles.count = AsyncMock(return_value=9)
+        challenge_frame.locator.side_effect = lambda selector: (
+            tiles if selector == ".task-image" else prompt
+        )
+        page = MagicMock()
+
+        async def check_driver(_page, spec, **_kwargs):
+            self.assertIn("repeated across multiple tiles", spec.prompt)
+            self.assertEqual(
+                vision_backend.VOTER_MODELS,
+                [("https://gemini.example", "key", "gemini-3.6-flash")],
+            )
+            return False
+
+        with (
+            patch.object(register, "dismiss_claude_cookie_banner", AsyncMock()),
+            patch.object(
+                register, "_visible_claude_hcaptcha_frame",
+                AsyncMock(return_value=challenge_frame),
+            ),
+            patch.object(
+                register, "_select_claude_vision_voter",
+                return_value=("https://gemini.example", "key", "gemini-3.6-flash"),
+            ),
+            patch.object(vision_backend, "VOTER_MODELS", [
+                ("https://fallback.example", "fallback-key", "gpt-5.5")
+            ]),
+            patch("vision_solver.solve", AsyncMock(side_effect=check_driver)),
+        ):
+            solved = await register._solve_claude_hcaptcha_vision(page)
+
+        self.assertFalse(solved)
+
     async def test_claude_vision_applies_chain_prompt_to_canvas_driver(self):
         from vision_solver import vision as vision_backend
 
@@ -1722,7 +2118,9 @@ class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("oauth_client_id", payload)
         script = page.evaluate.call_args.args[0]
         self.assertIn("fetch(endpoint", script)
-        page.goto.assert_awaited_once_with("https://claude.ai/", timeout=60000)
+        page.goto.assert_awaited_once_with(
+            "https://claude.ai/", timeout=60000, wait_until="domcontentloaded"
+        )
 
     async def test_magic_link_verification_replays_captured_request_shape(self):
         page = MagicMock()

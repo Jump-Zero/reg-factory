@@ -151,7 +151,6 @@ K12_PROCESS = None
 K12_LOG_HANDLE = None
 K12_START_TASK = None
 K12_LOCK = asyncio.Lock()
-RUYIPAGE_INSTALL_TASK = None
 
 # Plus 工作台使用内置 zkky 服务；网络出口优先住宅 IP，缺失时回退 Clash。
 PLUS_PORT = 5601
@@ -844,28 +843,15 @@ def _test_clash():
 
 def _fingerprint_provider():
     return (
-        _read_config_val("FINGERPRINT_BROWSER", "ruyipage")
+        _read_config_val("FINGERPRINT_BROWSER", "bitbrowser")
         or os.environ.get("BROWSER_PROVIDER")
-        or "ruyipage"
+        or "bitbrowser"
     ).strip().lower()
 
 
 def _test_bitbrowser():
     """Test selected fingerprint browser local API."""
     provider = _fingerprint_provider()
-    if provider in {"ruyipage", "ruyi", "firefox_bidi"}:
-        try:
-            import ruyipage
-            from common.ruyipage_runtime import ensure_runtime
-
-            configured = _read_config_val("RUYIPAGE_BROWSER_PATH", "")
-            result = ensure_runtime(configured)
-            path = result.get("path", "")
-            if path:
-                return True, f"RuyiPage {ruyipage.__version__} Firefox ready: {os.path.basename(path)}"
-        except Exception as exc:
-            return False, f"RuyiPage 不可用: {str(exc)[:100]}"
-        return False, "RuyiPage Firefox runtime 未安装；请运行面板中的安装任务"
     if provider in {"bundled", "embedded", "local", "custom", "chrome", "chromium"}:
         from common.bundled_browser import find_browser_path
 
@@ -984,11 +970,11 @@ def _test_outlook_recovery_mailbox():
     if not record:
         return False, "请先填写 OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX"
     try:
-        from common.mailbox import check_refresh_token, parse_outlook_recovery_mailbox
+        from common.mailbox import check_mailbox_access, parse_outlook_recovery_mailbox
 
         mailbox = parse_outlook_recovery_mailbox(record)
-        validation = check_refresh_token(
-            mailbox["refresh_token"], mailbox["client_id"]
+        validation = check_mailbox_access(
+            mailbox["email"], mailbox["refresh_token"], mailbox["client_id"]
         )
         if not validation.get("ok"):
             return False, "Graph API 验证失败: " + str(
@@ -1063,6 +1049,7 @@ def api_asset_email(
     email_provider: str = "",
     pristine_only: bool = False,
     normal_only: bool = False,
+    no_graph_only: bool = False,
 ):
     denied = _asset_api_denied(request)
     if denied:
@@ -1076,7 +1063,8 @@ def api_asset_email(
             claim_once=True,
             email_provider=email_provider,
             pristine_only=pristine_only,
-            verified_only=normal_only,
+            no_graph_only=no_graph_only,
+            verified_only=normal_only and not no_graph_only,
         )
     )
 
@@ -1346,8 +1334,23 @@ async def api_chatgpt_plus_import_codex(request: Request):
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     sms_provider = str((data or {}).get("sms_provider") or "auto").strip().lower()
-    if sms_provider not in {"auto", "smsman", "firefox", "hero"}:
+    if sms_provider not in {"auto", "custom", "smsman", "firefox", "hero"}:
         return JSONResponse({"error": "未知手机号接码平台"}, status_code=400)
+    if sms_provider == "custom":
+        from common import custom_sms
+
+        custom_pool = await asyncio.to_thread(custom_sms.summary)
+        required = min(concurrency, len(records))
+        if custom_pool["available"] < required:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"自定义号码池可用 {custom_pool['available']} 个，"
+                        f"当前并发启动至少需要 {required} 个"
+                    )
+                },
+                status_code=400,
+            )
     node = str((data or {}).get("node") or "auto").strip()[:120] or "auto"
     group = str(
         (data or {}).get("group")
@@ -2351,6 +2354,28 @@ def api_sms_rents():
     return {"rents": out, "ttl": SMS_RENT_TTL}
 
 
+@app.get("/api/sms/custom")
+async def api_custom_sms_get():
+    from common import custom_sms
+
+    return await asyncio.to_thread(custom_sms.summary)
+
+
+@app.post("/api/sms/custom")
+async def api_custom_sms_import(request: Request):
+    data = await request.json()
+    text = str((data or {}).get("text") or "")
+    if not text.strip():
+        return JSONResponse({"error": "请粘贴至少一个号码和记录 URL"}, status_code=400)
+    if len(text) > 1_000_000:
+        return JSONResponse({"error": "自定义号码批量内容不能超过 1 MB"}, status_code=413)
+    if len([line for line in text.splitlines() if line.strip()]) > 1000:
+        return JSONResponse({"error": "单批最多导入 1000 个号码"}, status_code=400)
+    from common import custom_sms
+
+    return await asyncio.to_thread(custom_sms.import_text, text)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return open(os.path.join(WEBUI, "static", "index.html"), encoding="utf-8").read()
@@ -2432,19 +2457,7 @@ def api_update():
 @app.get("/api/status")
 def api_status():
     provider = _fingerprint_provider()
-    browser_runtime = {}
-    if provider in {"ruyipage", "ruyi", "firefox_bidi"}:
-        try:
-            from common.ruyipage_runtime import runtime_status
-
-            browser_runtime = runtime_status(
-                _read_config_val("RUYIPAGE_BROWSER_PATH", "")
-            )
-            bb = browser_runtime.get("path", "") if browser_runtime.get("state") == "ready" else ""
-        except Exception:
-            bb = ""
-        provider_label = "ruyipage"
-    elif provider in {"bundled", "embedded", "local", "custom", "chrome", "chromium"}:
+    if provider in {"bundled", "embedded", "local", "custom", "chrome", "chromium"}:
         from common.bundled_browser import find_browser_path
 
         bb = find_browser_path()
@@ -2475,9 +2488,8 @@ def api_status():
         "version": WEBUI_VERSION,
         "root": ROOT,
         "data_root": os.environ.get("REG_FACTORY_DATA_DIR") or ROOT,
-        "bitbrowser": os.path.isfile(bb) if provider_label in {"ruyipage", "bundled", "custom"} else _http_alive(bb),
+        "bitbrowser": os.path.isfile(bb) if provider_label in {"bundled", "custom"} else _http_alive(bb),
         "browser_provider": provider_label,
-        "browser_runtime": browser_runtime,
         "clash": network,
         "network": network,
         "proxy_mode": mode,
@@ -2639,7 +2651,7 @@ async def api_proxy_set(request: Request):
         return JSONResponse({"ok": False, "error": "换 IP 接口方法只能是 GET 或 POST"}, status_code=400)
     updates["REG_FACTORY_PROXY_ROTATE_METHOD"] = method.upper()
     traffic_mode = updates["REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE"] or "balanced"
-    if traffic_mode not in {"off", "balanced", "aggressive"}:
+    if traffic_mode not in {"off", "balanced", "aggressive", "extreme"}:
         return JSONResponse({"ok": False, "error": "住宅流量模式无效"}, status_code=400)
     updates["REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE"] = traffic_mode
     try:
@@ -3149,19 +3161,7 @@ async def api_stop_all():
 
 @app.on_event("startup")
 async def startup_local_services():
-    global K12_START_TASK, RUYIPAGE_INSTALL_TASK
-    if _fingerprint_provider() in {"ruyipage", "ruyi", "firefox_bidi"}:
-        from common.ruyipage_runtime import ensure_runtime, runtime_status
-
-        configured = _read_config_val("RUYIPAGE_BROWSER_PATH", "")
-        if runtime_status(configured).get("state") == "missing":
-            async def install_ruyipage():
-                try:
-                    await asyncio.to_thread(ensure_runtime, configured)
-                except Exception:
-                    pass
-
-            RUYIPAGE_INSTALL_TASK = asyncio.create_task(install_ruyipage())
+    global K12_START_TASK
     auto_start = _read_config_val("K12_AUTO_START", "1").strip().lower() not in {"0", "false", "no", "off"}
     if auto_start and not _k12_alive():
         K12_START_TASK = asyncio.create_task(_start_k12_service())
@@ -3169,13 +3169,12 @@ async def startup_local_services():
 
 @app.on_event("shutdown")
 async def shutdown_local_services():
-    global K12_START_TASK, RUYIPAGE_INSTALL_TASK
+    global K12_START_TASK
     if K12_START_TASK and not K12_START_TASK.done():
         K12_START_TASK.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await K12_START_TASK
     K12_START_TASK = None
-    RUYIPAGE_INSTALL_TASK = None
     await _stop_k12_service()
     await asyncio.to_thread(_stop_plus_service_sync)
 

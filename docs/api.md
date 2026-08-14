@@ -34,7 +34,7 @@ curl "http://127.0.0.1:8799/api/assets/emails?format=json&email_provider=icloud"
 curl "http://127.0.0.1:8799/api/assets/emails?normal_only=true"
 ```
 
-`format=json` 返回 `email`、`password`、`refresh_token`、`client_id`；`format=line` 返回原始 `----` 分隔文本。默认领取不读取扫描状态。设置 `normal_only=true` 后只使用最近一次号池扫描缓存筛选，并在响应中返回 `verification`；领取请求本身仍不会联网检测。没有缓存为正常且尚未领取的邮箱时返回 HTTP 409。
+`format=json` 返回 `email`、`password`、`refresh_token`、`client_id`；`format=line` 返回原始 `----` 分隔文本。默认领取不读取扫描状态，但会永久排除已经被任意平台注册领取、尝试或成功使用的邮箱，防止同一 Outlook 邮箱再被单独售卖。设置 `normal_only=true` 后只使用最近一次号池扫描缓存筛选，并在响应中返回 `verification`；领取请求本身仍不会联网检测。没有缓存为正常且尚未领取的邮箱时返回 HTTP 409。
 
 邮箱与平台资产响应都会包含 `email_provider`：`outlook`、`icloud`、`temporary` 或 `other`。可用 `email_provider` 查询参数按注册邮箱来源筛选。
 

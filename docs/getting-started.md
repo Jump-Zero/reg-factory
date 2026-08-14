@@ -98,7 +98,6 @@ http://username:password@host:port
 
 打开“配置 (.env) -> 指纹浏览器”。
 
-- `ruyipage`：默认选项，首次使用会自动安装 Firefox runtime。
 - `bundled`：使用程序内置 Chromium，旧的 Chromium/CDP 流程会自动选择它。
 - `custom`：使用本机 Chrome/Chromium，可填写可执行文件路径。
 - `bitbrowser`：需要先启动 BitBrowser，并保持本地 API `http://127.0.0.1:54345` 可访问。
@@ -106,10 +105,7 @@ http://username:password@host:port
 
 保存后点击“测试指纹浏览器连通”。通过标准是 WebUI 显示 API 或 runtime 已就绪。
 
-浏览器选择是“优先提供方”，不是强制所有任务使用同一个内核：
-
-- ChatGPT、Outlook、Codex OAuth、GitHub 和已开通 Plus 导入等浏览器流程已适配 RuyiPage，选择后会打开 RuyiPage Firefox。
-- Claude 和 Grok 当前直接依赖 Playwright Chromium CDP。选择 RuyiPage 时，这些任务卡片会明确提示并自动使用内置 Chromium；打开 Chrome/Chromium 是兼容行为，不代表配置没有保存。
+浏览器选择决定网页任务使用的 Chromium provider。默认 BitBrowser 为每个并发槽创建独立 Profile、Cookie 和指纹；内置或自定义 Chromium 适合本地调试。
 
 Outlook 使用 BitBrowser 时，任务会新建干净的注册标签页并关闭启动时的 IP 环境页或导航页；每个并发槽仍有独立 Profile、Cookie 和指纹种子。
 
@@ -160,15 +156,19 @@ Graph 授权使用独立的 `OUTLOOK_GRAPH_AUTH_TIMEOUT`，默认 240 秒，不�
 
 ## 7. 调整住宅流量模式
 
-网络页的“住宅流量模式”有三档。
+网络页的“住宅流量模式”有四档。
 
 ### 平衡节流 `balanced`
 
-默认模式。拦截普通图片、字体和音视频，保留脚本、样式表、Microsoft 登录资源和常见验证资源。第一次运行建议使用此模式。
+默认模式。拦截普通图片、字体和音视频，保留脚本、样式表、Microsoft、Claude、ChatGPT、Grok、GitHub 登录资源和常见验证资源。第一次运行建议使用此模式。
 
 ### 激进节流 `aggressive`
 
-继续拦截非 Microsoft 授权页的样式表和常见统计请求。适合住宅流量价格较高且平衡模式已经跑通的情况。如果页面结构明显异常、按钮不可见或状态识别异常，先切回平衡模式复测。
+继续拦截非认证页的样式表和常见统计请求；Microsoft、Claude、ChatGPT、Grok、GitHub 的认证页样式仍会保留。适合住宅流量价格较高且平衡模式已经跑通的情况。如果页面结构明显异常、按钮不可见或状态识别异常，先切回平衡模式复测。
+
+### 极限节流 `extreme`
+
+在激进模式基础上，为 BitBrowser 加入后台联网抑制启动参数，并拦截预取、预渲染、清单、源码映射和更多遥测域名。不会强制把窗口启动页设为 `about:blank`；连接后会先安装请求过滤，再创建注册标签页。验证码资源与五家认证页的必要样式仍会放行，图片、字体、媒体和可选遥测继续拦截；页面行为异常时依次回退到 `aggressive` 或 `balanced`。
 
 ### 关闭节流 `off`
 
@@ -287,7 +287,7 @@ macOS/Linux: ./update.sh
 5. 日志是否显示注册完成、Graph token 和写入记录。
 6. 住宅池端点数量是否少于输入并发。
 7. 是否出现 Microsoft 临时登录限流。
-8. 页面异常时切换 `aggressive -> balanced -> off` 对比。
+8. 页面异常时切换 `extreme -> aggressive -> balanced -> off` 对比。
 
 仍无法定位时，只提供脱敏后的错误文本和相关日志片段。不要上传 `.env`、完整代理 URL、账号密码、Cookie、Token、邮箱池或原始截图。
 

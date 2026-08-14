@@ -23,7 +23,7 @@ def _selected_provider():
         os.environ.get("FINGERPRINT_BROWSER")
         or os.environ.get("BROWSER_PROVIDER")
         or FINGERPRINT_BROWSER
-        or "ruyipage"
+        or "bitbrowser"
     ).strip().lower()
 
 
@@ -40,13 +40,6 @@ class BitBrowser:
     provider_name = "bitbrowser"
 
     def __new__(cls, api_base=None):
-        if cls is BitBrowser and _selected_provider() in {
-            "ruyipage", "ruyi", "firefox_bidi",
-        }:
-            # Legacy flows still call Playwright Chromium CDP directly. They use
-            # the local Chromium adapter until they migrate to the shared layer.
-            from common.bundled_browser import BundledBrowser
-            return BundledBrowser(api_base=api_base)
         if cls is BitBrowser and _selected_provider() in {
             "bundled", "embedded", "local", "custom", "chrome", "chromium",
         }:
@@ -97,7 +90,16 @@ class BitBrowser:
         打开浏览器窗口，返回 WebSocket 调试地址
         返回: {"ws": "ws://...", "http": "http://..."}
         """
-        result = self._post("/browser/open", {"id": profile_id})
+        from common.traffic_saver import bitbrowser_open_payload
+
+        payload = bitbrowser_open_payload(profile_id)
+        try:
+            result = self._post("/browser/open", payload)
+        except Exception:
+            if "args" not in payload:
+                raise
+            print("  BitBrowser rejected traffic-saving launch args; retrying normally")
+            result = self._post("/browser/open", {"id": profile_id})
         return result["data"]
 
     def update_browser_fingerprint(self, profile_id, **fingerprint):
@@ -151,6 +153,8 @@ class BitBrowser:
         创建新的浏览器窗口配置
         返回创建的窗口 ID
         """
+        from common.traffic_saver import bitbrowser_profile_defaults
+
         data = {
             "name": name,
             "remark": "claude.ai 自动注册",
@@ -159,6 +163,7 @@ class BitBrowser:
             "browserFingerPrint": {
                 "coreVersion": "130",
             },
+            **bitbrowser_profile_defaults(),
             **kwargs,
         }
         result = self._post("/browser/update", data)

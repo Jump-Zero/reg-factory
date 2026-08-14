@@ -6,14 +6,13 @@
 
 支持以下浏览器类型；外部客户端模式需要保持客户端运行：
 
-- [RuyiPage](https://github.com/LoseNine/ruyipage)：`FINGERPRINT_BROWSER=ruyipage`，默认用于 ChatGPT、Codex OAuth、GitHub 等共享浏览器流程。便携包首次启动和首次打开浏览器时会自动安装 Firefox runtime，后续版本复用 `%LOCALAPPDATA%\ruyipage\browsers`，无需重复安装。自动安装失败时可运行 WebUI 的“安装 RuyiPage Firefox”任务重试，或用 `RUYIPAGE_BROWSER_PATH` 指定已有 Firefox。
 - 内置 Chromium：`FINGERPRINT_BROWSER=bundled`，安装程序会配置浏览器路径。
 - 普通 Chrome/Chromium：`FINGERPRINT_BROWSER=custom`，通过 `CUSTOM_BROWSER_PATH` 指定可执行文件；留空时会尝试查找系统 Chrome。
 - [BitBrowser 官方下载页](https://www.bitbrowser.cn/download)：默认 API 为 `http://127.0.0.1:54345`。
 - AdsPower：默认 API 为 `http://127.0.0.1:50325`，启用鉴权时还需 API Key。
 - 其他指纹浏览器：`FINGERPRINT_BROWSER=custom_api` 并设置 `CUSTOM_BROWSER_API`；当前要求兼容 BitBrowser 的 `/browser/update|open|close|delete|list` 协议。
 
-在 `.env` 中用 `FINGERPRINT_BROWSER=ruyipage|bundled|custom|bitbrowser|adspower|custom_api` 切换。Outlook 注册、Graph 授权和账号恢复与 ChatGPT、Codex OAuth 一样支持 RuyiPage Firefox；Claude 和 Grok 的旧流程仍直接依赖 Playwright Chromium CDP，选择 RuyiPage 时会自动使用 bundled Chromium。
+在 `.env` 中用 `FINGERPRINT_BROWSER=bitbrowser|bundled|custom|adspower|custom_api` 切换。默认使用 BitBrowser；所有网页注册流程统一通过 Chromium CDP 自动化。
 
 ### 网络出口
 

@@ -24,8 +24,7 @@ echo "[3/6] 安装依赖 ..."
 "$VENV_PY" -m pip install --upgrade pip >/dev/null
 "$VENV_PY" -m pip install -r requirements.txt
 
-echo "[4/6] 安装 RuyiPage Firefox 与 Playwright Chromium 内核 ..."
-"$VENV_PY" -m ruyipage install || echo "[警告] RuyiPage Firefox 安装失败，可稍后运行: .venv/bin/python -m ruyipage install"
+echo "[4/6] 安装 Playwright Chromium 内核 ..."
 "$VENV_PY" -m playwright install chromium || echo "[警告] 内核安装失败,可稍后手动跑: .venv/bin/playwright install chromium"
 
 echo "[5/6] 准备 Codex K12 控制台 ..."
@@ -48,6 +47,6 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  安装完成! RuyiPage Firefox 为默认浏览器，请确保 Clash Verge 已打开,"
+echo "  安装完成! BitBrowser 为默认浏览器，请先启动 BitBrowser,"
 echo "  然后运行: ./start.sh  打开控制面板"
 echo "============================================================"

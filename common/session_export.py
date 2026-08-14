@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -36,6 +37,7 @@ except Exception:
 OPENAI_AUTH_CLAIM = "https://api.openai.com/auth"
 OPENAI_PROFILE_CLAIM = "https://api.openai.com/profile"
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_KIRO_EXPORT_LOCK = threading.RLock()
 
 
 # ============================================================ 小工具
@@ -487,26 +489,114 @@ def save_codex_oauth_credentials(credentials, email=""):
     return True
 
 
-def save_kiro_token(record, email=""):
-    """Save a Builder ID credential bundle for Kiro.
-
-    Kiro consumers need the long-lived Builder ID refresh token together with
-    the OIDC client pair, so the file intentionally keeps those fields in one
-    account record instead of splitting them across cookie/session formats.
-    """
+def build_kiro_rs_credentials(record, email=""):
+    """Normalize a Kiro Builder ID token to hank9999/kiro.rs credentials.json."""
     if not isinstance(record, dict):
-        return False
+        raise ValueError("Kiro credential must be an object")
     refresh = _s(record.get("refreshToken") or record.get("refresh_token"))
     client_id = _s(record.get("clientId") or record.get("client_id"))
-    if not refresh or not client_id:
+    client_secret = _s(record.get("clientSecret") or record.get("client_secret"))
+    provider = _s(record.get("authMethod") or record.get("auth_method") or record.get("provider")).lower()
+    auth_method = "social" if provider == "social" else "idc"
+    if not refresh:
+        raise ValueError("Kiro credential requires refreshToken")
+    if auth_method == "idc" and (not client_id or not client_secret):
+        raise ValueError("Kiro IdC credential requires clientId and clientSecret")
+
+    expires_at = _first_non_empty(
+        _iso_from_any(record.get("expiresAt")),
+        _iso_from_any(record.get("expires_at")),
+    )
+    if not expires_at:
+        try:
+            expires_in = max(0, float(record.get("expiresIn") or record.get("expires_in") or 0))
+        except (TypeError, ValueError):
+            expires_in = 0
+        if expires_in:
+            expires_at = datetime.fromtimestamp(
+                time.time() + expires_in, tz=timezone.utc
+            ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    aliases = (
+        ("accessToken", "access_token"),
+        ("profileArn", "profile_arn"),
+        ("region",),
+        ("authRegion", "auth_region"),
+        ("apiRegion", "api_region"),
+        ("machineId", "machine_id"),
+        ("subscriptionTitle", "subscription_title"),
+        ("proxyUrl", "proxy_url"),
+        ("proxyUsername", "proxy_username"),
+        ("proxyPassword", "proxy_password"),
+        ("endpoint",),
+    )
+    output = {
+        "refreshToken": refresh,
+        "authMethod": auth_method,
+    }
+    if client_id:
+        output["clientId"] = client_id
+    if client_secret:
+        output["clientSecret"] = client_secret
+    if expires_at:
+        output["expiresAt"] = expires_at
+    account_email = _email_or_empty(email or record.get("email"))
+    if account_email:
+        output["email"] = account_email
+    for names in aliases:
+        value = _first_non_empty(*(record.get(name) for name in names))
+        if value:
+            output[names[0]] = value
+    try:
+        priority = int(record.get("priority") or 0)
+    except (TypeError, ValueError):
+        priority = 0
+    if priority:
+        output["priority"] = priority
+    if record.get("disabled") is True:
+        output["disabled"] = True
+    return output
+
+
+def _write_json_atomic(path, value):
+    temporary = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, ensure_ascii=False)
+    os.replace(temporary, path)
+
+
+def export_kiro_rs_credentials(output_path=""):
+    """Aggregate saved Kiro account files into a kiro.rs credentials array."""
+    pdir = _platform_dir("kiro")
+    with _KIRO_EXPORT_LOCK:
+        credentials = []
+        for filename in sorted(os.listdir(pdir)):
+            if not filename.endswith(".account.json"):
+                continue
+            try:
+                with open(os.path.join(pdir, filename), encoding="utf-8") as handle:
+                    credential = build_kiro_rs_credentials(json.load(handle))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            credentials.append(credential)
+        path = output_path or os.path.join(pdir, "credentials.json")
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        _write_json_atomic(path, credentials)
+    return path, credentials
+
+
+def save_kiro_token(record, email=""):
+    """Save one Kiro IdC credential and refresh the kiro.rs array export."""
+    try:
+        output = build_kiro_rs_credentials(record, email)
+    except ValueError:
         return False
     pdir = _platform_dir("kiro")
-    name = _safe_email_name(email or record.get("email") or "account")
+    name = _safe_email_name(email or output.get("email") or "account")
     path = os.path.join(pdir, f"{name}.account.json")
-    output = dict(record)
-    output["email"] = _s(email or record.get("email"))
-    output.setdefault("updatedAt", int(time.time()))
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
-    print(f"  [kiro] account saved: {path}")
+    with _KIRO_EXPORT_LOCK:
+        _write_json_atomic(path, output)
+        aggregate_path, _credentials = export_kiro_rs_credentials()
+    print(f"  [kiro] credential saved: {path}")
+    print(f"  [kiro] kiro.rs credentials updated: {aggregate_path}")
     return True

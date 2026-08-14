@@ -1,12 +1,8 @@
 # -*- coding: utf-8 -*-
 """Human-like mouse movement + press-and-hold for CDP/Playwright pages.
 
-Ported in spirit from LoseNine/ruyipage's human_move (WindMouse) — the one
-piece of that project that IS portable to our BitBrowser + Playwright (CDP)
-stack. ruyipage's headline "no automation detection points" comes from a
-custom Firefox kernel we can't reuse; but its *movement* algorithms (WindMouse
-trajectory + human tremor) are exactly what our Outlook PerimeterX press-and-hold
-was missing.
+Uses a WindMouse trajectory and correlated hand tremor with the BitBrowser +
+Playwright CDP stack used by Outlook press-and-hold challenges.
 
 Why the old code failed PerimeterX behavioral analysis:
   * standalone hold drift was a pure sine wave  -> perfectly periodic, obvious bot

@@ -45,7 +45,6 @@ from playwright.async_api import async_playwright
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import outlook_press as _outlook_press
 from common.browser import open_and_connect, react_fill, teardown
-from bitbrowser import selected_browser_provider
 
 # ── Config ───────────────────────────────────────────────────────────
 BITBROWSER_API  = os.environ.get("BITBROWSER_API", "http://127.0.0.1:54345")
@@ -136,7 +135,10 @@ def _parse_proxy(s):
     return None
 
 def create_browser(name="unlock", proxy_str=None):
-    data = {"name": name, "remark": "outlook unlock",
+    from common.traffic_saver import bitbrowser_profile_defaults
+
+    data = {**bitbrowser_profile_defaults(),
+            "name": name, "remark": "outlook unlock",
             "proxyMethod": 2, "browserFingerPrint": {"coreVersion": "130"}}
     p = _parse_proxy(proxy_str)
     if p:
@@ -149,7 +151,16 @@ def create_browser(name="unlock", proxy_str=None):
     return _bb_post("/browser/update", data)["data"]["id"]
 
 def open_browser(pid):
-    d = _bb_post("/browser/open", {"id": pid})["data"]
+    from common.traffic_saver import bitbrowser_open_payload
+
+    payload = bitbrowser_open_payload(pid)
+    try:
+        d = _bb_post("/browser/open", payload)["data"]
+    except Exception:
+        if "args" not in payload:
+            raise
+        print("  BitBrowser rejected traffic-saving launch args; retrying normally")
+        d = _bb_post("/browser/open", {"id": pid})["data"]
     return d.get("ws") or d.get("webdriver")
 
 def close_browser(pid):
@@ -619,11 +630,8 @@ async def worker(accounts, proxy, worker_id, results, graph_attempts, sem):
                             f"{'OK' if graph else 'FAILED'}"
                         )
 
-                if selected_browser_provider() in {"ruyipage", "ruyi", "firefox_bidi"}:
-                    await run_with_session()
-                else:
-                    async with async_playwright() as pw:
-                        await run_with_session(pw)
+                async with async_playwright() as pw:
+                    await run_with_session(pw)
 
             except asyncio.TimeoutError:
                 print(f"[worker-{worker_id}] {email} => timeout")

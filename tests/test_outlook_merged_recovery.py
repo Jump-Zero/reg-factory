@@ -110,7 +110,6 @@ class OutlookMergedRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 "teardown",
                 AsyncMock(side_effect=lambda *_args, **_kwargs: events.append("context_closed")),
             ) as teardown,
-            patch.object(unlock_outlook, "selected_browser_provider", return_value="ruyipage"),
             patch.object(
                 unlock_outlook,
                 "unlock_account",

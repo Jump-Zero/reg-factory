@@ -91,18 +91,6 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args["--min-success-rate"]["default"], 10)
         self.assertEqual(args["--success-rate-window"]["default"], 20)
 
-    def test_outlook_client_uses_ruyipage_for_selected_provider(self):
-        from common.ruyipage_browser import RuyiPageBrowser
-
-        with patch.dict(
-            register_outlook_standalone.os.environ,
-            {"FINGERPRINT_BROWSER": "ruyipage"},
-            clear=False,
-        ):
-            browser = register_outlook_standalone.BitBrowserClient()
-
-        self.assertIsInstance(browser, RuyiPageBrowser)
-
     def test_success_rate_breaker_uses_recent_full_window(self):
         trip, _, size = outlook_reg_loop._success_rate_breaker(
             [False] * 19, 10, 20
@@ -549,12 +537,90 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(domains, ["outlook.com"])
         self.assertEqual(value, "sampleuser")
 
-    def test_signup_full_email_form_keeps_domain(self):
+    async def test_signup_dynamic_suffix_is_detected_after_blur(self):
+        email_input = MagicMock()
+        email_input.press = AsyncMock()
+        with (
+            patch.object(
+                register_outlook_standalone,
+                "_signup_email_suffix_domains",
+                AsyncMock(return_value=["outlook.com"]),
+            ),
+            patch.object(register_outlook_standalone.asyncio, "sleep", AsyncMock()),
+        ):
+            domains = await register_outlook_standalone._signup_email_domains_after_blur(
+                email_input
+            )
+
+        self.assertEqual(domains, ["outlook.com"])
+        email_input.press.assert_awaited_once_with("Tab", timeout=1500)
+        self.assertEqual(
+            register_outlook_standalone._signup_email_entry_value(
+                "sampleuser@outlook.com", domains[0], page_manages_domain=True
+            ),
+            "sampleuser",
+        )
+
+    def test_signup_standard_email_field_includes_outlook_domain(self):
         value = register_outlook_standalone._signup_email_entry_value(
             "sampleuser", "outlook.com", page_manages_domain=False
         )
 
         self.assertEqual(value, "sampleuser@outlook.com")
+
+    async def test_signup_normal_footer_is_not_misread_as_email_taken(self):
+        email_input = MagicMock()
+        email_input.count = AsyncMock(return_value=1)
+        email_input.evaluate = AsyncMock(return_value={
+            "ariaInvalid": False,
+            "typeMismatch": False,
+            "patternMismatch": False,
+            "customError": False,
+            "message": "enter your email address. already have an account? sign in",
+            "visible": True,
+        })
+
+        rejection = await register_outlook_standalone._signup_email_rejected(
+            MagicMock(), email_input
+        )
+
+        self.assertEqual(rejection, "")
+
+    async def test_signup_native_email_type_mismatch_is_format_error(self):
+        email_input = MagicMock()
+        email_input.count = AsyncMock(return_value=1)
+        email_input.evaluate = AsyncMock(return_value={
+            "ariaInvalid": False,
+            "typeMismatch": True,
+            "patternMismatch": False,
+            "customError": False,
+            "message": "enter your email address in the format someone@example.com",
+            "visible": True,
+        })
+
+        rejection = await register_outlook_standalone._signup_email_rejected(
+            MagicMock(), email_input
+        )
+
+        self.assertEqual(rejection, "format")
+
+    async def test_signup_password_page_wins_over_stale_invalid_email_control(self):
+        password_input = MagicMock()
+        password_input.count = AsyncMock(return_value=1)
+        page = MagicMock()
+        page.locator.return_value.first = password_input
+
+        with patch.object(
+            register_outlook_standalone,
+            "_signup_email_rejected",
+            AsyncMock(return_value="format"),
+        ) as rejected:
+            result = await register_outlook_standalone._signup_email_submission_result(page)
+
+        self.assertEqual(result, "accepted")
+        rejected.assert_not_awaited()
+        self.assertIn(":visible", register_outlook_standalone._SIGNUP_EMAIL_SELECTOR)
+        self.assertIn(":visible", register_outlook_standalone._SIGNUP_PASSWORD_SELECTOR)
 
     def test_hindi_and_indonesian_action_labels_are_available(self):
         self.assertIn("स्वीकार करें", register_outlook_standalone.MS_POSITIVE_ACTION_LABELS)
@@ -844,6 +910,42 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
         first.close.assert_awaited_once()
         extra.close.assert_awaited_once()
 
+    async def test_signup_navigation_retries_when_first_attempt_stays_blank(self):
+        page = MagicMock()
+        page.url = "about:blank"
+        page.evaluate = AsyncMock()
+
+        async def navigate(*args, **kwargs):
+            page.url = (
+                "about:blank"
+                if page.goto.await_count == 1
+                else "https://signup.live.com/signup?lic=1"
+            )
+
+        page.goto = AsyncMock(side_effect=navigate)
+        with patch.object(register_outlook_standalone.asyncio, "sleep", AsyncMock()):
+            await register_outlook_standalone._navigate_to_signup(
+                page, "https://signup.live.com/signup?lic=1", "[#1]"
+            )
+
+        self.assertEqual(page.goto.await_count, 2)
+        page.evaluate.assert_awaited_once_with("() => window.stop()")
+
+    async def test_signup_navigation_accepts_a_committed_page_after_timeout(self):
+        page = MagicMock()
+        page.url = "about:blank"
+
+        async def navigate(*args, **kwargs):
+            page.url = "https://signup.live.com/signup?lic=1"
+            raise asyncio.TimeoutError("DOMContentLoaded was slow")
+
+        page.goto = AsyncMock(side_effect=navigate)
+        await register_outlook_standalone._navigate_to_signup(
+            page, "https://signup.live.com/signup?lic=1", "[#2]"
+        )
+
+        page.goto.assert_awaited_once()
+
     async def test_attempt_uses_separate_registration_and_graph_timeouts(self):
         completed = ("user@outlook.com", "password", [], {"refresh_token": "rt"})
 
@@ -872,33 +974,6 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
             registration_timeout=1,
             graph_timeout=2,
         )
-
-    async def test_registration_loop_opens_and_cleans_ruyipage_session(self):
-        page = MagicMock()
-        context = MagicMock(pages=[page])
-        browser = MagicMock(contexts=[context])
-        client = MagicMock()
-        client.open_browser_async = AsyncMock(return_value=(browser, context, page))
-        client.close_browser_async = AsyncMock()
-        client.create_browser.return_value = "ruyi-profile"
-
-        completed = ("user@outlook.com", "password", [], {"refresh_token": "rt"})
-        with (
-            patch.object(register_outlook_standalone, "BitBrowserClient", return_value=client),
-            patch.object(outlook_reg_loop, "_run_outlook_on_ctx", AsyncMock(return_value=completed)),
-        ):
-            result = await outlook_reg_loop.one_attempt(
-                register_outlook_standalone,
-                None,
-                3,
-                registration_timeout=10,
-                graph_timeout=20,
-            )
-
-        self.assertEqual(result, completed)
-        client.open_browser_async.assert_awaited_once_with("ruyi-profile")
-        client.close_browser_async.assert_awaited_once_with("ruyi-profile")
-        client.delete_browser.assert_called_once_with("ruyi-profile")
 
     async def test_standalone_main_uses_device_browser_before_http_fallback(self):
         bb = MagicMock()

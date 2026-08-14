@@ -1069,8 +1069,16 @@ async def register_one(index, total, p, node):
 
         browser = await p.chromium.connect_over_cdp(data["ws"])
         ctx = browser.contexts[0]
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await install_traffic_saver(ctx)
+        # BitBrowser may expose a stale zero-sized startup tab. Use a fresh
+        # page for xAI auth so routing and viewport settle before navigation.
+        startup_pages = list(ctx.pages)
+        page = await asyncio.wait_for(ctx.new_page(), timeout=20)
+        for startup_page in startup_pages:
+            try:
+                await asyncio.wait_for(startup_page.close(), timeout=5)
+            except Exception:
+                pass
         print(f"  BitBrowser native fingerprint (core={GROK_BROWSER_CORE_VERSION})")
         email_rpc_statuses = []
 

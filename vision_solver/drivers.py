@@ -65,14 +65,44 @@ async def _challenge_present(page, frame_match, markers):
 
 async def _read_instruction(scope, sel):
     """读题干文本（select all X 的整句）。"""
-    if not sel:
-        return ""
-    try:
-        el = scope.locator(sel).first
-        if await el.count() > 0:
-            return ((await el.inner_text()) or "").replace("\n", " ").strip()
-    except Exception:
-        pass
+    selectors = [sel] if sel else []
+    # hCaptcha has shipped several prompt DOMs. Keep the preset selector as
+    # the fast path, then try narrow current prompt containers.
+    selectors.extend((
+        "[data-testid*='prompt' i]",
+        "[class*='prompt' i]",
+        "[class*='challenge-header' i]",
+        "[aria-live='polite']",
+        "[role='heading']",
+    ))
+    loading_markers = (
+        "loading", "読み込み中", "로딩 중", "chargement", "cargando",
+        "wird geladen", "carregando", "загрузка",
+    )
+    for selector in selectors:
+        if not selector:
+            continue
+        try:
+            locator = scope.locator(selector)
+            # Reading `.first` directly also works with lightweight frame
+            # doubles used by integrations/tests and avoids an unnecessary DOM
+            # count round trip on the hot path.
+            candidates = [locator.first]
+            try:
+                count = min(int(await locator.count()), 4)
+                candidates = [locator.first] + [locator.nth(i) for i in range(1, count)]
+            except Exception:
+                pass
+            for el in candidates:
+                value = ((await el.inner_text()) or "").replace("\n", " ").strip()
+                normalized = " ".join(value.split())
+                if len(normalized) >= 5 and not any(
+                    marker in normalized.lower().strip(" .!…")
+                    for marker in loading_markers
+                ):
+                    return normalized
+        except Exception:
+            pass
     return ""
 
 
@@ -86,6 +116,12 @@ async def solve_grid_select(page, spec, shot_dir):
             return True
         await asyncio.sleep(spec.settle_ms / 1000)
         instruction = await _read_instruction(frame, spec.challenge_text_sel)
+        if not instruction and spec.frame_match:
+            # hCaptcha sometimes paints tiles before its prompt text. Give the
+            # challenge DOM another settle interval before asking a vision model
+            # to solve an underspecified image.
+            await asyncio.sleep(1.0)
+            instruction = await _read_instruction(frame, spec.challenge_text_sel)
 
         # 截挑战图：优先整块 grid_image_sel；否则逐 tile 截图拼网格
         tiles = frame.locator(spec.tile_sel) if spec.tile_sel else None
@@ -139,6 +175,13 @@ async def solve_grid_select(page, spec, shot_dir):
             if any(raw[1] is not None for raw in raws):
                 break
             if vote_attempt < 3:
+                malformed = "; ".join(
+                    f"{raw[0]}={str(raw[2])[-80:]!r}"
+                    for raw in raws
+                    if len(raw) >= 3 and raw[2]
+                )
+                if malformed:
+                    print(f"  [grid] R{rnd} malformed model tail: {malformed[:240]}")
                 print(
                     f"  [grid] R{rnd} model response was unavailable or malformed; "
                     f"retrying current challenge ({vote_attempt + 1}/3)"
@@ -443,10 +486,12 @@ async def solve_canvas_grid(page, spec, shot_dir):
             raws = [("bead-chain-detector", picks, "local image analysis")]
             print(f"  [canvas] R{rnd} local shortest-chain detection -> {picks}")
         elif single:
-            # 单答案：vote_answer 取多数票（平票按模型顺序），永不空选
+            # 单答案：vote_answer 取多数票（平票按模型顺序）。没有任何
+            # 可解析答案时保持题目原样，绝不能把画布中心当作答案。
             best, votes, raws = vote_answer(prompt, grid_hd, n_opt, deadline=spec.deadline)
             if best is None:
-                # 兜底：从同一批回复里抠 PICK，用得票最高的格；再不行点中心格
+                # Some models return PICK for a single-choice prompt. Accept
+                # that only when it contains an explicit, valid cell number.
                 from .vision import _parse_picklist
                 from collections import Counter
                 pc = Counter()
@@ -454,8 +499,14 @@ async def solve_canvas_grid(page, spec, shot_dir):
                     pl = _parse_picklist(item[2], n_opt) if len(item) > 2 else None
                     for i in (pl or []):
                         pc[i] += 1
-                best = pc.most_common(1)[0][0] if pc else n_opt // 2
-                print(f"  [canvas] R{rnd} 单选无 ANSWER，兜底点 #{best}")
+                if not pc:
+                    print(
+                        f"  [canvas] R{rnd} no valid single-choice vision answer; "
+                        "leaving challenge intact"
+                    )
+                    return False
+                best = pc.most_common(1)[0][0]
+                print(f"  [canvas] R{rnd} 单选使用明确 PICK 答案 #{best}")
             picks = [best]
         else:
             picks, votes, raws = vote_picklist(

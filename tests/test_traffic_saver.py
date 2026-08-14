@@ -16,8 +16,12 @@ class _Context:
 
 
 class _Route:
-    def __init__(self, url, resource_type):
-        self.request = SimpleNamespace(url=url, resource_type=resource_type)
+    def __init__(self, url, resource_type, headers=None):
+        self.request = SimpleNamespace(
+            url=url,
+            resource_type=resource_type,
+            headers=headers or {},
+        )
         self.action = None
 
     async def abort(self):
@@ -39,6 +43,14 @@ class TrafficSaverTests(unittest.TestCase):
         self.assertEqual(
             traffic_saver.configured_mode({"PROXY_MODE": "clash_fixed"}),
             "off",
+        )
+        self.assertEqual(
+            traffic_saver.configured_mode({
+                "PROXY_MODE": "residential",
+                "REG_FACTORY_PROXY": "http://proxy.test:9000",
+                "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "extreme",
+            }),
+            "extreme",
         )
 
     def test_balanced_blocks_heavy_assets_but_keeps_scripts_and_challenges(self):
@@ -76,6 +88,61 @@ class TrafficSaverTests(unittest.TestCase):
             "aggressive",
         ))
 
+    def test_extreme_blocks_optional_requests_but_keeps_challenges_and_auth_css(self):
+        self.assertTrue(traffic_saver.should_block(
+            "https://cdn.example/app.webmanifest", "manifest", "extreme"
+        ))
+        self.assertTrue(traffic_saver.should_block(
+            "https://cdn.example/app.js.map", "fetch", "extreme"
+        ))
+        self.assertTrue(traffic_saver.should_block(
+            "https://cdn.example/next", "fetch", "extreme", {"Sec-Purpose": "prefetch"}
+        ))
+        self.assertTrue(traffic_saver.should_block(
+            "https://api.mixpanel.com/track", "fetch", "extreme"
+        ))
+        self.assertFalse(traffic_saver.should_block(
+            "https://newassets.hcaptcha.com/captcha.png", "image", "extreme"
+        ))
+        self.assertFalse(traffic_saver.should_block(
+            "https://login.microsoftonline.com/common/oauth.css", "stylesheet", "extreme"
+        ))
+        self.assertFalse(traffic_saver.should_block(
+            "https://claude.ai/_next/static/app.css", "stylesheet", "extreme"
+        ))
+        self.assertFalse(traffic_saver.should_block(
+            "https://auth.openai.com/assets/login.css", "stylesheet", "extreme"
+        ))
+        self.assertFalse(traffic_saver.should_block(
+            "https://accounts.x.ai/_next/static/signup.css", "stylesheet", "extreme"
+        ))
+        self.assertFalse(traffic_saver.should_block(
+            "https://github.githubassets.com/assets/signup.css", "stylesheet", "extreme"
+        ))
+        self.assertTrue(traffic_saver.should_block(
+            "https://claude.ai/_next/static/hero.webp", "image", "extreme"
+        ))
+
+    def test_extreme_bitbrowser_settings_only_apply_to_residential_mode(self):
+        residential = {
+            "PROXY_MODE": "residential",
+            "REG_FACTORY_PROXY": "http://proxy.test:9000",
+            "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "extreme",
+        }
+        self.assertEqual(
+            traffic_saver.bitbrowser_profile_defaults(residential),
+            {},
+        )
+        payload = traffic_saver.bitbrowser_open_payload("profile-1", residential)
+        self.assertEqual(payload["id"], "profile-1")
+        self.assertIn("--disable-background-networking", payload["args"])
+        self.assertEqual(
+            traffic_saver.bitbrowser_open_payload(
+                "profile-1", {**residential, "PROXY_MODE": "clash_fixed"}
+            ),
+            {"id": "profile-1"},
+        )
+
     def test_install_routes_requests_using_configured_mode(self):
         context = _Context()
         mode = asyncio.run(traffic_saver.install(context, {
@@ -92,6 +159,12 @@ class TrafficSaverTests(unittest.TestCase):
         asyncio.run(context.handler(script))
         self.assertEqual(image.action, "abort")
         self.assertEqual(script.action, "continue")
+        self.assertEqual(traffic_saver.stats(context), {"image": 1})
+
+        self.assertTrue(traffic_saver.set_bypass(context))
+        bypassed_image = _Route("https://cdn.example/second.jpg", "image")
+        asyncio.run(context.handler(bypassed_image))
+        self.assertEqual(bypassed_image.action, "continue")
         self.assertEqual(traffic_saver.stats(context), {"image": 1})
 
 

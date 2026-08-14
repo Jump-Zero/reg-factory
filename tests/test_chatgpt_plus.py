@@ -64,11 +64,13 @@ class ChatGPTPlusTests(unittest.TestCase):
 
     def test_webui_exposes_existing_plus_codex_import_task(self):
         script = next(item for item in SCRIPTS if item["id"] == "plus_codex_import")
-        flags = {item["flag"] for item in script["args"]}
+        args = {item["flag"]: item for item in script["args"]}
+        flags = set(args)
         self.assertIn("--accounts-file", flags)
         self.assertIn("--sms-provider", flags)
         self.assertIn("--phone-attempts", flags)
         self.assertNotIn("--plus-subscription", flags)
+        self.assertIn("custom", args["--sms-provider"]["choices"])
 
     def test_existing_email_flow_propagates_subscription_mode(self):
         args = argparse.Namespace(
@@ -174,6 +176,9 @@ class ChatGPTPlusTests(unittest.TestCase):
         self.assertNotIn("pay.nyanya.love", server)
         self.assertIn('id="plus-account-input"', index)
         self.assertIn('id="plus-sms-provider"', index)
+        self.assertIn('value="custom"', index)
+        self.assertIn('id="custom-sms-input"', index)
+        self.assertIn('/api/sms/custom', server)
         self.assertIn('id="plus-phone-attempts"', index)
         self.assertIn('id="btn-plus-import"', index)
         self.assertIn("/api/chatgpt-plus/import-codex", frontend)

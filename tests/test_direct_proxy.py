@@ -16,11 +16,6 @@ class DirectProxyTests(unittest.TestCase):
             browser = BitBrowser()
         self.assertIsInstance(browser, BundledBrowser)
 
-    def test_legacy_cdp_flow_falls_back_to_local_chromium_for_ruyipage(self):
-        with patch.dict(os.environ, {"FINGERPRINT_BROWSER": "ruyipage"}, clear=False):
-            browser = BitBrowser()
-        self.assertIsInstance(browser, BundledBrowser)
-
     def test_custom_chrome_adapter_supports_legacy_outlook_api(self):
         with tempfile.TemporaryDirectory() as directory:
             env = {
@@ -66,6 +61,7 @@ class DirectProxyTests(unittest.TestCase):
         env = {
             "PROXY_MODE": "residential",
             "REG_FACTORY_PROXY": "socks5://user:pass@proxy.test:1080",
+            "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "extreme",
             "FINGERPRINT_BROWSER": "bitbrowser",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -82,6 +78,26 @@ class DirectProxyTests(unittest.TestCase):
         self.assertEqual(payload["port"], "1080")
         self.assertEqual(payload["proxyUserName"], "user")
         self.assertEqual(payload["proxyPassword"], "pass")
+        self.assertNotIn("url", payload)
+
+    def test_bitbrowser_extreme_open_passes_background_saving_args(self):
+        env = {
+            "PROXY_MODE": "residential",
+            "REG_FACTORY_PROXY": "http://proxy.test:9000",
+            "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "extreme",
+            "FINGERPRINT_BROWSER": "bitbrowser",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            browser = BitBrowser(api_base="http://127.0.0.1:54345")
+            with patch.object(
+                browser, "_post", return_value={"data": {"ws": "ws://browser"}}
+            ) as post:
+                result = browser.open_browser("profile-1")
+        self.assertEqual(result["ws"], "ws://browser")
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/browser/open")
+        self.assertEqual(payload["id"], "profile-1")
+        self.assertIn("--disable-background-networking", payload["args"])
 
     def test_bitbrowser_partially_updates_fingerprint(self):
         browser = BitBrowser(api_base="http://127.0.0.1:54345")

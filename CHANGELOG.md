@@ -1,14 +1,50 @@
 ﻿# 更新日志
 
+## 2026-08-14 - 2.0.0
+
+**低成本并发与极致省流**
+- 默认支持端到端多邮箱并发，按并发槽隔离浏览器 Profile、Cookie、Session、指纹和住宅代理出口；代理池不足时自动降低有效并发，避免无提示地共享出口。
+- `REG_FACTORY_MAX_CONCURRENCY` 和各任务并发参数统一生效，WebUI 直接配置最大并发、共享出口策略和任务并行方式。
+- 新增住宅代理 `extreme` 极限节流：抑制 BitBrowser 后台联网，拦截图片、字体、媒体、清单、预取、源码映射和可选遥测，同时保留认证页、脚本、验证资源和必要样式。
+- 认证成功后自动暂时放行 Claude 等应用的关键启动请求，恢复白屏、挑战页和 SPA 导航，降低重试造成的重复流量。
+- 任务日志输出计划并发、有效并发、代理隔离和节流统计，便于按流量成本调整并发窗口。
+
+**注册与接码**
+- Claude BitBrowser + Outlook 流程支持原生魔法链接验证、hCaptcha 时序恢复和认证后白屏自动重载；onboarding 按控件结构兼容不同语言。
+- Claude 只有在必选条款、姓名和服务器 `finished` 状态全部落库并进入聊天路由后才保存 sessionKey，不再把提前出现的 `/new` 当作注册完成。
+- 自定义短信号码池支持 `手机号----短信记录 URL` 批量导入、文件锁、租用回收、过期租约恢复、验证码轮询和 WebUI 管理。
+- Codex OAuth、ChatGPT Plus 批量导入和 WebUI 接码平台均支持 `custom` 自定义号码池。
+- 增强 Outlook Graph 邮箱预检、健康邮箱替换和失败状态记录，减少无效住宅请求。
+
+**验证**
+- Python 单元测试覆盖并发计划、流量节省、Claude challenge、邮箱池、短信池和 WebUI schema。
+- 完成 BitBrowser + Outlook 的 Claude 真实注册验证，成功进入 `/new` 并保存 sessionKey/Cookie。
+
+---
+
+## 2026-08-13 - 1.3.3
+
+**浏览器与 Outlook 注册稳定性**
+- 完全移除 RuyiPage 运行时、安装入口和残留测试，默认浏览器统一为 BitBrowser，保留内置/自定义 Chromium 兼容模式。
+- 住宅代理新增 `extreme` 极限节流；不再强制 BitBrowser 启动到 `about:blank`，避免 CDP 延迟导致窗口卡在空白页。
+- Outlook 注册标签页创建和注册页导航增加超时恢复与重试，邮箱和密码控件只定位可见节点，避免 Microsoft 动态控件留下隐藏旧输入框时卡在密码步骤。
+- 保留邮箱动态域名识别、月份/日期自定义下拉框和验证码视口保护，减少 Outlook 注册窗口闪退和错误重试。
+
+**凭据与资产**
+- Kiro 凭据导出兼容 `hank9999/kiro.rs` 的 `credentials.json` 格式，并提供独立导出命令。
+- 资产接口补充无 Graph 账号筛选，账号记录继续保留 ChatGPT 国家、网络节点和 Plus/0 元优惠检测结果。
+
+---
+
 ## 2026-08-12 - 1.3.2
 
 **源码一键更新重启热修复**
 - 修复源码 WebUI 启动的更新器在停止旧面板时使用进程树终止，连同更新 PowerShell 自身一起结束，导致 8799 面板无法重新拉起的问题。
 - 更新器现在只停止实际监听端口的 WebUI Python 进程，等待虚拟环境启动器退出后继续依赖安装和面板重启。
 
-**RuyiPage 注册兼容性**
+**浏览器注册兼容性**
 - Outlook 注册改进邮箱填写、出生月份/日期自定义下拉框和验证页切换，过滤视口外验证码控件并限制鼠标坐标，避免越界和闪退。
-- ChatGPT 注册支持 RuyiPage 登录态恢复、iCloud 验证码服务路由，以及完整国家选择和注册网络关联。
+- ChatGPT 注册支持登录态恢复、iCloud 验证码服务路由，以及完整国家选择和注册网络关联。
 - 注册成功的 ChatGPT 账号会记录注册国家和网络节点，并检查 Plus 试用或其他 0 元优惠。
 
 ---
@@ -34,8 +70,6 @@
 - Graph 授权识别账号不存在、密码登录不可用和登录次数过多等终止状态；邮箱与密码各只提交一次，终止错误不再继续浏览器或 HTTP 重试，降低 Microsoft 临时限流和无效住宅流量。
 - 号池扫描增加同平台串行、近期结果复用、限流与连续风控自动暂停；资产 API 可用 `normal_only=true` 只领取最近扫描为正常的邮箱，领取过程本身仍不联网。
 - WebUI 网络页增加住宅流量模式、最大并发和共享出口开关；任务日志展示计划并发、有效并发、每槽代理、指纹与流量拦截统计，并改善移动端网络配置布局。
-- 修复从 WebUI 或任意工作目录直接运行 RuyiPage 安装工具时找不到 `common` 模块的问题；任务卡片明确区分 RuyiPage Firefox 已适配流程与仍需 Chromium CDP 的兼容流程。
-- RuyiPage 最低版本升级到 `1.2.61`，使用上游修正后的 Firefox 155 runtime 清单；上游没有新的 Outlook 按压算法变更。
 - 新增从安装到首次成功任务的完整 [新手教程](docs/getting-started.md)，覆盖网络、浏览器、Outlook Graph、并发、住宅流量、成功率熔断、日志、资产与升级排障。
 
 ---
@@ -72,15 +106,6 @@
 ---
 
 ## 2026-08-09 - 1.2.28
-
-**RuyiPage Firefox 首次使用自动安装**
-- Windows 便携包首次启动且选择 RuyiPage 时，在后台自动下载并安装配套 Firefox runtime。
-- 浏览器任务首次使用时增加安装兜底，无需用户预先寻找或运行安装命令；已有 runtime 直接复用。
-- WebUI 状态栏显示安装中、已就绪或安装失败，原“安装 RuyiPage Firefox”任务保留为失败后的手动重试入口。
-- 增加线程与跨进程安装锁，避免 WebUI 后台安装和注册子进程同时重复下载。
-- 显式配置不存在的 `RUYIPAGE_BROWSER_PATH` 时给出明确错误，不会静默改用其他浏览器。
-
----
 
 ## 2026-08-09 - 1.2.27
 
@@ -165,11 +190,10 @@
 
 ## 2026-08-04 - 1.2.19
 
-**RuyiPage 默认浏览器和 ChatGPT 网页端修复**
-- 新增 RuyiPage Firefox WebDriver BiDi 浏览器，并设为共享网页流程的默认浏览器；首次使用可从 WebUI 一键安装 runtime，也可配置自定义 Firefox 路径。
+**ChatGPT 网页端修复**
 - ChatGPT iCloud 注册修复邮箱验证码提交后的 HTML Route Error，页面会点击 Retry 并按实际表单状态继续，不再盲目重复提交旧验证码。
 - WebUI 的 ChatGPT 注册表单突出 iCloud 邮箱来源和注册后直接导入 SUB2API 选项，补充目标分组配置。
-- Codex OAuth 在 ChatGPT cookie 未传递到新授权域时自动完成 iCloud 邮箱重新登录，并支持 RuyiPage 的 localhost 回调捕获、cookie 字段转换和导航硬超时。
+- Codex OAuth 在 ChatGPT cookie 未传递到新授权域时自动完成 iCloud 邮箱重新登录，并支持 localhost 回调捕获、cookie 字段转换和导航硬超时。
 - Codex 手机验证支持在 Hero SMS、SMS-Man、firefox.fun 和自动切换之间明确选择；无回码时释放号码并重新登录后继续换号。
 - firefox.fun 配置补充 APIName 字段，一键测试改用官方 myInfo 动作验证 token；取号继续按官方要求使用 token 和项目 ID。
 - Chromium 专用的旧注册流程继续自动使用内置浏览器，避免将不兼容流程强行切换到 Firefox。
@@ -455,7 +479,7 @@
 - **三平台 / 端到端编排的 grok 分支改走 HTTP 协议版**：`register_three_platforms.py` 不再调用旧的浏览器版。
 
 **移除**
-- **删除 `register_grok_ruyi.py`（ruyiPage/Firefox 版）**：验证码掩码输入框在浏览器内无法稳定通过，已被 HTTP 协议版取代。
+- **删除旧版 Grok Firefox 注册脚本**：验证码掩码输入框在浏览器内无法稳定通过，已被 HTTP 协议版取代。
 
 **测试**
 - HTTP 协议版实测 `success: 1/1`：发码 / 验码 / Turnstile / 建号 / 取 sso 全通，token 正常落盘。
@@ -465,7 +489,7 @@
 ## 2026-07-13 — Outlook 按住验证拟人化 + 节点探测轮换 + WebUI 精简
 
 **新增**
-- **`common/human_mouse.py` 拟人鼠标模块**（纯 stdlib，无新依赖）：借鉴 [LoseNine/ruyipage](https://github.com/LoseNine/ruyipage) 的 WindMouse / human_move 运动算法（其 Firefox 内核级免检测不可移植，但轨迹/抖动算法可移植）。
+- **`common/human_mouse.py` 拟人鼠标模块**（纯 stdlib，无新依赖）：使用 WindMouse 轨迹和相关性手部微抖动。
   - `windmouse_path()`：重力 + 随机风力 + 速度钳制的逼近轨迹，天然变速（中段快、两端慢）带过冲，取代原来的简单二次贝塞尔。
   - `tremor_offsets()`：用 **Ornstein-Uhlenbeck 过程**生成按住期间的**自相关**微抖动（有动量 + 回中，像真人手的生理震颤）。自检 lag-1 自相关 0.98，对照白噪声 0.02。
   - `human_press_and_hold(page, cx, cy, is_done, max_hold, min_hold)`：完整按住序列——WindMouse 逼近 → 落点停顿 → down → OU 抖动循环（每 ~0.5s 轮询 `is_done()`，进度满后加真人反应延迟再 up）。

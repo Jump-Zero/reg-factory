@@ -9,6 +9,7 @@
 ```bash
 python run_full_flow.py
 python run_full_flow.py --platforms claude chatgpt grok
+python run_full_flow.py --rounds 12 --concurrency 3 --platforms claude chatgpt kiro
 python run_full_flow.py --platforms grok --grok-sub2api
 python run_full_flow.py --platforms kiro
 python run_full_flow.py --platforms chatgpt --import-c2a
@@ -16,12 +17,17 @@ python run_full_flow.py --skip-email --email a@outlook.com --password xxx
 python run_full_flow.py --dry-run
 ```
 
+端到端流程默认并行运行同一邮箱的所选平台，`--concurrency` 控制同时处理的邮箱数。
+住宅代理模式会为并发邮箱分配独立出口，代理池不足时自动降低并发；同一邮箱的各平台共享该邮箱出口。
+需要逐个平台执行时添加 `--sequential-platforms`。住宅省流策略由
+`REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE` 统一继承，设为 `extreme` 可启用极致省流。
+
 使用已有邮箱池：
 
 ```bash
 python register_three_platforms.py --from-pool
 python register_three_platforms.py --email a@outlook.com --password xxx --token <refresh_token>
-python register_three_platforms.py --loop
+python register_three_platforms.py --loop --parallel --max-inflight 3
 ```
 
 并发登录同一邮箱时，先启动共享取码服务：
@@ -128,6 +134,10 @@ python tools/export_accounts.py claude chatgpt
 
 # 导出指定平台、指定账号的标准浏览器 Cookie JSON
 python tools/export_accounts.py --platform claude --format cookies --index 0
+
+# 聚合导出 hank9999/kiro.rs 可直接读取的 credentials.json
+python tools/export_kiro_credentials.py
+python tools/export_kiro_credentials.py --output D:\\kiro.rs\\credentials.json
 
 # 导出或上传普通 ChatGPT 网页号
 python tools/export_chatgpt2api.py

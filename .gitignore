@@ -18,7 +18,6 @@ __pycache__/
 venv/
 .pytest_cache/
 .test-bundled-browser*/
-ruyipage-profiles/
 browser-profiles/
 browser-profiles.json
 

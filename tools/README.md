@@ -6,6 +6,7 @@
 
 - `export_accounts.py`：导出浏览器扩展可用的账号 Cookie。
 - `export_chatgpt2api.py`：导出或上传普通 ChatGPT 网页号。
+- `export_kiro_credentials.py`：聚合导出 kiro.rs 兼容的 `credentials.json`。
 - `extract_graph_tokens.py`：提取 Outlook Graph refresh token。
 - `upload_tokens.py`：补传本地标准 token。
 - `validate_keys.py`：校验 Claude sessionKey。

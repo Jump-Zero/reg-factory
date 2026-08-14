@@ -48,10 +48,20 @@ def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=
     smsman_blacklist: sms-man country_id 黑名单(自动逐国时跳过)。
     provider: auto / smsman / firefox / hero；非 auto 时只使用指定平台。"""
     provider = str(provider or "auto").strip().lower().replace("-", "")
-    aliases = {"smsman": "smsman", "firefoxfun": "firefox", "hero": "hero", "herosms": "hero", "auto": "auto"}
+    aliases = {"smsman": "smsman", "firefoxfun": "firefox", "hero": "hero", "herosms": "hero", "custom": "custom", "auto": "auto"}
     provider = aliases.get(provider, provider)
-    if provider not in {"auto", "smsman", "firefox", "hero"}:
+    if provider not in {"auto", "smsman", "firefox", "hero", "custom"}:
         raise ValueError(f"unknown SMS provider: {provider}")
+
+    if provider == "custom":
+        from common import custom_sms
+
+        rental = custom_sms.claim()
+        if not rental:
+            raise RuntimeError("get phone failed: custom SMS pool has no available numbers")
+        phone, country_code, pkey = rental
+        print(f"  [custom-sms] phone: +{phone}")
+        return phone, country_code, pkey
 
     # —— sms-man.com 优先(Codex add-phone 主用)。配了 token + app 才尝试，否则跳过 ——
     if provider in {"auto", "smsman"} and SMSMAN_TOKEN and smsman_app not in (None, ""):
@@ -111,6 +121,10 @@ def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=
 
 
 def get_code(pkey, max_wait=180, interval=5):
+    if str(pkey).startswith("custom_"):
+        from common import custom_sms
+
+        return custom_sms.get_code(pkey, max_wait, interval)
     if str(pkey).startswith("smsman_"):
         return _smsman_get_code(pkey, max_wait, interval)
     if str(pkey).startswith("hero_"):
@@ -132,6 +146,11 @@ def get_code(pkey, max_wait=180, interval=5):
 
 
 def release(pkey):
+    if str(pkey).startswith("custom_"):
+        from common import custom_sms
+
+        custom_sms.release(pkey)
+        return
     if str(pkey).startswith("smsman_"):
         _smsman_release(pkey)
         return

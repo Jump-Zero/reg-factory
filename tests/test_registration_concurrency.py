@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import outlook_reg_loop
+import run_full_flow
 from common import proxy_switch
 from common.concurrency import build_worker_plan
 from common.file_lock import append_line
@@ -150,11 +151,55 @@ class RegistrationConcurrencyTests(unittest.TestCase):
             },
         )
 
-    def test_outlook_and_kiro_expose_concurrency_in_webui(self):
+    def test_all_registration_platforms_expose_concurrency_in_webui(self):
         scripts = {item["id"]: item for item in SCRIPTS}
-        for script_id in ("outlook_reg_loop", "register_kiro"):
+        for script_id in (
+            "outlook_reg_loop", "register_claude", "register_chatgpt",
+            "register_grok", "register_kiro", "register_github",
+        ):
             flags = {item["flag"] for item in scripts[script_id]["args"]}
             self.assertIn("--concurrency", flags)
+
+    def test_github_has_an_independent_proxy_override(self):
+        keys = {
+            item["key"]
+            for group in __import__("webui.scripts", fromlist=["ENV_SCHEMA"]).ENV_SCHEMA
+            for item in group["items"]
+        }
+        self.assertIn("GITHUB_PROXY_MODE", keys)
+
+    def test_full_flow_assigns_one_residential_lane_per_mailbox(self):
+        env = {
+            "PROXY_MODE": "residential",
+            "REG_FACTORY_PROXY_POOL": "http://one.test:8001,http://two.test:8002",
+            "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "extreme",
+        }
+        args = MagicMock()
+        args.concurrency = 2
+        args.password = "fallback"
+        accounts = [
+            ("one@example.com", "pass-1", "", ""),
+            ("two@example.com", "pass-2", "", ""),
+        ]
+        observed = []
+
+        def capture(_args, child_env, email, *_credentials):
+            observed.append((email, child_env))
+            return 0
+
+        with patch.object(run_full_flow, "stage_emails", return_value=accounts), \
+                patch.object(run_full_flow, "stage_platforms", side_effect=capture):
+            results = run_full_flow.run_wave(args, env, 2)
+
+        self.assertEqual({result[0] for result in results}, {0})
+        self.assertEqual(
+            {child_env["REG_FACTORY_PROXY"] for _email, child_env in observed},
+            {"http://one.test:8001", "http://two.test:8002"},
+        )
+        self.assertTrue(all(
+            child_env["REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE"] == "extreme"
+            for _email, child_env in observed
+        ))
 
     def test_outlook_profile_uses_worker_native_fingerprint(self):
         env = {
