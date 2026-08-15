@@ -39,6 +39,10 @@ def is_outlook_email(email: str) -> bool:
 
 def _split_fields(line: str) -> list[str]:
     value = str(line or "").strip()
+    # Batch exports commonly use long hyphen/plus separators.  Treat runs as
+    # delimiters while preserving single plus signs inside URLs or passwords.
+    if re.search(r"(?:-{4,}|\+{4,})", value):
+        return [part.strip() for part in re.split(r"(?:-{4,}|\+{4,})", value) if part.strip()]
     if "----" in value:
         return [part.strip() for part in value.split("----")]
     if "\t" in value or any(delimiter in value for delimiter in ("|", ";", ",")):
@@ -157,6 +161,28 @@ def _from_mapping(value: dict) -> dict:
     phone_status = str(
         value.get("codex_phone_status") or value.get("phone_status") or ""
     ).strip().lower()
+    mail_api_url = str(
+        value.get("mail_api_url")
+        or value.get("icloud_api_url")
+        or value.get("mailbox_api_url")
+        or value.get("mail_api_base")
+        or value.get("mailbox_url")
+        or ""
+    ).strip()
+    mail_api_key = str(
+        value.get("mail_api_key")
+        or value.get("icloud_api_key")
+        or value.get("mailbox_api_key")
+        or ""
+    ).strip()
+    two_factor = str(
+        value.get("two_factor")
+        or value.get("two_fa")
+        or value.get("2fa")
+        or value.get("otp_secret")
+        or value.get("twoFactor")
+        or ""
+    ).strip()
 
     if cookies or session_token:
         source_type = "session_token"
@@ -178,6 +204,9 @@ def _from_mapping(value: dict) -> dict:
         "plan_type": plan_type,
         "codex_phone_status": phone_status,
         "provider": str(value.get("provider") or "").strip().lower(),
+        "mail_api_url": mail_api_url,
+        "mail_api_key": mail_api_key,
+        "two_factor": two_factor,
     }
     if source_type == "oauth_token":
         record["oauth_credentials"] = {
@@ -230,6 +259,10 @@ def _validate(record: dict) -> dict:
         return record
     if not email:
         raise ValueError("account record requires email")
+    if record.get("mail_api_url"):
+        if not re.match(r"^https?://[^\s]+$", str(record["mail_api_url"]), re.IGNORECASE):
+            raise ValueError("mail API URL must start with http:// or https://")
+        record["provider"] = "icloud"
     if record.get("refresh_token") and not record.get("client_id"):
         record["client_id"] = DEFAULT_GRAPH_CLIENT_ID
     if not record.get("password") and not record.get("refresh_token") and not is_icloud_email(email):
@@ -261,6 +294,17 @@ def parse_account_line(line: str) -> dict:
         email = fields[0]
         if len(fields) == 1:
             return _validate(_from_mapping({"email": email}))
+        if fields[1].lower().startswith(("http://", "https://")):
+            mapping = {
+                "email": email,
+                "provider": "icloud",
+                "mail_api_url": fields[1],
+            }
+            if len(fields) > 2:
+                mapping["two_factor"] = fields[2]
+            if len(fields) > 3:
+                mapping["mail_api_key"] = fields[3]
+            return _validate(_from_mapping(mapping))
         password = fields[1]
         third = fields[2] if len(fields) > 2 else ""
         fourth = fields[3] if len(fields) > 3 else ""
@@ -321,15 +365,48 @@ def parse_account_text(text: str) -> tuple[list[dict], list[dict]]:
         candidates = [(index, item) for index, item in enumerate(whole, start=1)]
     else:
         candidates = []
-        for line_number, line in enumerate(
-            str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"),
-            start=1,
-        ):
-            if line.strip() and not line.lstrip().startswith("#"):
+        lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if not line.strip() or line.lstrip().startswith("#"):
+                index += 1
+                continue
+            # iCloud batch records may be supplied as a three-line block:
+            # email, mailbox API URL, and the per-mailbox 2FA/API token.
+            if (
+                EMAIL_RE.fullmatch(line.strip())
+                and index + 1 < len(lines)
+                and re.match(r"^https?://[^\s]+$", lines[index + 1].strip(), re.IGNORECASE)
+            ):
+                record_line = index + 1
+                third_index = index + 2
+                while third_index < len(lines) and not lines[third_index].strip():
+                    third_index += 1
+                mapping = {
+                    "email": line.strip(),
+                    "provider": "icloud",
+                    "mail_api_url": lines[index + 1].strip(),
+                }
+                if (
+                    third_index < len(lines)
+                    and not lines[third_index].lstrip().startswith("#")
+                    and not EMAIL_RE.fullmatch(lines[third_index].strip())
+                ):
+                    mapping["two_factor"] = lines[third_index].strip()
+                    index = third_index + 1
+                else:
+                    index = index + 2
                 try:
-                    candidates.append((line_number, parse_account_line(line)))
+                    candidates.append((record_line, _validate(_from_mapping(mapping))))
                 except ValueError as exc:
-                    errors.append({"line": line_number, "error": str(exc)})
+                    errors.append({"line": record_line, "error": str(exc)})
+                continue
+            try:
+                candidates.append((index + 1, parse_account_line(line)))
+            except ValueError as exc:
+                errors.append({"line": index + 1, "error": str(exc)})
+            index += 1
     for line_number, record in candidates:
         key = _identity(record)
         if key in seen:
@@ -347,12 +424,25 @@ def canonical_account_line(record: dict) -> str:
             for key in (
                 "source_type", "email", "password", "refresh_token", "client_id",
                 "access_token", "session_token", "cookies", "plan_type", "codex_phone_status",
+                "mail_api_url", "mail_api_key", "two_factor",
             )
             if record.get(key) not in (None, "", [], {})
         }
         if record.get("oauth_credentials"):
             payload.update(record["oauth_credentials"])
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if record.get("mail_api_key"):
+        payload = {
+            key: record.get(key)
+            for key in ("email", "provider", "mail_api_url", "mail_api_key", "two_factor")
+            if record.get(key) not in (None, "", [], {})
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if record.get("mail_api_url") or record.get("two_factor"):
+        return "\n".join(
+            str(record.get(key) or "").strip()
+            for key in ("email", "mail_api_url", "two_factor")
+        )
     fields = [
         str(record.get("email") or "").strip(),
         str(record.get("password") or "").strip(),

@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import register_three_platforms
 import register_kiro
@@ -58,6 +58,33 @@ class KiroCryptoTests(unittest.TestCase):
 
 
 class KiroIntegrationTests(unittest.TestCase):
+    def test_tls_transport_error_falls_back_to_standard_requests(self):
+        client = register_kiro.KiroClient(proxy="http://proxy.test:9000")
+        primary = client.session
+        primary.request = MagicMock(
+            side_effect=RuntimeError(
+                "curl: (35) TLS connect error: OPENSSL_internal:invalid library"
+            )
+        )
+        response = MagicMock(status_code=200)
+        fallback = MagicMock()
+        fallback.headers = {}
+        fallback.cookies = MagicMock()
+        fallback.request.return_value = response
+
+        with patch.object(
+            register_kiro.standard_requests, "Session", return_value=fallback
+        ):
+            result = client.get("https://example.test/resource")
+
+        self.assertIs(result, response)
+        fallback.request.assert_called_once()
+        self.assertEqual(
+            fallback.proxies,
+            {"http": "http://proxy.test:9000", "https": "http://proxy.test:9000"},
+        )
+        self.assertIs(client.session, fallback)
+
     def test_app_config_is_downloaded_once_per_batch(self):
         first = register_kiro.KiroClient()
         second = register_kiro.KiroClient()
@@ -71,11 +98,17 @@ class KiroIntegrationTests(unittest.TestCase):
         second_get.assert_not_called()
 
     def test_orchestrator_builds_kiro_command(self):
-        args = argparse.Namespace(timeout=600, node="auto", kiro_account_password="")
+        args = argparse.Namespace(
+            timeout=600,
+            node="auto",
+            kiro_account_password="",
+            kiro_full_name="Batch User",
+        )
         command = register_three_platforms.build_command("kiro", args, ("user@example.com", "mail-pass", "rt", "cid"))
         self.assertIn("register_kiro.py", command)
         self.assertIn("--refresh-token", command)
         self.assertIn("--client-id", command)
+        self.assertEqual(command[command.index("--full-name") + 1], "Batch User")
 
     def test_schema_and_proxy_route_expose_kiro(self):
         task = next(item for item in SCRIPTS if item["id"] == "register_kiro")

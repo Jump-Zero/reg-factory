@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from common.account_records import (
     DEFAULT_GRAPH_CLIENT_ID,
@@ -7,7 +10,13 @@ from common.account_records import (
     parse_account_line,
     parse_account_text,
 )
-from tools.import_plus_codex import _session_cookies, require_phone_verification
+from tools.import_plus_codex import (
+    _session_cookies,
+    _sub2api_token_content,
+    _write_output_token,
+    _write_result,
+    require_phone_verification,
+)
 
 
 class AccountRecordTests(unittest.TestCase):
@@ -17,6 +26,23 @@ class AccountRecordTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "手机号接码验证"):
             require_phone_verification({"codex_phone_status": "not_verified"})
+
+    def test_sub2api_output_is_separate_from_result_metadata(self):
+        result = {
+            "status": "success",
+            "_output_token": _sub2api_token_content({
+                "access_token": "access-fixture",
+                "refresh_token": "refresh-fixture",
+            }),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            result_path = Path(temp) / "results.jsonl"
+            output_path = Path(temp) / "tokens.sub2api.txt"
+            _write_result(result_path, result)
+            _write_output_token(output_path, result)
+            saved = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertNotIn("_output_token", saved)
+            self.assertIn('"accessToken":"access-fixture"', output_path.read_text(encoding="utf-8"))
 
     def test_parses_refresh_token_before_client_id(self):
         record = parse_account_line(
@@ -77,6 +103,44 @@ class AccountRecordTests(unittest.TestCase):
         self.assertEqual(record["source_type"], "mailbox")
         self.assertEqual(record["provider"], "icloud")
         self.assertFalse(record["password"])
+
+    def test_parses_icloud_three_line_mailbox_record(self):
+        records, errors = parse_account_text(
+            "person@icloud.com\n"
+            "https://icloud-api.example/s/opaque/person@icloud.com\n"
+            "TWO_FACTOR_SECRET\n"
+        )
+        self.assertFalse(errors)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["provider"], "icloud")
+        self.assertEqual(records[0]["mail_api_url"], "https://icloud-api.example/s/opaque/person@icloud.com")
+        self.assertEqual(records[0]["two_factor"], "TWO_FACTOR_SECRET")
+        self.assertEqual(
+            canonical_account_line(records[0]),
+            "person@icloud.com\n"
+            "https://icloud-api.example/s/opaque/person@icloud.com\n"
+            "TWO_FACTOR_SECRET",
+        )
+
+    def test_parses_icloud_inline_separator_variants(self):
+        for separator in ("------", "++++", "----"):
+            record = parse_account_line(
+                f"person@icloud.com{separator}"
+                f"https://icloud-api.example/s/opaque/person@icloud.com{separator}"
+                "TWO_FACTOR_SECRET"
+            )
+            self.assertEqual(record["provider"], "icloud")
+            self.assertEqual(record["mail_api_url"], "https://icloud-api.example/s/opaque/person@icloud.com")
+            self.assertEqual(record["two_factor"], "TWO_FACTOR_SECRET")
+
+    def test_three_line_parser_does_not_consume_next_email(self):
+        records, errors = parse_account_text(
+            "one@icloud.com\nhttps://icloud-api.example/s/one/one@icloud.com\n"
+            "two@icloud.com\nhttps://icloud-api.example/s/two/two@icloud.com\n"
+            "TWO_FACTOR_SECRET\n"
+        )
+        self.assertFalse(errors)
+        self.assertEqual([item["email"] for item in records], ["one@icloud.com", "two@icloud.com"])
 
     def test_parses_session_cookie_and_cookie_json(self):
         raw = "__Secure-next-auth.session-token=opaque.session.value"

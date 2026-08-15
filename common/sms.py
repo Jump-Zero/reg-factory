@@ -245,6 +245,7 @@ def _hero_release(pkey):
 
 # ---------------- sms-man.com (API v2.0) ----------------
 _SMSMAN_APP_CACHE = {}  # 原始 app 值(str) -> 解析出的数字 application_id
+_SMSMAN_FALLBACK_CURSOR = 0
 
 
 def _smsman_url(path):
@@ -450,9 +451,13 @@ def _smsman_get_phone(app, country_id="0", max_price="", blacklist=()):
     # 价格表拿不到(get-prices 经常 500/抽风)时**不要直接放弃**——回退逐个试常备有货国家。
     # sms-man country_id: 7印尼 6马来 16英国 12美国 4菲律宾 22印度 36柬埔寨 117越南 14西班牙 ...
     if not ranked:
+        global _SMSMAN_FALLBACK_CURSOR
         bl = {str(b) for b in blacklist}
-        fallback = [c for c in ("7", "6", "16", "22", "117", "36", "4", "12", "14", "10")
-                    if c not in bl]
+        base_fallback = ["16", "12", "14", "10", "6", "7", "22", "117", "36", "4"]
+        start = _SMSMAN_FALLBACK_CURSOR % len(base_fallback)
+        _SMSMAN_FALLBACK_CURSOR += 1
+        rotated = base_fallback[start:] + base_fallback[:start]
+        fallback = [c for c in rotated if c not in bl]
         print(f"  [sms-man] 价格表取不到(接口故障)，回退逐国试租 {len(fallback)} 个常备国家...")
         for c in fallback:
             res = _smsman_request_number(app_id, c, max_price)

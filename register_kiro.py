@@ -16,6 +16,8 @@ import time
 import urllib.parse
 import uuid
 
+import requests as standard_requests
+
 try:
     from curl_cffi import requests as http_requests
 except Exception:  # pragma: no cover - exercised only on minimal installs
@@ -105,6 +107,28 @@ class KiroClient:
         self.client_id = ""
         self.client_secret = ""
 
+    @staticmethod
+    def _is_tls_transport_error(error):
+        message = str(error or "").lower()
+        return any(marker in message for marker in (
+            "tls connect error",
+            "openssl_internal",
+            "invalid library",
+            "ssl connect error",
+        ))
+
+    def _standard_session(self):
+        session = standard_requests.Session()
+        session.verify = False
+        session.headers.update(dict(self.session.headers))
+        try:
+            session.cookies.update(self.session.cookies.get_dict())
+        except Exception:
+            pass
+        if self.proxy:
+            session.proxies = {"http": self.proxy, "https": self.proxy}
+        return session
+
     def _headers(self, referer="", origin="", content_type="application/json", fetch_site="same-origin"):
         headers = {"Accept": "application/json, text/plain, */*", "Content-Type": content_type,
                    "User-Agent": self.fp.ua, "sec-ch-ua": self.fp.sec_ua,
@@ -155,7 +179,19 @@ class KiroClient:
             kwargs["data"] = data
         elif payload is not None:
             kwargs["json"] = payload
-        response = self.session.request(method, url, **kwargs)
+        try:
+            response = self.session.request(method, url, **kwargs)
+        except Exception as error:
+            if not self._is_tls_transport_error(error):
+                raise
+            print("  [kiro] curl TLS transport failed; retrying with standard requests")
+            fallback = self._standard_session()
+            response = fallback.request(method, url, **kwargs)
+            try:
+                self.session.close()
+            except Exception:
+                pass
+            self.session = fallback
         if expected is not None and response.status_code not in set(expected):
             body = response.text[:400].replace("\n", " ")
             raise KiroError(f"HTTP {response.status_code}: {body}")

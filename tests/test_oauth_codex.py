@@ -7,13 +7,21 @@ from common.oauth_codex import (
     _complete_auth_email_login,
     _enter_otp,
     _icloud_existing_codes,
+    _has_phone_error,
     _is_phone_flow_url,
+    _totp_code,
     _wait_for_phone_flow_exit,
     handle_add_phone,
 )
 
 
 class OAuthCodexTests(unittest.TestCase):
+    def test_totp_code_matches_rfc_6238_vector(self):
+        self.assertEqual(
+            _totp_code("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", timestamp=59),
+            "287082",
+        )
+
     def test_czech_consent_labels_are_supported(self):
         self.assertIn("Přijmout a pokračovat", CONSENT_LABELS)
         self.assertIn("Povolit", CONSENT_LABELS)
@@ -24,6 +32,16 @@ class OAuthCodexTests(unittest.TestCase):
         )
         self.assertTrue(_is_phone_flow_url("https://auth.openai.com/add-phone"))
         self.assertFalse(_is_phone_flow_url("https://auth.openai.com/codex/consent"))
+
+    def test_whatsapp_fallback_message_is_a_phone_error(self):
+        page = MagicMock()
+        page.inner_text = AsyncMock(
+            return_value=(
+                "We couldn't send a text message to this phone number, so we switched "
+                "to WhatsApp. Continue to send a verification code on WhatsApp."
+            )
+        )
+        self.assertTrue(asyncio.run(_has_phone_error(page)))
 
     def test_phone_flow_exit_requires_consent_or_callback(self):
         async def exercise(url):

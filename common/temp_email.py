@@ -586,6 +586,42 @@ def _icloud_create(
 
 def _icloud_fetch(mailbox_id, email, token, api_key, base_url, sess):
     """Query the latest message; an empty success response means no mail yet."""
+    raw_url = _norm_base(base_url, "") if base_url else ""
+    raw_path = urlsplit(raw_url).path.lower() if raw_url else ""
+    # Some mailbox vendors issue a per-address read URL (/s/<secret>/<email>)
+    # instead of the configurable /api/user/mail endpoint.  Preserve that URL
+    # verbatim so its embedded secret is never reinterpreted as an API key.
+    if raw_url and "/s/" in raw_path:
+        response = sess.get(raw_url, timeout=HTTP_TIMEOUT)
+        if response.status_code >= 400:
+            raise _icloud_error(response, "fetch")
+        if not response.content:
+            return []
+        try:
+            data = response.json()
+        except (TypeError, ValueError):
+            # Per-account links from some providers return an HTML/plain-text
+            # mailbox view instead of JSON; the unified poller can still scan it.
+            return [{"text": response.text or ""}]
+        if isinstance(data, dict) and data.get("code") == 0 and "data" not in data:
+            return []
+        body = data.get("data") if isinstance(data, dict) and "data" in data else data
+        if isinstance(body, dict):
+            for key in ("messages", "mails", "mail", "items", "results", "content"):
+                if isinstance(body.get(key), list):
+                    body = body[key]
+                    break
+        if not body:
+            return []
+        if isinstance(body, list):
+            return [
+                dict(item) if isinstance(item, dict) else {"text": str(item)}
+                for item in body
+                if isinstance(item, (dict, str))
+            ]
+        if isinstance(body, dict):
+            return [dict(body)]
+        return []
     base, pasted_query = _icloud_base_and_query(base_url)
     key = (api_key or pasted_query.get("apikey") or ICLOUD_MAIL_API_KEY or "").strip()
     address = (email or mailbox_id or "").strip()
@@ -878,11 +914,24 @@ def _hit(msg, sender_hint, subject_hint):
     """邮件是否命中发件人/主题提示（宽松：任一命中即算；两个 hint 都空则全放行）。"""
     if not sender_hint and not subject_hint:
         return True
-    frm = " ".join(str(msg.get(k) or "") for k in ("from_address", "from", "sender")).lower()
-    subj = str(msg.get("subject") or "").lower()
+    frm = " ".join(
+        str(msg.get(k) or "") for k in ("from_address", "from", "sender")
+    ).lower().strip()
+    subj = str(msg.get("subject") or "").lower().strip()
     hit_s = any(s.lower() in frm for s in sender_hint) if sender_hint else False
     hit_j = any(s.lower() in subj for s in subject_hint) if subject_hint else False
-    return hit_s or hit_j
+    if hit_s or hit_j:
+        return True
+    # Per-address mailbox links can return a rendered HTML page instead of a
+    # structured message. In that case the visible body still contains the
+    # sender and subject, so use it as the filtering fallback.
+    if not frm and not subj:
+        body = " ".join(
+            str(msg.get(k) or "")
+            for k in ("content", "text", "textBody", "html", "htmlBody", "body")
+        ).lower()
+        return any(str(hint).lower() in body for hint in (*sender_hint, *subject_hint))
+    return False
 
 
 def _scan_once(mailbox_id, provider, email, token, api_key, base_url,
@@ -900,14 +949,20 @@ def _scan_once(mailbox_id, provider, email, token, api_key, base_url,
         if not _hit(m, sender_hint, subject_hint):
             continue
         if pat:
-            # 自定义正则：在主题+正文里找（剥 HTML 避免命中 hex 色值）
-            for text in (str(m.get("subject") or ""),
-                         _strip_html(str(m.get("html") or m.get("htmlBody") or "")),
-                         str(m.get("text") or m.get("textBody") or m.get("content") or "")):
+            # A caller-supplied pattern is a hard constraint. Do not fall back
+            # to generic dashed-code extraction, which can match HTML/CSS text.
+            for text in (
+                str(m.get("subject") or ""),
+                _strip_html(str(m.get("html") or m.get("htmlBody") or "")),
+                str(m.get("text") or m.get("textBody") or m.get("content") or m.get("body") or ""),
+                str(m.get("verificationCode") or ""),
+                str(m.get("code") or ""),
+            ):
                 for mm in pat.finditer(text):
                     code = next((g for g in mm.groups() if g), mm.group(0))
                     if str(code) not in excluded:
                         return code
+            continue
         codes = m.get("extracted", {}).get("codes") or []
         code = next((code for code in codes if str(code) not in excluded), None)
         if code:
@@ -932,7 +987,7 @@ async def poll_verification_code(mailbox_id, provider, email=None, token=None,
             None, _scan_once, mailbox_id, provider, email, token, api_key, base_url,
             tuple(sender_hint), tuple(subject_hint), code_regex, tuple(exclude_codes))
         if code:
-            print(f"  [temp-email] code found: {code}")
+            print("  [temp-email] code found: ******")
             return code
         elapsed = int(time.time() - start)
         print(f"  [temp-email] waiting for code... ({elapsed}s/{max_wait}s)")
@@ -955,7 +1010,7 @@ def poll_verification_code_blocking(mailbox_id, provider, email=None, token=None
             tuple(exclude_codes),
         )
         if code:
-            print(f"  [temp-email] code found: {code}")
+            print("  [temp-email] code found: ******")
             return code
         elapsed = int(time.time() - start)
         print(f"  [temp-email] waiting for code... ({elapsed}s/{max_wait}s)")

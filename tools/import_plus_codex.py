@@ -94,13 +94,17 @@ async def _bootstrap_session(context, page, record: dict) -> dict:
 class MailCodeProvider:
     """Read the OpenAI email OTP from Graph, iCloud API, or Outlook browser login."""
 
-    def __init__(self, record: dict, context, main_page):
+    def __init__(self, record: dict, context, main_page, max_wait: int = 150):
         self.record = record
         self.context = context
         self.main_page = main_page
+        self.max_wait = max(30, int(max_wait))
         self.graph_ready = False
         self.icloud_ready = False
         self.icloud_existing_codes = set()
+        self.icloud_api_url = str(record.get("mail_api_url") or "").strip()
+        self.icloud_api_key = str(record.get("mail_api_key") or "").strip()
+        self.icloud_token = str(record.get("two_factor") or "").strip()
         self.mail_page = None
         self.mail_prelogged = False
 
@@ -110,7 +114,12 @@ class MailCodeProvider:
         if provider in {"icloud", "apple"} or is_icloud_email(email):
             self.icloud_ready = True
             try:
-                self.icloud_existing_codes = await ox._icloud_existing_codes(email)
+                self.icloud_existing_codes = await ox._icloud_existing_codes(
+                    email,
+                    token=self.icloud_token,
+                    api_key=self.icloud_api_key,
+                    base_url=self.icloud_api_url or None,
+                )
             except Exception:
                 self.icloud_existing_codes = set()
             return "icloud-api"
@@ -148,13 +157,18 @@ class MailCodeProvider:
                 account_email,
                 "icloud",
                 email=account_email,
-                max_wait=150,
+                token=self.icloud_token or None,
+                api_key=self.icloud_api_key or None,
+                base_url=self.icloud_api_url or None,
+                max_wait=self.max_wait,
                 poll_interval=6,
                 sender_hint=OPENAI_SENDERS,
                 subject_hint=OPENAI_SUBJECTS,
                 code_regex=r"\b(\d{6})\b",
                 exclude_codes=tuple(self.icloud_existing_codes),
             )
+            if code:
+                self.icloud_existing_codes.add(str(code))
             return code
         if self.graph_ready:
             code = await asyncio.to_thread(
@@ -180,7 +194,7 @@ class MailCodeProvider:
                 sender_hint=OPENAI_SENDERS,
                 subject_hint=OPENAI_SUBJECTS,
                 code_regex=r"\b(\d{6})\b",
-                max_wait=150,
+                max_wait=self.max_wait,
                 poll=8,
                 skip_login=self.mail_prelogged,
             )
@@ -189,11 +203,11 @@ class MailCodeProvider:
         return code
 
 
-def require_phone_verification(metadata: dict) -> str:
+def require_phone_verification(metadata: dict, allow_unverified: bool = False) -> str:
     status = str((metadata or {}).get("codex_phone_status") or "not_verified").strip().lower()
-    if status != "verified":
+    if status != "verified" and not allow_unverified:
         raise RuntimeError("本次 OAuth 未完成手机号接码验证，已中止 SUB2API 导入")
-    return status
+    return status if status == "verified" else "skipped"
 
 
 def _result_path(value: str) -> Path:
@@ -205,8 +219,33 @@ def _result_path(value: str) -> Path:
 
 def _write_result(path: Path, result: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
+    safe_result = {key: value for key, value in result.items() if key != "_output_token"}
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(result, ensure_ascii=False) + "\n")
+        handle.write(json.dumps(safe_result, ensure_ascii=False) + "\n")
+
+
+def _output_path(value: str) -> Path:
+    if value:
+        return Path(value).expanduser().resolve()
+    root = Path(os.environ.get("REG_FACTORY_DATA_DIR") or Path.cwd())
+    return root / "runtime" / "plus_codex" / "tokens.sub2api.txt"
+
+
+def _sub2api_token_content(credentials: dict) -> str:
+    """Serialize OAuth credentials in the session JSON accepted by SUB2API."""
+    payload = dict(credentials or {})
+    if payload.get("access_token") and not payload.get("accessToken"):
+        payload["accessToken"] = payload["access_token"]
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _write_output_token(path: Path, result: dict):
+    token = str(result.get("_output_token") or "").strip()
+    if not token:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(token + "\n")
 
 
 def _check_paid(plan_type: str, args):
@@ -216,10 +255,17 @@ def _check_paid(plan_type: str, args):
     return normalized
 
 
-async def _save_and_create(origin, sub2api_token, group_id, credentials, email, result):
+async def _save_and_create(origin, sub2api_token, group_id, credentials, email, result, args):
     if not credentials.get("refresh_token"):
         raise RuntimeError("OAuth 凭据缺少 refresh_token")
     save_codex_oauth_credentials(credentials, email=credentials.get("email") or email)
+    if getattr(args, "output_format", "none") == "sub2api":
+        result["_output_token"] = _sub2api_token_content(credentials)
+    if getattr(args, "no_import", False):
+        result["status"] = "success"
+        result["stage"] = "done"
+        result["message"] = "OAuth credentials saved; SUB2API import skipped"
+        return
     result["stage"] = "sub2api"
     account = await asyncio.to_thread(
         ox.create_oauth_account,
@@ -257,11 +303,11 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
         # caller explicitly records that its phone verification already passed.
         if record.get("source_type") == "oauth_token":
             result["stage"] = "token"
-            result["phone_status"] = require_phone_verification(record)
+            result["phone_status"] = require_phone_verification(record, getattr(args, "skip_phone", False))
             credentials = dict(record.get("oauth_credentials") or {})
             credentials["codex_phone_status"] = result["phone_status"]
             result["plan_type"] = _check_paid(credentials.get("plan_type"), args)
-            await _save_and_create(origin, sub2api_token, group_id, credentials, email, result)
+            await _save_and_create(origin, sub2api_token, group_id, credentials, email, result, args)
         else:
             from register_chatgpt import clash_browser_proxy_fields
 
@@ -288,7 +334,9 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
             if record.get("email") and (
                 record.get("password") or record.get("refresh_token") or is_icloud_email(record.get("email"))
             ):
-                mail_provider = MailCodeProvider(record, context, page)
+                mail_provider = MailCodeProvider(
+                    record, context, page, max_wait=args.timeout
+                )
                 mail_mode = await mail_provider.prepare()
                 print(f"  [mail] {masked} 取码方式: {mail_mode}")
 
@@ -299,17 +347,20 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
                 page,
                 lambda: ox.generate_auth_url(origin, sub2api_token),
                 account_email=email,
-                phone_skip_attempts=0,
+                phone_skip_attempts=args.phone_attempts if getattr(args, "skip_phone", False) else 0,
+                skip_timeout=args.timeout,
                 phone_timeout=max(args.timeout, phone_budget),
                 debug_dump=None,
                 sms_provider=args.sms_provider,
                 result_metadata=metadata,
                 email_code_provider=mail_provider,
+                allow_phone=not getattr(args, "skip_phone", False),
+                totp_secret=record.get("two_factor") or "",
             )
             if not code:
                 raise RuntimeError(message or "Codex OAuth 授权未完成")
 
-            result["phone_status"] = require_phone_verification(metadata)
+            result["phone_status"] = require_phone_verification(metadata, getattr(args, "skip_phone", False))
             result["stage"] = "exchange"
             exchanged = await asyncio.to_thread(
                 ox.exchange_code, origin, sub2api_token, session_id, code, state
@@ -317,10 +368,11 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
             credentials = ox.build_oauth_credentials(exchanged)
             credentials["codex_phone_status"] = result["phone_status"]
             result["plan_type"] = _check_paid(credentials.get("plan_type") or result["plan_type"], args)
-            await _save_and_create(origin, sub2api_token, group_id, credentials, email, result)
+            await _save_and_create(origin, sub2api_token, group_id, credentials, email, result, args)
 
         print(
-            f"  [OK] {masked} -> SUB2API #{result['sub2api_account_id']} "
+            f"  [OK] {masked} -> "
+            f"{'SUB2API #' + str(result['sub2api_account_id']) if result['sub2api_account_id'] else 'local credentials'} "
             f"plan={result['plan_type'] or 'unknown'} phone={result['phone_status']}"
         )
     except Exception as exc:
@@ -362,7 +414,9 @@ async def run(args):
     os.environ["CODEX_SMS_TIMEOUT"] = str(args.sms_timeout)
     origin = _origin(SUB2API_URL)
     token = await asyncio.to_thread(ox.sub2api_login, origin, SUB2API_EMAIL, SUB2API_PASSWORD)
-    group_id = await asyncio.to_thread(ox.find_group_id, origin, token, args.group)
+    group_id = None if args.no_import else await asyncio.to_thread(
+        ox.find_group_id, origin, token, args.group
+    )
     print(
         f"[batch] {len(records)} 个 Plus 账号 -> SUB2API group={args.group}(#{group_id})，"
         f"并发={args.concurrency}，接码={args.sms_provider}，换号={args.phone_attempts}"
@@ -372,6 +426,7 @@ async def run(args):
 
     select_chatgpt_node(args.node, allow_blocked=True)
     result_path = _result_path(args.results)
+    output_path = _output_path(args.output) if args.output_format == "sub2api" else None
     semaphore = asyncio.Semaphore(args.concurrency)
     write_lock = asyncio.Lock()
 
@@ -381,6 +436,8 @@ async def run(args):
                 result = await import_one(index, len(records), record, playwright, origin, token, group_id, args)
                 async with write_lock:
                     await asyncio.to_thread(_write_result, result_path, result)
+                    if output_path:
+                        await asyncio.to_thread(_write_output_token, output_path, result)
                 return result
 
         results = await asyncio.gather(
@@ -394,6 +451,8 @@ async def run(args):
         f"失败 {len(results) - success}"
     )
     print(f"[batch] 结果已写入（不含密码和 token）: {result_path}")
+    if output_path:
+        print(f"[batch] SUB2API token output: {output_path}")
     return 0 if success == len(results) else 2
 
 
@@ -407,6 +466,13 @@ def build_parser():
     parser.add_argument("--phone-attempts", type=int, default=3, choices=range(1, 11))
     parser.add_argument("--sms-timeout", type=int, default=180)
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--output-format", choices=("none", "sub2api"), default="none",
+                        help="额外凭据输出格式")
+    parser.add_argument("--output", default="", help="额外 token 输出文件路径")
+    parser.add_argument("--skip-phone", action="store_true",
+                        help="不执行手机号验证；适合只保存凭据或导出 token")
+    parser.add_argument("--no-import", action="store_true",
+                        help="只保存或输出 OAuth 凭据，不创建 SUB2API 账号")
     parser.add_argument("--results", default="", help="结果 JSONL 路径")
     parser.add_argument("--delete-input", action="store_true")
     parser.add_argument("--keep-on-fail", action="store_true")

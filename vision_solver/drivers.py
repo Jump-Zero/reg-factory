@@ -158,8 +158,9 @@ async def solve_grid_select(page, spec, shot_dir):
                 continue
             img, geom = stitch_options_grid(cells, f"{shot_dir}/grid_r{rnd}.png", cols=spec.cols, return_geom=True)
         else:
-            print(f"  [grid] R{rnd} 无 tile/grid 选择器，无法截图")
-            return False
+            print(f"  [grid] R{rnd} tile DOM is transitioning; waiting for the next challenge")
+            await asyncio.sleep(1)
+            continue
         if not img:
             print(f"  [grid] R{rnd} 截图失败")
             return False
@@ -198,13 +199,16 @@ async def solve_grid_select(page, spec, shot_dir):
             pass
 
         # 点选中的 tile
+        clicked = 0
         if tiles and picks:
             for i in picks:
                 try:
                     await tiles.nth(i).click(timeout=4000)
+                    clicked += 1
                     await asyncio.sleep(0.3)
                 except Exception:
                     pass
+        print(f"  [grid] R{rnd} clicked {clicked}/{len(picks)} targets")
         # 提交
         if spec.submit_sel:
             try:
@@ -488,7 +492,21 @@ async def solve_canvas_grid(page, spec, shot_dir):
         elif single:
             # 单答案：vote_answer 取多数票（平票按模型顺序）。没有任何
             # 可解析答案时保持题目原样，绝不能把画布中心当作答案。
-            best, votes, raws = vote_answer(prompt, grid_hd, n_opt, deadline=spec.deadline)
+            best, votes, raws = None, {}, []
+            for vote_attempt in range(1, 4):
+                best, votes, raws = vote_answer(
+                    prompt, grid_hd, n_opt, deadline=spec.deadline
+                )
+                if best is not None or any(
+                    item[1] is not None for item in raws if len(item) >= 2
+                ):
+                    break
+                if vote_attempt < 3:
+                    print(
+                        f"  [canvas] R{rnd} malformed single-choice answer; "
+                        f"retrying ({vote_attempt + 1}/3)"
+                    )
+                    await asyncio.sleep(vote_attempt)
             if best is None:
                 # Some models return PICK for a single-choice prompt. Accept
                 # that only when it contains an explicit, valid cell number.
@@ -509,13 +527,23 @@ async def solve_canvas_grid(page, spec, shot_dir):
                 print(f"  [canvas] R{rnd} 单选使用明确 PICK 答案 #{best}")
             picks = [best]
         else:
-            picks, votes, raws = vote_picklist(
-                prompt,
-                grid_hd,
-                n_opt,
-                max_tokens=spec.answer_max_tokens,
-                deadline=spec.deadline,
-            )
+            picks, votes, raws = [], {}, []
+            for vote_attempt in range(1, 4):
+                picks, votes, raws = vote_picklist(
+                    prompt,
+                    grid_hd,
+                    n_opt,
+                    max_tokens=spec.answer_max_tokens,
+                    deadline=spec.deadline,
+                )
+                if any(item[1] is not None for item in raws if len(item) >= 2):
+                    break
+                if vote_attempt < 3:
+                    print(
+                        f"  [canvas] R{rnd} malformed grid answer; "
+                        f"retrying ({vote_attempt + 1}/3)"
+                    )
+                    await asyncio.sleep(vote_attempt)
             if not picks:
                 # 多选也全空：退化成最高票一格，避免空提交浪费一轮
                 from collections import Counter
@@ -682,7 +710,13 @@ async def solve_canvas_drag(page, spec, shot_dir):
             continue
         empty_answers = 0
 
-        await _drag_on_canvas(frame, page, spec.canvas_sel, fr, to, canvas_w, canvas_h)
+        dragged = await _drag_on_canvas(
+            frame, page, spec.canvas_sel, fr, to, canvas_w, canvas_h
+        )
+        print(f"  [drag] R{rnd} native drag {'executed' if dragged else 'failed'}")
+        if not dragged:
+            await asyncio.sleep(1.0)
+            continue
         await asyncio.sleep(spec.settle_ms / 1000)
 
         if spec.submit_sel:

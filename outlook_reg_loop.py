@@ -68,6 +68,10 @@ DEFAULT_MAX_PRESS = "5"
 DEFAULT_MIN_SUCCESS_RATE = 10.0
 DEFAULT_SUCCESS_RATE_WINDOW = 20
 _OUTLOOK_DEFAULT_EXCLUDED_REGION_HINTS = ("香港", "hong kong", "hongkong", "🇭🇰")
+_GRAPH_HTTP_FALLBACK_ERRORS = frozenset({
+    "password_signin_unavailable",
+    "signin_rate_limited",
+})
 
 STANDALONE_PATH = os.environ.get(
     "SELF_REG_SCRIPT_PATH",
@@ -85,6 +89,11 @@ except ImportError:
 
 def log(msg, level="INFO"):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}", flush=True)
+
+
+def _graph_error_allows_http_fallback(reason):
+    normalized = str(reason or "").strip().lower()
+    return not normalized or normalized in _GRAPH_HTTP_FALLBACK_ERRORS
 
 
 def _success_rate_breaker(outcomes, minimum_rate, window):
@@ -1117,25 +1126,29 @@ async def _run_registration_workers(
                     elapsed = time.time() - t0
                     if email and password:
                         terminal_graph_error = (graph or {}).get("terminal_error")
-                        if not terminal_graph_error and (
-                            not graph or not graph.get("refresh_token")
+                        if (
+                            _graph_error_allows_http_fallback(terminal_graph_error)
+                            and (not graph or not graph.get("refresh_token"))
                         ):
                             log(
                                 f"live browser RT unavailable; falling back to pure HTTP: {email}",
                                 "WARN",
                             )
-                            graph = await asyncio.to_thread(
+                            fallback_graph = await asyncio.to_thread(
                                 extract_graph_for_account,
                                 email,
                                 password,
                             )
+                            if fallback_graph and fallback_graph.get("refresh_token"):
+                                graph = fallback_graph
+                                terminal_graph_error = ""
                         if not graph or not graph.get("refresh_token"):
                             reason = terminal_graph_error or "Graph refresh token missing"
                             await record_outcome(False, reason)
-                            if terminal_graph_error == "signin_rate_limited":
+                            if terminal_graph_error in _GRAPH_HTTP_FALLBACK_ERRORS:
                                 append_no_graph_account(email, password)
                                 log(
-                                    f"registered account is temporarily rate-limited; saved for "
+                                    f"registered account has a recoverable Graph sign-in stop; saved for "
                                     f"later recovery: {email}",
                                     "WARN",
                                 )

@@ -36,7 +36,10 @@ from common.mailbox import get_code_by_token, get_code_outlook_pw, prelogin_outl
 from common.cookies import save_platform_cookies
 from common import emails as email_pool
 from common import proxy_switch
-from common.traffic_saver import install as install_traffic_saver
+from common.traffic_saver import (
+    install as install_traffic_saver,
+    log_summary as log_traffic_summary,
+)
 
 # 打码平台 key（解 Cloudflare Turnstile）。config 顶部会加载 .env，真实环境变量优先。
 try:
@@ -563,6 +566,38 @@ def save_and_import_grok(sso, email, password, mark_pool=True, oauth_credentials
     return True
 
 
+def _recover_grok_sso_http(email: str, password: str) -> str | None:
+    """Recover SSO after browser signup when the xAI redirect missed cookies."""
+    from xconsole_client import XConsoleAuthClient
+
+    client = XConsoleAuthClient(
+        debug=False,
+        proxy=proxy_switch.effective_proxy_url(),
+        signup_url=GROK_SIGNUP_URL,
+        impersonate="chrome131",
+        timeout=40,
+    )
+    try:
+        # fetch_sso_token follows the current xAI set-cookie/RSC chain and does
+        # not create another account, so this is safe after browser signup.
+        client.visit_home()
+        token = client.fetch_sso_token(
+            email=email, password=password, save=False, retries=5
+        )
+        if token:
+            return token
+        client.load_signup_page()
+        return client.fetch_sso_token(
+            email=email, password=password, save=False, retries=3
+        )
+    finally:
+        client.close()
+
+
+async def recover_grok_sso_without_cookie(email: str, password: str) -> str | None:
+    return await asyncio.to_thread(_recover_grok_sso_http, email, password)
+
+
 async def wait_render(page, max_s=70):
     """grok 走代理渲染慢(可达30-40s)，轮询到出现交互元素"""
     for i in range(max_s // 3):
@@ -1023,6 +1058,7 @@ async def register_one(index, total, p, node):
     name = f"grok_{time.strftime('%m%d_%H%M%S')}_{index}"
     bb = BitBrowser()
     pid = None
+    ctx = None
     success = False
 
     async def _protocol_fallback(reason):
@@ -1430,7 +1466,8 @@ async def register_one(index, total, p, node):
             print("  [6] 仍停在 sign-up 页（Turnstile 未过 / 提交被拦）")
         check_timeout()
 
-        # 回到 grok.com 确保 cookie 落到主域
+        # 回到 grok.com 确保 cookie 落到主域；xAI 会异步完成 auth cookie
+        # 写入，先给重定向链一小段时间，避免刚到首页就误判失败。
         if "grok.com" not in page.url:
             try:
                 await page.goto("https://grok.com/", timeout=45000, wait_until="domcontentloaded")
@@ -1439,6 +1476,26 @@ async def register_one(index, total, p, node):
         else:
             await asyncio.sleep(2)
         await dump_state(page, "final")
+
+        key_val = None
+        for cookie_attempt in range(1, 7):
+            try:
+                cookies = await ctx.cookies()
+                key_val = next(
+                    (
+                        item.get("value")
+                        for item in cookies
+                        if item.get("name") in KEY_COOKIES and item.get("value")
+                    ),
+                    None,
+                )
+            except Exception:
+                key_val = None
+            if key_val:
+                break
+            if cookie_attempt < 6:
+                print(f"  [grok] auth cookie pending ({cookie_attempt}/5), waiting...")
+                await asyncio.sleep(2)
 
         key_val, _ = await save_platform_cookies(
             ctx, PLATFORM, pid, email=email, password=password, key_cookie_names=KEY_COOKIES
@@ -1463,7 +1520,24 @@ async def register_one(index, total, p, node):
             print("  [OK] session cookie saved")
             return key_val
         else:
-            print("  [FAIL] no session cookie")
+            print("  [grok] browser redirect had no session cookie; trying HTTP SSO recovery")
+            try:
+                recovered_sso = await recover_grok_sso_without_cookie(email, password)
+            except Exception as exc:
+                print(f"  [grok] HTTP SSO recovery error: {str(exc)[:120]}")
+                recovered_sso = None
+            if recovered_sso:
+                if not save_and_import_grok(
+                    recovered_sso,
+                    email,
+                    password,
+                    mark_pool=temp_mb is None,
+                ):
+                    return None
+                success = True
+                print("  [OK] SSO recovered through xAI HTTP cookie chain")
+                return recovered_sso
+            print("  [FAIL] no session cookie or recoverable SSO")
             _mark_error("no_session_cookie")
             return None
 
@@ -1473,6 +1547,8 @@ async def register_one(index, total, p, node):
             _mark_error(str(e)[:50])
         return None
     finally:
+        if ctx is not None:
+            log_traffic_summary(ctx)
         if pid:
             keep = KEEP_ON_FAIL and not success
             try:

@@ -68,6 +68,26 @@ class GrokBrowserTests(unittest.TestCase):
 
 
 class GrokBrowserOAuthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_sso_recovery_uses_existing_account_without_signup(self):
+        client = MagicMock()
+        client.fetch_sso_token.return_value = "recovered-sso"
+        with patch(
+            "xconsole_client.XConsoleAuthClient", return_value=client
+        ) as factory, patch.object(
+            register_grok.proxy_switch,
+            "effective_proxy_url",
+            return_value="http://127.0.0.1:7897",
+        ):
+            result = await register_grok.recover_grok_sso_without_cookie(
+                "grok@example.com", "password"
+            )
+
+        self.assertEqual(result, "recovered-sso")
+        factory.assert_called_once()
+        client.visit_home.assert_called_once()
+        client.load_signup_page.assert_not_called()
+        client.close.assert_called_once()
+
     async def test_webui_task_skips_browser_device_flow(self):
         with patch.object(register_grok, "IMPORT_SUB2API", True), patch.dict(
             register_grok.os.environ, {"REG_FACTORY_WEBUI_TASK": "1"}, clear=False

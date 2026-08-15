@@ -1336,7 +1336,13 @@ async def api_chatgpt_plus_import_codex(request: Request):
     sms_provider = str((data or {}).get("sms_provider") or "auto").strip().lower()
     if sms_provider not in {"auto", "custom", "smsman", "firefox", "hero"}:
         return JSONResponse({"error": "未知手机号接码平台"}, status_code=400)
-    if sms_provider == "custom":
+    skip_phone = bool((data or {}).get("skip_phone"))
+    no_import = bool((data or {}).get("no_import"))
+    output_format = str((data or {}).get("output_format") or "none").strip().lower()
+    if output_format not in {"none", "sub2api"}:
+        return JSONResponse({"error": "未知 token 输出格式"}, status_code=400)
+    output_path = str((data or {}).get("output") or "").strip()[:500]
+    if sms_provider == "custom" and not skip_phone:
         from common import custom_sms
 
         custom_pool = await asyncio.to_thread(custom_sms.summary)
@@ -1380,9 +1386,14 @@ async def api_chatgpt_plus_import_codex(request: Request):
             "--phone-attempts": phone_attempts,
             "--sms-timeout": sms_timeout,
             "--timeout": timeout,
+            "--skip-phone": skip_phone,
+            "--no-import": no_import,
+            "--output-format": output_format,
             "--delete-input": True,
             "--keep-on-fail": bool((data or {}).get("keep_on_fail")),
         }
+        if output_path:
+            args["--output"] = output_path
         task_env = _child_env("chatgpt")
         from common import proxy_switch
 

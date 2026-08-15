@@ -190,11 +190,20 @@ async def install(context, environ=None) -> str:
     mode = configured_mode(environ)
     if mode == "off" or getattr(context, "_reg_factory_traffic_saver", False):
         return mode
+    env = task_environment(os.environ) if environ is None else environ
+    try:
+        from common import proxy_switch
+
+        platform = proxy_switch.platform_name(env) or "global"
+    except Exception:
+        platform = str(env.get("REG_FACTORY_PLATFORM") or "global").strip().lower()
     route_method = getattr(context, "route", None)
     if not callable(route_method) or not getattr(context, "_reg_factory_route_support", True):
         return "off"
     blocked = Counter()
     setattr(context, "_reg_factory_traffic_stats", blocked)
+    setattr(context, "_reg_factory_traffic_mode", mode)
+    setattr(context, "_reg_factory_traffic_platform", platform)
 
     async def _handle(route):
         request = route.request
@@ -233,7 +242,7 @@ async def install(context, environ=None) -> str:
         setattr(context, "_reg_factory_traffic_saver", True)
     except (AttributeError, NotImplementedError, TypeError):
         return "off"
-    print(f"  [traffic] residential browser saver={mode}")
+    print(f"  [traffic] platform={platform} residential browser saver={mode}")
     return mode
 
 
@@ -253,8 +262,14 @@ def stats(context) -> dict[str, int]:
 
 def log_summary(context) -> dict[str, int]:
     values = stats(context)
-    if values:
+    if getattr(context, "_reg_factory_traffic_saver", False) is True:
         total = sum(values.values())
         details = ", ".join(f"{kind}={count}" for kind, count in sorted(values.items()))
-        print(f"  [traffic] summary blocked={total} ({details})")
+        suffix = f" ({details})" if details else ""
+        platform = getattr(context, "_reg_factory_traffic_platform", "global")
+        mode = getattr(context, "_reg_factory_traffic_mode", "unknown")
+        print(
+            f"  [traffic] platform={platform} summary mode={mode} "
+            f"blocked={total}{suffix}"
+        )
     return values

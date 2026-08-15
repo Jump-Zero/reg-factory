@@ -26,6 +26,22 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
                     expected,
                 )
 
+    def test_transient_microsoft_signin_stops_allow_http_fallback(self):
+        for reason in ("password_signin_unavailable", "signin_rate_limited"):
+            with self.subTest(reason=reason):
+                self.assertTrue(
+                    register_outlook_standalone.microsoft_auth_allows_http_fallback(reason)
+                )
+                self.assertTrue(outlook_reg_loop._graph_error_allows_http_fallback(reason))
+        self.assertFalse(
+            register_outlook_standalone.microsoft_auth_allows_http_fallback(
+                "account_not_found"
+            )
+        )
+        self.assertFalse(
+            outlook_reg_loop._graph_error_allows_http_fallback("account_not_found")
+        )
+
     def test_signup_captcha_disappearance_is_not_registration_success(self):
         state, reason = register_outlook_standalone.outlook_registration_terminal_state(
             "https://signup.live.com/signup?lic=1", "Loading..."
@@ -1046,6 +1062,44 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
         http_extract.assert_not_called()
         self.assertEqual(results[0]["status"], "GRAPH_FAIL")
         self.assertEqual(results[0]["terminal_error"], "account_not_found")
+
+    async def test_retryable_graph_error_uses_http_fallback(self):
+        bb = MagicMock()
+        results = []
+        with (
+            patch.object(
+                register_outlook_standalone,
+                "register_outlook_protocol",
+                return_value=("user@outlook.com", "password"),
+            ),
+            patch.object(
+                register_outlook_standalone,
+                "extract_graph_token_browser",
+                AsyncMock(return_value={"terminal_error": "signin_rate_limited"}),
+            ),
+            patch.object(
+                register_outlook_standalone,
+                "extract_graph_token_http",
+                return_value={
+                    "refresh_token": "refresh-token",
+                    "client_id": "http-client-id",
+                },
+            ) as http_extract,
+        ):
+            await register_outlook_standalone.register_one(
+                bb,
+                1,
+                None,
+                results,
+                __import__("asyncio").Lock(),
+                mode="protocol",
+            )
+
+        http_extract.assert_called_once_with("user@outlook.com", "password", 1)
+        self.assertEqual(results[0]["status"], "OK")
+        self.assertEqual(
+            results[0]["graph"]["refresh_token"], "refresh-token"
+        )
 
     async def test_browser_registration_profile_is_reused_for_graph(self):
         bb = MagicMock()

@@ -116,9 +116,22 @@ def build_child_env(args):
         no_proxy = "127.0.0.1,localhost,::1"
         env["NO_PROXY"] = env["no_proxy"] = no_proxy
     # 让 outlook_reg_loop 的 _clash_verge 能连控制器换节点
-    env.setdefault("CLASH_API", args.clash_api)
-    env.setdefault("CLASH_SECRET", args.clash_secret)
-    env.setdefault("CLASH_GROUP", args.clash_group)
+    env["CLASH_API"] = args.clash_api
+    env["CLASH_SECRET"] = args.clash_secret
+    env["CLASH_GROUP"] = args.clash_group
+    task_tuning = {
+        "CLAUDE_RESIDENTIAL_PROFILE_RETRIES": getattr(args, "claude_profile_retries", None),
+        "CLAUDE_HCAPTCHA_SOLVE_RETRIES": getattr(args, "claude_hcaptcha_retries", None),
+        "CODEX_PHONE_SKIP_ATTEMPTS": getattr(args, "codex_phone_skip", None),
+        "CODEX_ADDPHONE_ATTEMPTS": getattr(args, "codex_phone_attempts", None),
+        "CODEX_SMS_TIMEOUT": getattr(args, "codex_sms_timeout", None),
+        "SMS_GETPHONE_RETRIES": getattr(args, "sms_get_phone_retries", None),
+        "CUSTOM_SMS_POOL_FILE": getattr(args, "custom_sms_pool_file", None),
+        "CUSTOM_SMS_ALLOWED_HOSTS": getattr(args, "custom_sms_allowed_hosts", None),
+    }
+    for key, value in task_tuning.items():
+        if value not in (None, ""):
+            env[key] = str(value)
     return env
 
 
@@ -215,6 +228,20 @@ def stage_platforms(args, env, email, password, token="", client_id=""):
         "--chatgpt-country", args.chatgpt_country,
         "--timeout", str(args.platform_timeout),
         "--broker", args.broker,
+        "--platform-retries", str(max(0, getattr(args, "platform_retries", 0))),
+        "--grok-timeout", str(max(1, getattr(args, "grok_timeout", 40))),
+        "--claude-profile-retries", str(max(1, getattr(args, "claude_profile_retries", 3))),
+        "--claude-hcaptcha-retries", str(max(1, getattr(args, "claude_hcaptcha_retries", 2))),
+        "--claude-challenge-wait", str(max(0, getattr(args, "claude_challenge_wait", 45))),
+        "--claude-challenge-node-retries", str(max(0, getattr(args, "claude_challenge_node_retries", 3))),
+        "--claude-captcha-manual-timeout", str(max(0, getattr(args, "claude_captcha_manual_timeout", 0))),
+        "--codex-sms-provider", getattr(args, "codex_sms_provider", "auto"),
+        "--codex-timeout", str(max(1, getattr(args, "codex_timeout", 120))),
+        "--codex-phone-skip", str(max(0, getattr(args, "codex_phone_skip", 0))),
+        "--codex-phone-attempts", str(max(1, getattr(args, "codex_phone_attempts", 2))),
+        "--codex-sms-timeout", str(max(1, getattr(args, "codex_sms_timeout", 150))),
+        "--sms-get-phone-retries", str(max(1, getattr(args, "sms_get_phone_retries", 4))),
+        "--grok-mailbox-attempts", str(max(1, getattr(args, "grok_mailbox_attempts", 6))),
     ]
     if not getattr(args, "sequential_platforms", False):
         cmd.append("--parallel")
@@ -236,6 +263,16 @@ def stage_platforms(args, env, email, password, token="", client_id=""):
         cmd.append("--grok-sub2api")
         if args.grok_sub2api_group:
             cmd += ["--grok-sub2api-group", args.grok_sub2api_group]
+    if getattr(args, "kiro_account_password", ""):
+        cmd += ["--kiro-account-password", args.kiro_account_password]
+    if getattr(args, "kiro_full_name", ""):
+        cmd += ["--kiro-full-name", args.kiro_full_name]
+    if getattr(args, "custom_sms_pool_file", ""):
+        cmd += ["--custom-sms-pool-file", args.custom_sms_pool_file]
+    if getattr(args, "custom_sms_allowed_hosts", ""):
+        cmd += ["--custom-sms-allowed-hosts", args.custom_sms_allowed_hosts]
+    if getattr(args, "skip_claude_validation", False):
+        cmd.append("--no-claude-auto-validate")
     log(f"Stage B cmd: {redact_command(cmd)}", "B")
     if args.dry_run:
         return 0
@@ -344,7 +381,11 @@ def main():
         help="ChatGPT 注册出口国家：auto 或两位 ISO 国家码",
     )
     ap.add_argument("--platform-timeout", type=int, default=600)
+    ap.add_argument("--platform-retries", type=int, default=0,
+                    help="单个平台失败后的额外重试次数")
     ap.add_argument("--broker", default="", help="共享取码服务URL；默认空=各脚本自行开 Outlook 取码")
+    ap.add_argument("--grok-timeout", type=int, default=40,
+                    help="Grok 共享邮箱 broker 取码超时(秒)")
     ap.add_argument("--keep-on-fail", action="store_true")
     ap.add_argument("--sequential-platforms", action="store_true",
                     help="按顺序运行所选平台；默认各平台并行")
@@ -358,10 +399,45 @@ def main():
                     help="SUB2API 目标分组名（透传，默认取 config.SUB2API_GROUP）")
     ap.add_argument("--codex-manual-phone", action="store_true",
                     help="Codex add-phone 手动模式：不接码，自己在浏览器填号收码（透传）")
+    ap.add_argument("--codex-sms-provider",
+                    choices=["auto", "custom", "hero", "smsman", "firefox"],
+                    default="auto", help="Codex add-phone 接码平台")
+    ap.add_argument("--codex-timeout", type=int, default=120,
+                    help="Codex OAuth 授权捕获超时(秒)")
+    ap.add_argument("--codex-phone-skip", type=int, default=0,
+                    help="正式接码前尝试免手机授权的次数")
+    ap.add_argument("--codex-phone-attempts", type=int, default=2,
+                    help="Codex add-phone 最大换号次数")
+    ap.add_argument("--codex-sms-timeout", type=int, default=150,
+                    help="Codex 单个手机号等待验证码秒数")
+    ap.add_argument("--sms-get-phone-retries", type=int, default=4,
+                    help="接码平台无库存时的取号重试次数")
+    ap.add_argument("--custom-sms-pool-file", default="",
+                    help="自定义接码号码池 JSON；留空使用 WebUI 已导入的默认池")
+    ap.add_argument("--custom-sms-allowed-hosts", default="",
+                    help="允许自定义接码记录域名使用非公网 DNS；逗号分隔，留空保持严格校验")
     ap.add_argument("--grok-sub2api", action="store_true",
                     help="Grok 注册成功后转为 SUB2API Grok OAuth 账号（透传）")
     ap.add_argument("--grok-sub2api-group", default=None,
                     help="SUB2API Grok 目标分组名（默认取 SUB2API_GROK_GROUP）")
+    ap.add_argument("--grok-mailbox-attempts", type=int, default=6,
+                    help="Grok 发码失败时的邮箱尝试次数")
+    ap.add_argument("--claude-profile-retries", type=int, default=3,
+                    help="Claude 住宅出口被拒时的新 Profile 总尝试次数")
+    ap.add_argument("--claude-hcaptcha-retries", type=int, default=2,
+                    help="Claude hCaptcha 自动求解尝试次数")
+    ap.add_argument("--claude-challenge-wait", type=int, default=45,
+                    help="Claude 每个节点等待 Cloudflare 自动通过的秒数")
+    ap.add_argument("--claude-challenge-node-retries", type=int, default=3,
+                    help="Claude 提交邮箱前的节点轮换次数")
+    ap.add_argument("--claude-captcha-manual-timeout", type=int, default=0,
+                    help="Claude 等待人工验证秒数；0 表示关闭")
+    ap.add_argument("--skip-claude-validation", action="store_true",
+                    help="跳过 Claude 对历史 sessionKey 的全量收尾校验")
+    ap.add_argument("--kiro-account-password", default="",
+                    help="Kiro Builder ID 密码；留空自动生成")
+    ap.add_argument("--kiro-full-name", default="Test User",
+                    help="Kiro Builder ID 显示名称")
     # 基建
     ap.add_argument("--proxy", default=PROXY_DEFAULT, help="HTTP(S)_PROXY；传空串禁用")
     ap.add_argument("--clash-api", default=CLASH_API_DEFAULT)

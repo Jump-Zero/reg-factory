@@ -4,13 +4,59 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import register
 from common import proxy_switch
 
 
 class ClaudeChallengeTests(unittest.IsolatedAsyncioTestCase):
+    def test_hcaptcha_hook_only_runs_on_magic_link_documents(self):
+        self.assertIn(
+            "location.pathname.toLowerCase().includes('/magic-link')",
+            register.HCAPTCHA_HOOK_JS,
+        )
+
+    async def test_authenticated_bootstrap_restores_traffic_saver(self):
+        page = MagicMock()
+        page.context = MagicMock()
+        page.goto = AsyncMock()
+
+        with (
+            patch.object(register, "set_traffic_saver_bypass", return_value=True) as bypass,
+            patch.object(register, "dismiss_claude_cookie_banner", AsyncMock()),
+            patch.object(register.asyncio, "sleep", AsyncMock()),
+        ):
+            await register._open_claude_authenticated_app(page)
+
+        self.assertEqual(
+            bypass.call_args_list,
+            [
+                call(page.context, True),
+                call(page.context, False),
+            ],
+        )
+
+    async def test_authenticated_bootstrap_restores_saver_after_navigation_error(self):
+        page = MagicMock()
+        page.context = MagicMock()
+        page.goto = AsyncMock(side_effect=RuntimeError("navigation failed"))
+
+        with (
+            patch.object(register, "set_traffic_saver_bypass", return_value=True) as bypass,
+            patch.object(register, "dismiss_claude_cookie_banner", AsyncMock()),
+            patch.object(register.asyncio, "sleep", AsyncMock()),
+        ):
+            await register._open_claude_authenticated_app(page)
+
+        self.assertEqual(
+            bypass.call_args_list,
+            [
+                call(page.context, True),
+                call(page.context, False),
+            ],
+        )
+
     def test_claude_account_requires_terms_name_and_finished_onboarding(self):
         incomplete = {
             "status": 200,

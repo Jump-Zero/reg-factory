@@ -254,6 +254,70 @@ class ICloudMailTests(unittest.TestCase):
         self.assertEqual(messages[0]["extracted"]["codes"], ["123456"])
         self.assertEqual(sess.calls[1][2]["params"]["email"], "icloud@example.com")
 
+    def test_fetch_accepts_per_account_direct_endpoint(self):
+        sess = FakeSession([
+            FakeResponse(data={"data": {
+                "from": "no-reply@openai.com", "subject": "Your code", "code": "654321"
+            }}),
+        ])
+        messages = temp_email._icloud_fetch(
+            "icloud@example.com",
+            "icloud@example.com",
+            "TWO_FACTOR_SECRET",
+            "",
+            "https://icloud-api.example/s/opaque/icloud@example.com",
+            sess,
+        )
+        self.assertEqual(messages[0]["code"], "654321")
+        self.assertEqual(sess.calls[0][1], "https://icloud-api.example/s/opaque/icloud@example.com")
+        self.assertNotIn("params", sess.calls[0][2])
+
+    def test_fetch_accepts_nested_messages_and_plain_text_endpoint(self):
+        nested = FakeSession([
+            FakeResponse(data={"data": {"messages": [
+                {"subject": "Your code", "text": "Use 246810"},
+            ]}}),
+        ])
+        messages = temp_email._icloud_fetch(
+            "icloud@example.com", "icloud@example.com", "", "",
+            "https://icloud-api.example/s/opaque/icloud@example.com", nested,
+        )
+        self.assertEqual(messages[0]["text"], "Use 246810")
+
+        plain = FakeSession([
+            FakeResponse(data=None, text="OpenAI verification code: 135790"),
+        ])
+        messages = temp_email._icloud_fetch(
+            "icloud@example.com", "icloud@example.com", "", "",
+            "https://icloud-api.example/s/opaque/icloud@example.com", plain,
+        )
+        self.assertIn("135790", messages[0]["text"])
+
+    def test_custom_numeric_pattern_never_falls_back_to_dashed_code(self):
+        dashed = {
+            "from": "no-reply@openai.com",
+            "subject": "Your ChatGPT login code",
+            "html": "<style>.code{color:#2B-2F}</style><p>Enter the code.</p>",
+            "code": "2B-2F",
+            "extracted": {"codes": ["2B-2F"], "links": []},
+        }
+        numeric = {
+            **dashed,
+            "html": "<p>Enter the code.</p>",
+            "code": "654321",
+            "extracted": {"codes": ["654321"], "links": []},
+        }
+        args = (
+            "icloud@example.com", "icloud", "icloud@example.com", "", "",
+            "https://icloud-api.example/s/opaque/icloud@example.com",
+            ("openai",), ("code",), r"\b(\d{6})\b",
+        )
+
+        with patch.object(temp_email, "fetch_messages", return_value=[dashed]):
+            self.assertIsNone(temp_email._scan_once(*args))
+        with patch.object(temp_email, "fetch_messages", return_value=[numeric]):
+            self.assertEqual(temp_email._scan_once(*args), "654321")
+
 
 
 if __name__ == "__main__":

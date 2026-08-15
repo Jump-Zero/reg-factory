@@ -61,6 +61,31 @@ class CustomSmsTests(unittest.TestCase):
         self.assertNotIn("secret", record["record_url"])
         self.assertIn("token=%2A%2A%2A", record["record_url"])
 
+    def test_explicit_host_allowlist_can_accept_non_public_dns(self):
+        with patch.dict(
+            "os.environ",
+            {"CUSTOM_SMS_ALLOWED_HOSTS": "xsd20vip.com"},
+            clear=False,
+        ), patch.object(
+            custom_sms.socket,
+            "getaddrinfo",
+            return_value=[(None, None, None, None, ("198.18.1.130", 0))],
+        ):
+            custom_sms._require_public_url(
+                "https://xsd20vip.com/smsrecord?token=secret"
+            )
+
+    def test_unlisted_non_public_dns_is_still_rejected(self):
+        with patch.dict("os.environ", {"CUSTOM_SMS_ALLOWED_HOSTS": ""}, clear=False), patch.object(
+            custom_sms.socket,
+            "getaddrinfo",
+            return_value=[(None, None, None, None, ("198.18.1.130", 0))],
+        ):
+            with self.assertRaisesRegex(ValueError, "public addresses"):
+                custom_sms._require_public_url(
+                    "https://xsd20vip.com/smsrecord?token=secret"
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

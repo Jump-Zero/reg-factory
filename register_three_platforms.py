@@ -46,6 +46,13 @@ def build_command(platform, args, account):
             cmd += ["--token", token]
         if client_id:
             cmd += ["--client-id", client_id]
+        if getattr(args, "skip_claude_validation", False):
+            cmd.append("--no-auto-validate")
+        cmd += [
+            "--challenge-wait", str(max(0, getattr(args, "claude_challenge_wait", 45))),
+            "--challenge-node-retries", str(max(0, getattr(args, "claude_challenge_node_retries", 3))),
+            "--captcha-manual-timeout", str(max(0, getattr(args, "claude_captcha_manual_timeout", 0))),
+        ]
         return cmd
 
     if platform == "chatgpt":
@@ -75,6 +82,10 @@ def build_command(platform, args, account):
                 cmd += ["--codex-group", args.codex_group]
             if getattr(args, "codex_manual_phone", False):
                 cmd.append("--codex-manual-phone")
+            cmd += [
+                "--codex-sms-provider", getattr(args, "codex_sms_provider", "auto"),
+                "--codex-timeout", str(max(1, getattr(args, "codex_timeout", 120))),
+            ]
         return cmd
 
     if platform == "grok":
@@ -97,6 +108,10 @@ def build_command(platform, args, account):
             cmd.append("--sub2api")
             if getattr(args, "grok_sub2api_group", None):
                 cmd += ["--sub2api-group", args.grok_sub2api_group]
+        cmd += [
+            "--mailbox-attempts",
+            str(max(1, getattr(args, "grok_mailbox_attempts", 6))),
+        ]
         return cmd
 
     if platform == "kiro":
@@ -114,6 +129,10 @@ def build_command(platform, args, account):
             cmd += ["--client-id", client_id]
         if getattr(args, "kiro_account_password", ""):
             cmd += ["--account-password", args.kiro_account_password]
+        if getattr(args, "kiro_full_name", ""):
+            cmd += ["--full-name", args.kiro_full_name]
+        if getattr(args, "keep_on_fail", False):
+            cmd.append("--keep-on-fail")
         return cmd
 
     if platform == "github":
@@ -133,44 +152,52 @@ def build_command(platform, args, account):
     raise ValueError(f"unknown platform: {platform}")
 
 
-async def run_platform(platform, cmd, run_id, child_env=None):
+async def run_platform(platform, cmd, run_id, child_env=None, retries=0):
     os.makedirs(LOG_DIR, exist_ok=True)
-    log_path = os.path.join(LOG_DIR, f"{run_id}_{platform}.log")
-    print(f"\n[{platform}] start")
-    print(f"[{platform}] log: {log_path}")
-
     from common import proxy_switch
-
     platform_env = proxy_switch.platform_environment(child_env or os.environ, platform)
     mode = proxy_switch.proxy_mode(platform_env)
     print(f"[{platform}] proxy mode: {mode}")
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=DATA_ROOT,
-        env=platform_env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+    total_attempts = 1 + max(0, int(retries or 0))
+    last_result = (platform, False, 1, "")
+    for attempt in range(1, total_attempts + 1):
+        suffix = "" if total_attempts == 1 else f"_attempt{attempt}"
+        log_path = os.path.join(LOG_DIR, f"{run_id}_{platform}{suffix}.log")
+        print(f"\n[{platform}] start attempt {attempt}/{total_attempts}")
+        print(f"[{platform}] log: {log_path}")
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=DATA_ROOT,
+            env=platform_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
 
-    saw_success = False
-    with open(log_path, "w", encoding="utf-8", errors="replace") as log:
-        assert proc.stdout is not None
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace")
-            if "success: 1/1" in text.lower():
-                saw_success = True
-            log.write(text)
-            log.flush()
-            print(f"[{platform}] {text}", end="")
+        saw_success = False
+        with open(log_path, "w", encoding="utf-8", errors="replace") as log:
+            assert proc.stdout is not None
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace")
+                if "success: 1/1" in text.lower():
+                    saw_success = True
+                log.write(text)
+                log.flush()
+                print(f"[{platform}] {text}", end="")
 
-    rc = await proc.wait()
-    ok = rc == 0 and saw_success
-    status = "OK" if ok else f"FAIL(exit={rc}, success_marker={saw_success})"
-    print(f"[{platform}] done: {status}")
-    return platform, ok, rc, log_path
+        rc = await proc.wait()
+        ok = rc == 0 and saw_success
+        status = "OK" if ok else f"FAIL(exit={rc}, success_marker={saw_success})"
+        print(f"[{platform}] done: {status}")
+        last_result = (platform, ok, rc, log_path)
+        if ok:
+            return last_result
+        if attempt < total_attempts:
+            print(f"[{platform}] retrying after failed attempt...")
+            await asyncio.sleep(2)
+    return last_result
 
 
 def parse_account(args):
@@ -211,6 +238,19 @@ def child_env_for(args):
     if args.broker:
         env["MAILBOX_BROKER"] = args.broker
         env["GROK_BROKER_TIMEOUT"] = str(args.grok_timeout)
+    task_tuning = {
+        "CLAUDE_RESIDENTIAL_PROFILE_RETRIES": getattr(args, "claude_profile_retries", None),
+        "CLAUDE_HCAPTCHA_SOLVE_RETRIES": getattr(args, "claude_hcaptcha_retries", None),
+        "CODEX_PHONE_SKIP_ATTEMPTS": getattr(args, "codex_phone_skip", None),
+        "CODEX_ADDPHONE_ATTEMPTS": getattr(args, "codex_phone_attempts", None),
+        "CODEX_SMS_TIMEOUT": getattr(args, "codex_sms_timeout", None),
+        "SMS_GETPHONE_RETRIES": getattr(args, "sms_get_phone_retries", None),
+        "CUSTOM_SMS_POOL_FILE": getattr(args, "custom_sms_pool_file", None),
+        "CUSTOM_SMS_ALLOWED_HOSTS": getattr(args, "custom_sms_allowed_hosts", None),
+    }
+    for key, value in task_tuning.items():
+        if value not in (None, ""):
+            env[key] = str(value)
     env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
@@ -233,12 +273,18 @@ async def process_account(account, args, child_env):
     print("=" * 60)
 
     jobs = [(p, build_command(p, args, account)) for p in args.platforms]
+    retries = max(0, getattr(args, "platform_retries", 0))
     if args.parallel:
-        results = await asyncio.gather(*(run_platform(p, cmd, run_id, child_env) for p, cmd in jobs))
+        results = await asyncio.gather(*(
+            run_platform(p, cmd, run_id, child_env, retries=retries)
+            for p, cmd in jobs
+        ))
     else:
         results = []
         for platform, cmd in jobs:
-            results.append(await run_platform(platform, cmd, run_id, child_env))
+            results.append(await run_platform(
+                platform, cmd, run_id, child_env, retries=retries
+            ))
 
     broker_release(args.broker, email)   # 释放该号 Outlook 会话
     print(f"\n  Summary [{email}]")
@@ -257,6 +303,8 @@ async def main():
     parser.add_argument("--platforms", nargs="+", choices=["claude", "chatgpt", "grok", "kiro", "github"], default=["claude", "chatgpt", "grok"])
     parser.add_argument("--parallel", action="store_true", help="run platforms in parallel; default is sequential")
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--platform-retries", type=int, default=0,
+                        help="extra retries after a platform process fails")
     parser.add_argument("--node", default="auto", help="Claude/ChatGPT/Grok Clash node")
     parser.add_argument(
         "--chatgpt-country", default="auto",
@@ -273,12 +321,31 @@ async def main():
                         help="SUB2API 目标分组名（透传给 register_chatgpt.py，默认取 config.SUB2API_GROUP）")
     parser.add_argument("--codex-manual-phone", action="store_true",
                         help="Codex add-phone 手动模式（透传给 register_chatgpt.py）")
+    parser.add_argument("--codex-sms-provider",
+                        choices=["auto", "custom", "hero", "smsman", "firefox"],
+                        default="auto")
+    parser.add_argument("--codex-timeout", type=int, default=120)
+    parser.add_argument("--codex-phone-skip", type=int, default=0)
+    parser.add_argument("--codex-phone-attempts", type=int, default=2)
+    parser.add_argument("--codex-sms-timeout", type=int, default=150)
+    parser.add_argument("--sms-get-phone-retries", type=int, default=4)
+    parser.add_argument("--custom-sms-pool-file", default="")
+    parser.add_argument("--custom-sms-allowed-hosts", default="")
     parser.add_argument("--grok-sub2api", action="store_true",
                         help="Grok 注册成功后把 SSO 转成 SUB2API Grok OAuth 账号")
     parser.add_argument("--grok-sub2api-group", default=None,
                         help="SUB2API Grok 目标分组名（默认取 config.SUB2API_GROK_GROUP）")
     parser.add_argument("--kiro-account-password", default="",
                         help="Kiro 账号密码；留空由注册脚本随机生成")
+    parser.add_argument("--kiro-full-name", default="Test User")
+    parser.add_argument("--grok-mailbox-attempts", type=int, default=6)
+    parser.add_argument("--claude-profile-retries", type=int, default=3)
+    parser.add_argument("--claude-hcaptcha-retries", type=int, default=2)
+    parser.add_argument("--claude-challenge-wait", type=int, default=45)
+    parser.add_argument("--claude-challenge-node-retries", type=int, default=3)
+    parser.add_argument("--claude-captcha-manual-timeout", type=int, default=0)
+    parser.add_argument("--no-claude-auto-validate", action="store_true",
+                        help="skip Claude's full historical session validation scan")
     # broker + loop
     parser.add_argument("--broker", default="http://127.0.0.1:8765", help="共享取码服务 URL；传空串 '' 禁用")
     parser.add_argument("--grok-timeout", type=int, default=40, help="Grok 取码 broker 超时(秒，outlook 注定超时故调短)")

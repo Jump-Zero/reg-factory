@@ -137,6 +137,16 @@ def _chatgpt_country_matches(actual, requested):
     return target == "auto" or actual_country == target
 
 
+def _chatgpt_probe_can_defer_to_browser(ok, loc, status, requested):
+    """Let the real browser handle a CF 403 when no country is pinned."""
+    return (
+        not ok
+        and status == 403
+        and _normalize_chatgpt_country(requested) == "auto"
+        and _chatgpt_country_matches(loc, "auto")
+    )
+
+
 def _env_int(name, default):
     raw = _os.environ.get(name, "")
     try:
@@ -428,6 +438,16 @@ def select_chatgpt_node(requested, allow_blocked=False, country="auto"):
                     _set_active_chatgpt_node(None)
                     print(f"  [node] ChatGPT residential exit verified: {loc}")
                     return None
+                if _chatgpt_probe_can_defer_to_browser(
+                    ok, loc, status, requested_country
+                ):
+                    _set_active_chatgpt_country(loc)
+                    _set_active_chatgpt_node(None)
+                    print(
+                        "  [node] ChatGPT residential preflight HTTP 403 "
+                        f"(loc={loc}); auto country defers challenge to browser"
+                    )
+                    return None
             except Exception as exc:
                 last = str(exc)
             if attempt + 1 < retries:
@@ -502,6 +522,17 @@ def ensure_chatgpt_worker_country():
         last = f"loc={loc} HTTP {status}"
         if ok and _chatgpt_country_matches(loc, requested):
             _set_active_chatgpt_country(loc)
+            return loc
+        if (
+            mode == "residential"
+            and not explicit_direct
+            and _chatgpt_probe_can_defer_to_browser(ok, loc, status, requested)
+        ):
+            _set_active_chatgpt_country(loc)
+            print(
+                "  [node] ChatGPT worker preflight HTTP 403 "
+                f"(loc={loc}); auto country defers challenge to browser"
+            )
             return loc
         if explicit_direct or mode != "residential" or attempt + 1 >= attempts:
             break
@@ -683,7 +714,7 @@ async def submit_email_verification_code(page, code_sel, code, route_retries=2):
         code_input = page.locator(code_sel).first
         if await code_input.count() == 0:
             raise RuntimeError("email_verification_not_completed")
-        print("  [4] still on verification page, re-submitting code once...")
+        print("  [4] still on verification page, retrying keyboard submit...")
         if not await _fill_and_submit_email_code(
             page, code_sel, code, tries=2, verbose=False
         ):
@@ -694,7 +725,17 @@ async def submit_email_verification_code(page, code_sel, code, route_retries=2):
             marker in page.url.lower()
             for marker in ("verification", "verify", "email-verification")
         ):
-            raise RuntimeError("email_verification_not_completed")
+            try:
+                await code_input.press("Enter", timeout=5000)
+                print("  [4] verification button did not advance; pressed Enter")
+                await asyncio.sleep(5)
+            except Exception as error:
+                print(f"  [4] keyboard submit failed: {str(error)[:80]}")
+            if any(
+                marker in page.url.lower()
+                for marker in ("verification", "verify", "email-verification")
+            ):
+                raise RuntimeError("email_verification_not_completed")
 
 
 # OpenAI 发件人 / 验证码邮件特征
@@ -945,6 +986,40 @@ async def ensure_chatgpt_email_entry(page, retries=2):
         await page.goto(SIGNUP_URL, timeout=60000, wait_until="domcontentloaded")
         await asyncio.sleep(4)
     return False
+
+
+async def recover_stuck_chatgpt_email_submit(page, email):
+    """Reopen a clean auth document when the SPA leaves ``?email=`` in place."""
+    for attempt in range(1, 3):
+        try:
+            print(f"  [2] reopening clean ChatGPT login after stuck email ({attempt}/2)")
+            await page.goto(SIGNUP_URL, timeout=60000, wait_until="domcontentloaded")
+            await asyncio.sleep(3)
+            await dismiss_cookie_banner(page)
+            email_input = page.locator(
+                'input[type="email"], input[name="email"]'
+            ).first
+            if await email_input.count() == 0:
+                continue
+            if not await fill_email_verified(page, email_input, email, tries=3):
+                continue
+            if not await click_any_exact(
+                page,
+                ["Continue", "继续", "繼續", "Next", "下一步", "Teruskan", "Weiter"],
+            ):
+                submit = page.locator('button[type="submit"]').first
+                if await submit.count() > 0:
+                    await submit.click()
+                else:
+                    await email_input.press("Enter")
+            await asyncio.sleep(4)
+            step = await wait_for_chatgpt_auth_step(page, timeout=15)
+            if step not in {"email", "unknown"}:
+                print(f"  [2] clean email submit advanced to {step}")
+                return step
+        except Exception as error:
+            print(f"  [2] clean email submit retry failed: {str(error)[:90]}")
+    return "email"
 
 
 def create_chatgpt_icloud_mailbox():
@@ -1359,9 +1434,11 @@ async def register_one(index, total, p):
                     break
         auth_step = await wait_for_chatgpt_auth_step(page, timeout=5)
         if auth_step in {"email", "unknown"}:
-            print("  [2][FAIL] email form remained on login after retries")
-            email_pool.mark_error(PLATFORM, email, email_pw, "email_submit_stuck")
-            return None
+            auth_step = await recover_stuck_chatgpt_email_submit(page, email)
+            if auth_step in {"email", "unknown"}:
+                print("  [2][FAIL] email form remained on login after clean-page recovery")
+                email_pool.mark_error(PLATFORM, email, email_pw, "email_submit_stuck")
+                return None
 
         # Step 3: 可能出现密码页 / 验证码页 / challenge
         # 先检测 challenge

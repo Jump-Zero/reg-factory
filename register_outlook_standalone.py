@@ -133,6 +133,14 @@ MICROSOFT_AUTH_TERMINAL_ERRORS = (
     ),
 )
 
+# These messages stop the current browser sign-in page, but they do not prove
+# that a freshly registered account is invalid. The HTTP OAuth path uses a
+# separate session and can still succeed, so keep it available as a fallback.
+MICROSOFT_AUTH_HTTP_FALLBACK_ERRORS = frozenset({
+    "password_signin_unavailable",
+    "signin_rate_limited",
+})
+
 
 def microsoft_auth_terminal_error(text):
     """Return a stable reason for Microsoft sign-in errors that must not be retried."""
@@ -141,6 +149,12 @@ def microsoft_auth_terminal_error(text):
         if any(marker in normalized for marker in markers):
             return reason
     return ""
+
+
+def microsoft_auth_allows_http_fallback(reason):
+    """Return whether a browser sign-in stop is recoverable through HTTP OAuth."""
+    normalized = str(reason or "").strip().lower()
+    return not normalized or normalized in MICROSOFT_AUTH_HTTP_FALLBACK_ERRORS
 
 
 def outlook_registration_terminal_state(url, text=""):
@@ -3449,12 +3463,18 @@ async def register_one(bb, idx, proxy_str, results, results_lock, live_fh=None, 
         else:
             graph = await extract_graph_token_browser(bb, email, password, idx, proxy_str)
         terminal_graph_error = (graph or {}).get("terminal_error")
-        if not terminal_graph_error and (not graph or not graph.get("refresh_token")):
+        if (
+            microsoft_auth_allows_http_fallback(terminal_graph_error)
+            and (not graph or not graph.get("refresh_token"))
+        ):
             print(f"  {tag} [graph] browser authorization failed; trying HTTP fallback")
             loop = asyncio.get_event_loop()
-            graph = await loop.run_in_executor(
+            fallback_graph = await loop.run_in_executor(
                 None, extract_graph_token_http, email, password, idx
             )
+            if fallback_graph and fallback_graph.get("refresh_token"):
+                graph = fallback_graph
+                terminal_graph_error = ""
 
     # ── Save result ───────────────────────────────────────────────
     async with results_lock:

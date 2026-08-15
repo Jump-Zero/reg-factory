@@ -91,6 +91,7 @@ class RegistrationSchemaTests(unittest.TestCase):
         args = {item["flag"]: item for item in _script("run_full_flow")["args"]}
         self.assertEqual(args["--concurrency"]["default"], 1)
         self.assertFalse(args["--sequential-platforms"]["default"])
+        self.assertEqual(args["--platform-retries"]["default"], 0)
         self.assertIn("github", args["--platforms"]["choices"])
         consumer_args = {
             item["flag"]: item
@@ -98,6 +99,63 @@ class RegistrationSchemaTests(unittest.TestCase):
         }
         self.assertIn("--max-inflight", consumer_args)
         self.assertIn("github", consumer_args["--platforms"]["choices"])
+
+    def test_end_to_end_exposes_complete_stage_tuning(self):
+        flow_args = {
+            item["flag"]: item for item in _script("run_full_flow")["args"]
+        }
+        expected = {
+            "--platform-retries",
+            "--round-sleep",
+            "--email-timeout",
+            "--email-total-timeout",
+            "--max-press",
+            "--broker",
+            "--grok-timeout",
+            "--keep-on-fail",
+            "--claude-profile-retries",
+            "--claude-hcaptcha-retries",
+            "--claude-challenge-wait",
+            "--claude-challenge-node-retries",
+            "--claude-captcha-manual-timeout",
+            "--codex-sms-provider",
+            "--custom-sms-pool-file",
+            "--custom-sms-allowed-hosts",
+            "--codex-phone-skip",
+            "--codex-phone-attempts",
+            "--codex-sms-timeout",
+            "--sms-get-phone-retries",
+            "--codex-timeout",
+            "--grok-mailbox-attempts",
+            "--kiro-account-password",
+            "--kiro-full-name",
+            "--plus-subscription",
+            "--proxy",
+            "--clash-api",
+            "--clash-secret",
+            "--clash-group",
+        }
+        self.assertTrue(expected.issubset(flow_args))
+        self.assertIn("custom", flow_args["--codex-sms-provider"]["choices"])
+        self.assertIn("批量导入", flow_args["--custom-sms-pool-file"]["help"])
+        self.assertIn("白名单", _script("run_full_flow").get("desc", "") + flow_args["--custom-sms-allowed-hosts"]["help"])
+
+        consumer_args = {
+            item["flag"]: item
+            for item in _script("register_three_platforms")["args"]
+        }
+        stage_b_expected = expected - {
+            "--round-sleep",
+            "--email-timeout",
+            "--email-total-timeout",
+            "--max-press",
+            "--proxy",
+            "--clash-api",
+            "--clash-secret",
+            "--clash-group",
+        }
+        self.assertTrue(stage_b_expected.issubset(consumer_args))
+        self.assertIn("custom", consumer_args["--codex-sms-provider"]["choices"])
 
     def test_chatgpt_promotes_direct_sub2api_import(self):
         script = _script("register_chatgpt")

@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import inspect
 import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -243,6 +244,43 @@ class ChatGPTFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(step, "code")
+
+    def test_stuck_email_submit_reopens_clean_login_and_advances(self):
+        async def exercise():
+            field = MagicMock()
+            field.first = field
+            field.count = AsyncMock(return_value=1)
+            field.is_visible = AsyncMock(return_value=True)
+            field.press = AsyncMock()
+            button = MagicMock()
+            button.first = button
+            button.count = AsyncMock(return_value=1)
+            button.click = AsyncMock()
+            page = MagicMock()
+            page.locator.side_effect = lambda selector: (
+                field if 'type="email"' in selector or 'name="email"' in selector
+                else button
+            )
+            page.goto = AsyncMock()
+            with (
+                patch.object(register_chatgpt, "dismiss_cookie_banner", AsyncMock()),
+                patch.object(register_chatgpt, "fill_email_verified", AsyncMock(return_value=True)),
+                patch.object(register_chatgpt, "click_any_exact", AsyncMock(return_value=True)),
+                patch.object(register_chatgpt, "wait_for_chatgpt_auth_step", AsyncMock(return_value="code")),
+                patch.object(register_chatgpt.asyncio, "sleep", AsyncMock()),
+            ):
+                result = await register_chatgpt.recover_stuck_chatgpt_email_submit(
+                    page, "user@example.com"
+                )
+            return result, page
+
+        result, page = asyncio.run(exercise())
+        self.assertEqual(result, "code")
+        page.goto.assert_awaited_once_with(
+            register_chatgpt.SIGNUP_URL,
+            timeout=60000,
+            wait_until="domcontentloaded",
+        )
 
     def test_hidden_turnstile_response_is_detected_as_challenge(self):
         challenge = MagicMock()
@@ -595,6 +633,54 @@ class ChatGPTFlowTests(unittest.TestCase):
         self.assertEqual(country, "US")
         probe.assert_called_once_with(direct=True)
 
+    def test_residential_auto_selection_defers_http_403_to_browser(self):
+        with patch.object(
+            register_chatgpt.proxy_switch, "proxy_mode", return_value="residential"
+        ), patch.object(
+            register_chatgpt, "_probe_chatgpt_node", return_value=(False, "US", 403)
+        ) as probe, patch.object(
+            register_chatgpt.proxy_switch, "rotate_proxy"
+        ) as rotate:
+            selected = register_chatgpt.select_chatgpt_node(
+                "auto", country="auto"
+            )
+
+        self.assertIsNone(selected)
+        self.assertEqual(register_chatgpt._get_active_chatgpt_country(), "US")
+        probe.assert_called_once_with()
+        rotate.assert_not_called()
+
+    def test_worker_auto_country_defers_http_403_to_browser(self):
+        with patch.object(register_chatgpt, "CHATGPT_NODE", "auto"), patch.object(
+            register_chatgpt, "CHATGPT_COUNTRY", "auto"
+        ), patch.object(
+            register_chatgpt.proxy_switch, "proxy_mode", return_value="residential"
+        ), patch.object(
+            register_chatgpt, "_probe_chatgpt_node", return_value=(False, "US", 403)
+        ) as probe, patch.object(
+            register_chatgpt.proxy_switch, "rotate_proxy"
+        ) as rotate:
+            country = register_chatgpt.ensure_chatgpt_worker_country()
+
+        self.assertEqual(country, "US")
+        probe.assert_called_once_with(direct=False)
+        rotate.assert_not_called()
+
+    def test_worker_explicit_country_keeps_http_403_strict(self):
+        with patch.object(register_chatgpt, "CHATGPT_NODE", "auto"), patch.object(
+            register_chatgpt, "CHATGPT_COUNTRY", "US"
+        ), patch.object(
+            register_chatgpt.proxy_switch, "proxy_mode", return_value="residential"
+        ), patch.object(
+            register_chatgpt, "_probe_chatgpt_node", return_value=(False, "US", 403)
+        ), patch.object(
+            register_chatgpt.proxy_switch,
+            "rotate_proxy",
+            return_value={"ok": False, "changed": False},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
+                register_chatgpt.ensure_chatgpt_worker_country()
+
     def test_auto_nodes_interleave_regions_before_applying_probe_limit(self):
         candidates = [
             "🇯🇵 日本 | 01",
@@ -645,6 +731,52 @@ class ChatGPTFlowTests(unittest.TestCase):
 
         self.assertEqual(command[command.index("--token") + 1], "refresh-token")
         self.assertEqual(command[command.index("--client-id") + 1], "client-id")
+
+    def test_three_platform_forwards_claude_retry_tuning(self):
+        args = argparse.Namespace(
+            timeout=600,
+            node="auto",
+            claude_challenge_wait=21,
+            claude_challenge_node_retries=5,
+            claude_captcha_manual_timeout=90,
+        )
+        command = register_three_platforms.build_command(
+            "claude",
+            args,
+            ("mail@outlook.com", "password", "refresh-token", "client-id"),
+        )
+
+        self.assertEqual(command[command.index("--challenge-wait") + 1], "21")
+        self.assertEqual(
+            command[command.index("--challenge-node-retries") + 1], "5"
+        )
+        self.assertEqual(
+            command[command.index("--captcha-manual-timeout") + 1], "90"
+        )
+
+    def test_three_platform_forwards_custom_codex_provider(self):
+        args = argparse.Namespace(
+            timeout=600,
+            node="auto",
+            chatgpt_country="JP",
+            keep_on_fail=False,
+            import_c2a=False,
+            codex=True,
+            codex_group="codex-prod",
+            codex_manual_phone=False,
+            codex_sms_provider="custom",
+            codex_timeout=321,
+        )
+        command = register_three_platforms.build_command(
+            "chatgpt",
+            args,
+            ("mail@example.com", "password", "refresh-token", "client-id"),
+        )
+
+        self.assertEqual(
+            command[command.index("--codex-sms-provider") + 1], "custom"
+        )
+        self.assertEqual(command[command.index("--codex-timeout") + 1], "321")
 
     def test_multi_platform_command_runs_full_github_registration(self):
         args = argparse.Namespace(timeout=600, keep_on_fail=False)
@@ -697,6 +829,145 @@ class ChatGPTFlowTests(unittest.TestCase):
             )
         command_line = " ".join(call.args[0] for call in logger.call_args_list)
         self.assertIn("--parallel", command_line)
+
+    def test_full_flow_forwards_stage_retry_and_sms_configuration(self):
+        args = argparse.Namespace(
+            platforms=["claude", "chatgpt"],
+            node="auto",
+            chatgpt_country="JP",
+            platform_timeout=700,
+            platform_retries=4,
+            broker="",
+            grok_timeout=31,
+            keep_on_fail=False,
+            import_c2a=False,
+            plus_subscription=False,
+            codex=True,
+            codex_group="codex-prod",
+            codex_manual_phone=False,
+            codex_sms_provider="custom",
+            codex_timeout=333,
+            codex_phone_skip=1,
+            codex_phone_attempts=5,
+            codex_sms_timeout=222,
+            sms_get_phone_retries=7,
+            custom_sms_pool_file="runtime/custom-pool.json",
+            custom_sms_allowed_hosts="xsd20vip.com",
+            grok_sub2api=False,
+            grok_mailbox_attempts=8,
+            claude_profile_retries=6,
+            claude_hcaptcha_retries=4,
+            claude_challenge_wait=52,
+            claude_challenge_node_retries=9,
+            claude_captcha_manual_timeout=120,
+            kiro_account_password="",
+            kiro_full_name="Batch User",
+            dry_run=True,
+            sequential_platforms=False,
+        )
+        with patch.object(run_full_flow, "log") as logger:
+            self.assertEqual(
+                run_full_flow.stage_platforms(
+                    args, {}, "mail@example.com", "secret"
+                ),
+                0,
+            )
+
+        command_line = next(
+            call.args[0]
+            for call in logger.call_args_list
+            if call.args[0].startswith("Stage B cmd:")
+        )
+        for expected in (
+            "--platform-retries 4",
+            "--codex-sms-provider custom",
+            "--codex-phone-attempts 5",
+            "--codex-sms-timeout 222",
+            "--sms-get-phone-retries 7",
+            "--custom-sms-pool-file runtime/custom-pool.json",
+            "--custom-sms-allowed-hosts xsd20vip.com",
+            "--claude-profile-retries 6",
+            "--claude-hcaptcha-retries 4",
+            "--grok-mailbox-attempts 8",
+            "--kiro-full-name Batch User",
+        ):
+            self.assertIn(expected, command_line)
+
+    def test_full_flow_builds_child_environment_for_retry_and_custom_pool(self):
+        args = argparse.Namespace(
+            proxy="",
+            clash_api="new-api",
+            clash_secret="new-secret",
+            clash_group="new-group",
+            claude_profile_retries=6,
+            claude_hcaptcha_retries=4,
+            codex_phone_skip=1,
+            codex_phone_attempts=5,
+            codex_sms_timeout=222,
+            sms_get_phone_retries=7,
+            custom_sms_pool_file="runtime/custom-pool.json",
+            custom_sms_allowed_hosts="xsd20vip.com",
+        )
+        with patch.dict(
+            run_full_flow.os.environ,
+            {
+                "CLASH_API": "old-api",
+                "CLASH_SECRET": "old-secret",
+                "CLASH_GROUP": "old-group",
+            },
+            clear=True,
+        ):
+            env = run_full_flow.build_child_env(args)
+
+        self.assertEqual(env["CLAUDE_RESIDENTIAL_PROFILE_RETRIES"], "6")
+        self.assertEqual(env["CLAUDE_HCAPTCHA_SOLVE_RETRIES"], "4")
+        self.assertEqual(env["CODEX_PHONE_SKIP_ATTEMPTS"], "1")
+        self.assertEqual(env["CODEX_ADDPHONE_ATTEMPTS"], "5")
+        self.assertEqual(env["CODEX_SMS_TIMEOUT"], "222")
+        self.assertEqual(env["SMS_GETPHONE_RETRIES"], "7")
+        self.assertEqual(env["CUSTOM_SMS_POOL_FILE"], "runtime/custom-pool.json")
+        self.assertEqual(env["CUSTOM_SMS_ALLOWED_HOSTS"], "xsd20vip.com")
+        self.assertEqual(env["CLASH_API"], "new-api")
+        self.assertEqual(env["CLASH_SECRET"], "new-secret")
+        self.assertEqual(env["CLASH_GROUP"], "new-group")
+
+    def test_platform_process_retries_until_success_marker(self):
+        def process(output, returncode):
+            stream = MagicMock()
+            stream.readline = AsyncMock(
+                side_effect=[output.encode("utf-8"), b""]
+            )
+            proc = MagicMock(stdout=stream)
+            proc.wait = AsyncMock(return_value=returncode)
+            return proc
+
+        first = process("registration failed\n", 1)
+        second = process("success: 1/1\n", 0)
+        with tempfile.TemporaryDirectory() as log_dir:
+            with patch.object(register_three_platforms, "LOG_DIR", log_dir):
+                with patch.object(
+                    register_three_platforms.asyncio,
+                    "create_subprocess_exec",
+                    new=AsyncMock(side_effect=[first, second]),
+                ) as create:
+                    with patch.object(
+                        register_three_platforms.asyncio,
+                        "sleep",
+                        new=AsyncMock(),
+                    ):
+                        result = asyncio.run(
+                            register_three_platforms.run_platform(
+                                "chatgpt",
+                                ["python", "child.py"],
+                                "retry-test",
+                                child_env={},
+                                retries=1,
+                            )
+                        )
+
+        self.assertTrue(result[1])
+        self.assertEqual(create.await_count, 2)
+        self.assertTrue(result[3].endswith("retry-test_chatgpt_attempt2.log"))
 
     def test_standalone_oauth_propagates_failure_exit_code(self):
         source = inspect.getsource(oauth_codex.main)

@@ -24,6 +24,16 @@ CODE_RE = re.compile(r"(?<![\d-])(\d{4,8})(?![\d-])")
 WAIT_STATUSES = {"", "0", "no", "none", "null", "wait", "waiting", "pending", "false"}
 
 
+def _allowed_hosts() -> set[str]:
+    """Return operator-approved record hosts that may use non-public DNS."""
+    raw = str(os.environ.get("CUSTOM_SMS_ALLOWED_HOSTS") or "")
+    return {
+        item.strip().lower().rstrip(".")
+        for item in re.split(r"[\s,;]+", raw)
+        if item.strip()
+    }
+
+
 def pool_path() -> Path:
     configured = str(os.environ.get("CUSTOM_SMS_POOL_FILE") or "").strip()
     if configured:
@@ -228,6 +238,12 @@ def _require_public_url(url: str) -> None:
     hostname = urlsplit(url).hostname or ""
     if hostname.lower() == "localhost":
         raise ValueError("record URL host must be public")
+    normalized = hostname.lower().rstrip(".")
+    allowed = _allowed_hosts()
+    if normalized in allowed or any(
+        normalized.endswith("." + suffix) for suffix in allowed
+    ):
+        return
     try:
         addresses = {item[4][0] for item in socket.getaddrinfo(hostname, None)}
     except OSError as exc:

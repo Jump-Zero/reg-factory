@@ -149,7 +149,7 @@
             <label class="plus-field plus-field-wide">
               <span>Plus 邮箱 / Cookie / OAuth Token（每行一个）</span>
               <textarea id="plus-account-input" spellcheck="false" autocomplete="off"
-                placeholder="Outlook: email----password----refresh_token----client_id&#10;iCloud: email@icloud.com&#10;Cookie: __Secure-next-auth.session-token=...&#10;OAuth JSON: {&quot;access_token&quot;:&quot;...&quot;,&quot;refresh_token&quot;:&quot;...&quot;,...}"></textarea>
+                placeholder="Outlook: email----password----refresh_token----client_id&#10;iCloud 三行: 邮箱&#10;接码 API URL&#10;2FA/API token&#10;Cookie: __Secure-next-auth.session-token=...&#10;OAuth JSON: {&quot;access_token&quot;:&quot;...&quot;,&quot;refresh_token&quot;:&quot;...&quot;,...}"></textarea>
             </label>
             <div class="plus-controls">
               <label class="plus-field"><span>手机号接码平台</span><select id="plus-sms-provider"><option value="auto">自动切换</option><option value="custom">自定义号码池</option><option value="smsman">SMS-Man</option><option value="firefox">firefox.fun</option><option value="hero">Hero SMS</option></select></label>
@@ -157,6 +157,7 @@
               <label class="plus-field"><span>单号等码秒数</span><input id="plus-sms-timeout" type="number" min="30" max="600" value="180"></label>
               <label class="plus-field"><span>并发账号数</span><input id="plus-concurrency" type="number" min="1" max="5" value="1"></label>
               <label class="plus-field"><span>SUB2API 分组</span><input id="plus-group" type="text" value="codex"></label>
+              <label class="plus-field"><span>Token 输出</span><select id="plus-output-format"><option value="none">不额外输出</option><option value="sub2api">SUB2API token JSON</option></select></label>
               <label class="plus-field"><span>ChatGPT 节点</span><input id="plus-node" type="text" value="auto"></label>
             </div>
             <details id="custom-sms-import" class="custom-sms-import">
@@ -171,6 +172,8 @@
               </div>
             </details>
             <label class="plus-toggle"><input id="plus-keep-on-fail" type="checkbox"><span>失败时保留浏览器</span></label>
+            <label class="plus-toggle"><input id="plus-skip-phone" type="checkbox"><span>跳过手机号 / 2FA 验证</span></label>
+            <label class="plus-toggle"><input id="plus-no-import" type="checkbox"><span>仅保存凭据，不导入 SUB2API</span></label>
             <div class="plus-import-actions">
               <button id="btn-plus-import" class="btn-run" type="button">开始登录并接码</button>
               <button id="btn-plus-stop" class="btn-secondary" type="button" disabled>停止任务</button>

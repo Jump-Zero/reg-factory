@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from common import traffic_saver
 
@@ -166,6 +167,22 @@ class TrafficSaverTests(unittest.TestCase):
         asyncio.run(context.handler(bypassed_image))
         self.assertEqual(bypassed_image.action, "continue")
         self.assertEqual(traffic_saver.stats(context), {"image": 1})
+
+    def test_summary_identifies_platform_mode_even_when_nothing_was_blocked(self):
+        context = _Context()
+        environment = {
+            "REG_FACTORY_PLATFORM": "grok",
+            "PROXY_MODE": "residential",
+            "REG_FACTORY_PROXY": "http://proxy.test:9000",
+            "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "extreme",
+        }
+        with patch("builtins.print") as output:
+            asyncio.run(traffic_saver.install(context, environment))
+            traffic_saver.log_summary(context)
+
+        messages = [str(call.args[0]) for call in output.call_args_list]
+        self.assertTrue(any("platform=grok" in message for message in messages))
+        self.assertTrue(any("mode=extreme blocked=0" in message for message in messages))
 
 
 if __name__ == "__main__":

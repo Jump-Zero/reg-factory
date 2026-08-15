@@ -1350,6 +1350,9 @@ async function startPlusCodexImport(){
         group:$('#plus-group').value.trim() || 'codex',
         node:$('#plus-node').value.trim() || 'auto',
         keep_on_fail:$('#plus-keep-on-fail').checked,
+        skip_phone:$('#plus-skip-phone').checked,
+        no_import:$('#plus-no-import').checked,
+        output_format:$('#plus-output-format').value,
       }),
     });
     const data = await readJsonResponse(response);
