@@ -2239,6 +2239,27 @@ $('#btn-import-mail').onclick = async ()=>{
   finally{ btn.disabled=false; btn.textContent=o; }
 };
 
+$('#btn-recycle-reserved').onclick = async ()=>{
+  const btn=$('#btn-recycle-reserved'); const o=btn.textContent; btn.disabled=true; btn.textContent='回收中…';
+  const msg=$('#mailpool-msg'); msg.textContent='';
+  try{
+    const resp = await fetch('/api/mailpool/recycle-reserved',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({})});
+    const r = await resp.json();
+    if(r.ok){
+      const res = r.result||{};
+      const parts = Object.keys(res).filter(k=>k!=='released')
+        .map(k=>`${k}: 回收 ${res[k].recycled} / 保留 ${res[k].kept}`)
+        .filter(s=>!s.endsWith('回收 0 / 保留 0'));
+      msg.textContent = `✓ 已释放 ${res.released||0} 个邮箱重新可选` +
+        (parts.length? `（${parts.join('；')}）` : '（没有 reserved 记录）');
+    }else{
+      msg.textContent='回收失败: '+(r.error||'');
+    }
+  }catch(e){ msg.textContent='回收请求失败: '+e; }
+  finally{ btn.disabled=false; btn.textContent=o; }
+};
+
 // ---------------------------------------------------------------- 启动
 scriptsReady = loadScripts();
 scriptsReady.then(()=>{

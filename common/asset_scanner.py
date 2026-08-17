@@ -303,28 +303,36 @@ def _load_sub2api_uploaded() -> dict[str, set[str]]:
             origin = _origin(sub2api_url)
             token = _sub2api_login(origin, sub2api_email, sub2api_password, timeout=10)
             
-            # 查询所有平台的账号（分页获取）
-            for platform in ("grok", "chatgpt", "claude"):
+            # 查询所有平台的账号（分页获取）。
+            # chatgpt 账号经 import/codex-session 导入后在 Sub2API 中属于
+            # openai 平台，需同时查询两个平台名并合并，否则导入状态永远显示未导入。
+            sub2api_platforms = {
+                "grok": ("grok",),
+                "chatgpt": ("chatgpt", "openai"),
+                "claude": ("claude",),
+            }
+            for platform, query_platforms in sub2api_platforms.items():
                 all_names: set[str] = set()
-                page = 1
-                while True:
-                    resp = _sub2api_request(
-                        origin,
-                        f"/api/v1/admin/accounts?page={page}&page_size=200&platform={platform}",
-                        token=token,
-                        timeout=15,
-                        retries=1,
-                        use_env_proxy=False,
-                    )
-                    items = resp.get("items", []) if isinstance(resp, dict) else []
-                    for item in items:
-                        name = str(item.get("name") or "").strip().lower()
-                        if name:
-                            all_names.add(name)
-                    total_pages = resp.get("pages", 1) if isinstance(resp, dict) else 1
-                    if page >= total_pages or not items:
-                        break
-                    page += 1
+                for query_platform in query_platforms:
+                    page = 1
+                    while True:
+                        resp = _sub2api_request(
+                            origin,
+                            f"/api/v1/admin/accounts?page={page}&page_size=200&platform={query_platform}",
+                            token=token,
+                            timeout=15,
+                            retries=1,
+                            use_env_proxy=False,
+                        )
+                        items = resp.get("items", []) if isinstance(resp, dict) else []
+                        for item in items:
+                            name = str(item.get("name") or "").strip().lower()
+                            if name:
+                                all_names.add(name)
+                        total_pages = resp.get("pages", 1) if isinstance(resp, dict) else 1
+                        if page >= total_pages or not items:
+                            break
+                        page += 1
                 if all_names:
                     result[platform] = all_names
             

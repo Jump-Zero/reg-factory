@@ -1992,6 +1992,27 @@ async def api_mailpool_delete(request: Request):
         }
 
 
+@app.post("/api/mailpool/recycle-reserved")
+async def api_mailpool_recycle_reserved(request: Request):
+    """回收各平台 used 文件中处于 reserved 状态的邮箱（注册未完成被锁死的）。
+    body: {"platforms": ["grok", ...]}  # 缺省回收全部平台
+    """
+    running = sum(1 for rec in RUNS.values() if not rec["done"])
+    if running:
+        return JSONResponse(
+            {"ok": False, "error": f"当前有 {running} 个任务运行中，请先停止任务再回收"},
+            status_code=409,
+        )
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    platforms = (data or {}).get("platforms") or None
+    from common.emails import recycle_reserved
+    result = await asyncio.to_thread(recycle_reserved, platforms)
+    return {"ok": True, "result": result}
+
+
 # ============================================================ Kiro → OmniRoute 导入
 @app.post("/api/kiro/omni-import")
 async def api_kiro_omni_import(request: Request):

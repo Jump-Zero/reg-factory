@@ -127,7 +127,7 @@ COMPLETE_BTN = ["登録を完了", "アカウントを作成", "Complete registr
 GROK_SENDER = ("x.ai", "grok", "noreply", "no-reply")
 GROK_SUBJECT = ("code", "verify", "verification", "grok", "x.ai", "confirm", "確認", "認証", "コード", "验证", "驗證")
 GROK_CODE_REGEX = (
-    r"\b((?=[A-Z0-9-]*[A-Z])(?:[A-Z0-9]{2,4}-[A-Z0-9]{2,4}|[A-Z0-9]{6}))\b"
+    r"\b((?:[A-Z0-9]{2,4}-[A-Z0-9]{2,4}|(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6}))\b"
 )
 
 

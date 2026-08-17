@@ -202,6 +202,8 @@
           placeholder="aaa@outlook.com----Pass123----M.C5xx...----9e5f94bc-...&#10;bbb@outlook.com----Pass456----9e5f94bc-...----M.C5xx..."></textarea>
         <div>
           <button id="btn-import-mail" class="btn-run">导入到邮箱池</button>
+          <button id="btn-recycle-reserved" class="btn-secondary" type="button"
+            title="释放各平台注册未完成而锁死在 reserved 状态的邮箱（保留已成功 ok 记录）">回收 Reserved 邮箱</button>
           <span id="mailpool-msg" class="env-msg"></span>
         </div>
       </div>
@@ -517,6 +519,6 @@
 
 <div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
 
-<script src="/static/app.js?v=20260813-status-sync-3"></script>
+<script src="/static/app.js?v=20260815-recycle-1"></script>
 </body>
 </html>

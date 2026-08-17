@@ -151,6 +151,81 @@ def mark_used(platform, email, password=""):
     _exclude_from_outlook_sale(platform, email)
 
 
+REGISTER_PLATFORMS = ("claude", "chatgpt", "grok", "kiro", "tri")
+
+
+def _read_blocklist_emails(path):
+    emails = set()
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    emails.add(line.split("----")[0].strip().lower())
+    return emails
+
+
+def recycle_reserved(platforms=None):
+    """清除平台 used 文件中的 reserved 行（保留 ok 行），释放未完成注册的邮箱。
+
+    同时从 outlook_registration_emails.txt 移除未在任何平台标记 ok/error、
+    也未列入销售排除的邮箱，否则它们仍会被 _load_used 全局屏蔽。
+    返回 {platform: {"recycled": N, "kept": N}, "released": N}。
+    """
+    targets = [str(p).strip().lower() for p in (platforms or REGISTER_PLATFORMS)]
+    targets = [p for p in targets if p and p not in {"email", "outlook"}]
+    result = {}
+    with _lock:
+        protected = set()
+        for platform in REGISTER_PLATFORMS:
+            protected |= _read_blocklist_emails(_error_file(platform))
+            if os.path.exists(_used_file(platform)):
+                with open(_used_file(platform), "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and not line.endswith("----reserved"):
+                            protected.add(line.split("----")[0].strip().lower())
+        protected |= _read_blocklist_emails(_outlook_sale_file())
+
+        recycled_all = set()
+        for platform in targets:
+            path = _used_file(platform)
+            if not os.path.exists(path):
+                result[platform] = {"recycled": 0, "kept": 0}
+                continue
+            with file_lock(f"{EMAILS_FILE}.{platform}.reserve"):
+                with open(path, "r", encoding="utf-8") as f:
+                    lines = f.read().splitlines()
+                kept, recycled = [], 0
+                for raw in lines:
+                    stripped = raw.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    if stripped.endswith("----reserved"):
+                        recycled += 1
+                        recycled_all.add(stripped.split("----")[0].strip().lower())
+                    else:
+                        kept.append(raw)
+                with open(path, "w", encoding="utf-8") as f:
+                    if kept:
+                        f.write("\n".join(kept) + "\n")
+            result[platform] = {"recycled": recycled, "kept": len(kept)}
+
+        released = recycled_all - protected
+        reg_path = _outlook_registration_file()
+        if released and os.path.exists(reg_path):
+            with file_lock(reg_path):
+                with open(reg_path, "r", encoding="utf-8") as f:
+                    reg_lines = [line for line in f.read().splitlines() if line.strip()]
+                kept_reg = [l for l in reg_lines if l.strip().lower() not in released]
+                if len(kept_reg) != len(reg_lines):
+                    with open(reg_path, "w", encoding="utf-8") as f:
+                        if kept_reg:
+                            f.write("\n".join(kept_reg) + "\n")
+        result["released"] = len(released)
+    return result
+
+
 def mark_error(platform, email, password="", reason=""):
     append_line(_error_file(platform), f"{email}----{password}----{reason}")
     _exclude_from_outlook_sale(platform, email)

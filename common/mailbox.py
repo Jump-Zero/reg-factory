@@ -420,7 +420,9 @@ def get_code_by_token(
 
     pat = re.compile(code_regex)
     start = time.time()
+    first_poll = True
     while time.time() - start < max_wait:
+        elapsed_first_log = first_poll
         for folder in GRAPH_FOLDERS:
             try:
                 messages = fetch_messages(token, folder, top=10, raise_on_error=True)
@@ -435,8 +437,12 @@ def get_code_by_token(
                 hit_sender = any(s.lower() in frm for s in sender_contains) if sender_contains else False
                 hit_subject = any(s.lower() in subj for s in subject_contains) if subject_contains else False
                 if not (hit_sender or hit_subject):
+                    if elapsed_first_log:
+                        print(f"  [mail] skip (sender/subject mismatch) from={m['from']} subj={m['subject'][:60]}")
                     continue
                 if _message_too_old(m, received_after):
+                    if elapsed_first_log:
+                        print(f"  [mail] skip (too old) from={m['from']} received={m.get('received','')} after={received_after}")
                     continue  # resend 前的旧码，已作废，跳过
                 # 优先在主题里找验证码（很多服务把 code 放主题），再到正文。
                 # 正文先剥 HTML：避免命中 inline CSS 的 #202123 等 hex 色值(伪 6 位码)。
@@ -446,8 +452,12 @@ def get_code_by_token(
                         code = _first_group(mm)
                         print(f"  [mail] code found in {folder} (from={m['from']}): {code}")
                         return code
+                    elif elapsed_first_log:
+                        snippet = text[:120].replace("\n", " ")
+                        print(f"  [mail] matched but no code regex hit. from={m['from']} text={snippet}")
         elapsed = int(time.time() - start)
         print(f"  [mail] waiting for code (inbox+junk)... ({elapsed}s/{max_wait}s)")
+        first_poll = False
         # token 可能在长轮询中过期，过半时刷新一次
         if elapsed > max_wait // 2 and elapsed % (poll * 4) < poll:
             nt = _get_access_token(refresh_token, client_id)
