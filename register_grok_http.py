@@ -315,7 +315,11 @@ def register_one(index, total, sub2api=False, sub2api_group="", mailbox_attempts
             return None
 
         # 8. 落盘标准 grok token（{email,sso,ts}）
-        save_grok_token(sso, email)
+        save_grok_token(
+            sso,
+            email,
+            authorization_status="pending" if sub2api else "not_requested",
+        )
         print(f"  [OK] grok sso token 已保存  email={email} pw={password}")
         if sub2api:
             from common.uploaders import upload_sub2api_grok
@@ -331,6 +335,12 @@ def register_one(index, total, sub2api=False, sub2api_group="", mailbox_attempts
                 local_proxy=proxy_switch.effective_proxy_url(),
             )
             print(f"  [{'OK' if ok else 'FAIL'}] {msg}")
+            save_grok_token(
+                sso,
+                email,
+                authorization_status="authorized" if ok else "failed",
+                announce=False,
+            )
             if not ok:
                 print("  [hint] SSO 已落盘，可修复配置后运行: python tools/upload_tokens.py grok")
                 return None

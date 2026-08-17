@@ -1140,6 +1140,10 @@ async def _complete_auth_email_login(
         resend = page.locator(
             'button:has-text("Resend"), a:has-text("Resend"), '
             'button:has-text("Send new code"), a:has-text("Send new code"), '
+            "button:has-text(\"Didn't get a code\"), a:has-text(\"Didn't get a code\"), "
+            "button:has-text(\"Didn't receive\"), a:has-text(\"Didn't receive\"), "
+            'button:has-text("Try again"), a:has-text("Try again"), '
+            '[aria-label*="resend" i], [data-testid*="resend" i], '
             'button:has-text("重新发送"), a:has-text("重新发送"), '
             'button:has-text("重发验证码"), a:has-text("重发验证码")'
         )

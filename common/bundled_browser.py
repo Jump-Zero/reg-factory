@@ -100,6 +100,11 @@ class BundledBrowser:
             "createdAt": time.time(),
         }
         self._save(profiles)
+        try:
+            from common.browser_registry import register
+            register(profile_id, name=name, provider=self.provider_name)
+        except Exception:
+            pass
         return profile_id
 
     def list_browsers(self, page=0, page_size=100):
@@ -186,6 +191,11 @@ class BundledBrowser:
         profiles = self._load()
         profiles.pop(str(profile_id), None)
         self._save(profiles)
+        try:
+            from common.browser_registry import unregister
+            unregister(profile_id)
+        except Exception:
+            pass
         shutil.rmtree(self.profile_root / str(profile_id), ignore_errors=True)
         return {"success": True}
 

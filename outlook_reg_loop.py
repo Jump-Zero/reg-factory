@@ -556,6 +556,9 @@ def bb_create_for_outlook_reg(name, proxy_str=None):
     pid = data.get("id") or data.get("browserId")
     if not pid:
         raise RuntimeError(f"/browser/update returned no id: {data}")
+    from common.browser_registry import register
+
+    register(pid, name=name, provider="bitbrowser", api_base=BB_API)
     return pid
 
 
@@ -939,7 +942,9 @@ async def one_attempt(
         if profile_id:
             try:
                 bb.close_browser(profile_id)
-                await asyncio.sleep(2)
+            except Exception:
+                pass
+            try:
                 bb.delete_browser(profile_id)
             except Exception:
                 pass

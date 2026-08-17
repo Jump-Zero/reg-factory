@@ -144,6 +144,21 @@ class TrafficSaverTests(unittest.TestCase):
             {"id": "profile-1"},
         )
 
+    def test_chatgpt_extreme_uses_auth_safe_filter_and_launch(self):
+        chatgpt = {
+            "REG_FACTORY_PLATFORM": "chatgpt",
+            "PROXY_MODE": "residential",
+            "REG_FACTORY_PROXY": "http://proxy.test:9000",
+            "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "extreme",
+        }
+        self.assertEqual(
+            traffic_saver.bitbrowser_open_payload("profile-1", chatgpt),
+            {"id": "profile-1"},
+        )
+        context = _Context()
+        mode = asyncio.run(traffic_saver.install(context, chatgpt))
+        self.assertEqual(mode, "balanced")
+
     def test_install_routes_requests_using_configured_mode(self):
         context = _Context()
         mode = asyncio.run(traffic_saver.install(context, {

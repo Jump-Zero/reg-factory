@@ -119,6 +119,11 @@ class BitBrowser:
     def delete_browser(self, profile_id):
         """删除浏览器窗口配置"""
         result = self._post("/browser/delete", {"id": profile_id})
+        try:
+            from common.browser_registry import unregister
+            unregister(profile_id)
+        except Exception:
+            pass
         print(f"  窗口已删除: {profile_id}")
         return result
 
@@ -168,6 +173,16 @@ class BitBrowser:
         }
         result = self._post("/browser/update", data)
         profile_id = result["data"]["id"]
+        try:
+            from common.browser_registry import register
+            register(
+                profile_id,
+                name=name,
+                provider=self.provider_name,
+                api_base=self.api_base,
+            )
+        except Exception as exc:
+            print(f"  profile registry warning: {str(exc)[:120]}")
         print(f"  新窗口已创建: {name} (ID: {profile_id})")
         return profile_id
 

@@ -21,6 +21,7 @@ TASK_FILES = [
     "register_outlook_standalone.py",
     "tools/extract_graph_tokens.py",
     "tools/import_plus_codex.py",
+    "tools/run_protocol_payment_batch.py",
     "tools/upload_tokens.py",
     "tools/export_chatgpt2api.py",
     "tools/export_accounts.py",

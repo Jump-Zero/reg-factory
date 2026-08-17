@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import base64
 import json
 import os
@@ -170,13 +171,15 @@ class ChatGPTPlusTests(unittest.TestCase):
         self.assertIn('(?:oaics_|cs_)', server)
         self.assertIn('(?:oaics_|cs_)', frontend)
 
-    def test_main_webui_exposes_plus_codex_importer_and_removes_old_workbench(self):
+    def test_main_webui_integrates_protocol_links_into_plus_importer(self):
         root = Path(__file__).resolve().parents[1]
         server = (root / "webui" / "server.py").read_text(encoding="utf-8")
         index = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
         frontend = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn('@app.post("/api/chatgpt-plus/import-codex")', server)
         self.assertIn("plus_codex_import", server)
+        self.assertIn('@app.api_route("/chatgpt-plus/{path:path}"', server)
+        self.assertIn('_PLUS_CHECKOUT_GATE_PATHS', server)
         self.assertNotIn("pay.nyanya.love", server)
         self.assertIn('id="plus-account-input"', index)
         self.assertIn('id="plus-sms-provider"', index)
@@ -190,20 +193,228 @@ class ChatGPTPlusTests(unittest.TestCase):
         self.assertIn('id="btn-plus-import"', index)
         self.assertIn("/api/chatgpt-plus/import-codex", frontend)
         self.assertIn("phone_attempts", frontend)
+        self.assertIn('id="plus-protocol-action"', index)
+        self.assertIn('id="plus-protocol-source"', index)
+        self.assertIn('id="plus-protocol-method"', index)
+        self.assertIn('id="plus-protocol-concurrency"', index)
+        self.assertIn('id="btn-plus-protocol-run"', index)
+        self.assertIn('value="paypal"', index)
+        self.assertIn('value="momo"', index)
+        self.assertIn('value="blik" disabled', index)
+        self.assertIn('value="pay"', index)
+        self.assertIn('id="plus-payment-dialog"', index)
+        self.assertIn('id="plus-payment-cards"', index)
+        self.assertIn('id="plus-payment-addresses"', index)
+        self.assertIn('id="plus-payment-phones"', index)
+        self.assertNotIn('id="plus-workbench"', index)
+        self.assertNotIn('id="plus-workbench-template"', index)
+        self.assertNotIn('id="plus-tab-workbench"', index)
+        self.assertNotIn('/chatgpt-plus/static/direct-bind.js', index)
+        self.assertIn("/api/chatgpt-plus/protocol-status", frontend)
+        self.assertIn("/api/chatgpt-plus/protocol-batch", frontend)
+        self.assertIn('"/api/chatgpt-plus/protocol-batch"', server)
+        self.assertIn("run_protocol_payment_batch.py", server)
+        self.assertIn("payment_details", server)
+        self.assertIn("payment_config", server)
+        self.assertNotIn('href="/chatgpt-plus/"', index)
         self.assertNotIn("btn-import-ats", index)
         self.assertNotIn("plusUrl", frontend)
         self.assertFalse((root / "webui" / "static" / "card-link-batch.js").exists())
 
-    def test_network_panel_does_not_expose_removed_plus_payment_controls(self):
+    def test_network_panel_exposes_protocol_proxy_endpoints(self):
         root = Path(__file__).resolve().parents[1]
         index = (root / "webui" / "static" / "index.html").read_text(encoding="utf-8")
         frontend = (root / "webui" / "static" / "app.js").read_text(encoding="utf-8")
         server = (root / "webui" / "server.py").read_text(encoding="utf-8")
         self.assertNotIn('id="proxy-plus-link-route"', index)
         self.assertNotIn('id="proxy-plus-bind-route"', index)
-        self.assertNotIn("REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE", frontend)
-        self.assertNotIn("REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE", frontend)
-        self.assertIn('status_code=410', server)
+        self.assertIn('id="proxy-plus-link-override"', index)
+        self.assertIn('id="proxy-plus-bind-override"', index)
+        self.assertIn("REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE", frontend)
+        self.assertIn("REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE", frontend)
+        self.assertIn('id="plus-protocol-method"', index)
+        self.assertNotIn('id="plus-workbench"', index)
+        self.assertIn('"/standalone-flow/quick-checkout"', server)
+        self.assertNotIn("Plus 提链和绑卡工作台已移除", server)
+
+    def test_protocol_catalog_exposes_all_reference_channels_and_blocks_blik_batch(self):
+        from common.protocol_payment import protocol_catalog
+
+        methods = {item["id"]: item for item in protocol_catalog("does-not-exist")}
+        self.assertEqual(len(methods), 12)
+        self.assertTrue(methods["paypal"]["batch_enabled"])
+        self.assertTrue(methods["paypal"]["batch_payment_enabled"])
+        self.assertEqual(methods["paypal"]["payment_execution"], "paypal_auto")
+        self.assertTrue(methods["momo"]["batch_enabled"])
+        self.assertFalse(methods["blik"]["batch_enabled"])
+        self.assertEqual(methods["blik"]["payment_execution"], "single_code")
+
+    def test_paypal_per_run_details_are_validated_and_normalized(self):
+        future_year = time.localtime().tm_year + 2
+        config = webui_server._parse_paypal_payment_details({
+            "cards": f"4242 4242 4242 4242|12/{future_year}|123",
+            "addresses": "1 Market St|San Francisco|CA|94105",
+            "phones": "+12025550123----https://sms.example.test/messages?token=fixture",
+        })
+        self.assertEqual(config["cards"][0]["number"], "4242424242424242")
+        self.assertEqual(config["cards"][0]["exp_year"], str(future_year))
+        self.assertEqual(config["addresses"][0]["state"], "CA")
+        self.assertEqual(config["phone_numbers"][0]["phone"], "+12025550123")
+        with self.assertRaisesRegex(ValueError, "同时填写"):
+            webui_server._parse_paypal_payment_details({"cards": "4242424242424242|12/30|123"})
+
+    def test_protocol_pool_source_uses_only_cached_zero_price_chatgpt_accounts(self):
+        report = {"items": [
+            {"platform": "chatgpt", "email": "zero@example.com", "plus_trial": "zero_price"},
+            {"platform": "chatgpt", "email": "discount@example.com", "plus_trial": "discount"},
+            {"platform": "chatgpt", "email": "free@example.com", "plus_trial": "ineligible"},
+            {"platform": "outlook", "email": "mail@example.com", "plus_trial": "eligible"},
+            {"platform": "chatgpt", "email": "unknown@example.com", "plus_trial": "unknown"},
+        ]}
+        with patch("common.asset_scanner.get_report", return_value=report):
+            self.assertEqual(
+                webui_server._protocol_pool_eligible_emails(),
+                ["zero@example.com"],
+            )
+
+    def test_explicit_empty_protocol_pool_does_not_fall_back_to_all_sessions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            token_dir = Path(temp) / "tokens" / "chatgpt"
+            token_dir.mkdir(parents=True)
+            payload = base64.urlsafe_b64encode(json.dumps({
+                "email": "saved@example.com",
+                "exp": time.time() + 3600,
+            }).encode()).decode().rstrip("=")
+            (token_dir / "saved.session.json").write_text(json.dumps({
+                "accessToken": f"header.{payload}.signature",
+                "user": {"email": "saved@example.com"},
+            }), encoding="utf-8")
+            with patch.dict(os.environ, {"REG_FACTORY_DATA_DIR": temp}, clear=False):
+                self.assertEqual(len(webui_server._chatgpt_protocol_accounts()), 1)
+                self.assertEqual(webui_server._chatgpt_protocol_accounts([]), [])
+
+    def test_protocol_worker_accepts_ephemeral_payment_config_in_task_file(self):
+        from tools import run_protocol_payment_batch as worker
+
+        with tempfile.TemporaryDirectory() as temp:
+            task_path = Path(temp) / "task.json"
+            payment_config = {
+                "cards": [{"number": "4242424242424242", "exp_month": "12", "exp_year": "2030", "cvv": "123"}],
+                "addresses": [{"line1": "1 Market St", "city": "San Francisco", "state": "CA", "postal_code": "94105"}],
+                "phone_numbers": [{"phone": "+12025550123", "sms_api_url": "https://sms.example.test/messages"}],
+            }
+            task_path.write_text(json.dumps({
+                "accounts": [{"email": "one@example.com", "access_token": "fixture-token"}],
+                "payment_config": payment_config,
+            }), encoding="utf-8")
+            accounts, loaded_config = worker._load_task(task_path)
+            runtime_config, index_paths = worker._paypal_runtime_config(Path(temp), loaded_config, task_path)
+
+            self.assertEqual(accounts[0]["email"], "one@example.com")
+            self.assertEqual(runtime_config["paypal_auto"]["cards"], payment_config["cards"])
+            self.assertEqual(len(index_paths), 2)
+            self.assertNotIn("access_token", json.dumps(runtime_config))
+
+    def test_protocol_worker_uses_channel_countries_and_independent_proxy_pools(self):
+        from tools import run_protocol_payment_batch as worker
+
+        paypal = {"id": "paypal", "country": "US"}
+        paypal_route = worker._route_options(
+            paypal,
+            "http://checkout-1.test:8000,http://checkout-2.test:8000",
+            "http://approve.test:9000",
+            300,
+        )
+        self.assertEqual(paypal_route["target_country"], "US")
+        self.assertEqual(paypal_route["stage_proxy_countries"]["checkout"], "US")
+        self.assertEqual(len(paypal_route["checkout_proxy_pool"]), 2)
+        self.assertEqual(paypal_route["approve_proxy_pool"], ["http://approve.test:9000"])
+
+        gopay = worker._route_options(
+            {"id": "gopay", "country": "ID"}, "http://seed.test:8000", "", 300
+        )
+        self.assertEqual(gopay["stage_proxy_countries"]["promotion"], "TH")
+        self.assertEqual(gopay["stage_proxy_countries"]["approve"], "JP")
+        self.assertEqual(gopay["approve_proxy_pool"], gopay["checkout_proxy_pool"])
+
+    def test_protocol_worker_formats_exception_rows_without_optional_fields(self):
+        from tools import run_protocol_payment_batch as worker
+
+        row = worker._public_result("one@example.com", {
+            "ok": False,
+            "error": RuntimeError("route unavailable"),
+            "error_code": "worker_exception",
+        })
+        self.assertEqual(row["payment_status"], "")
+        self.assertEqual(worker._result_detail(row), "route unavailable")
+        self.assertEqual(
+            worker._result_detail({"error": "proxy mismatch"}),
+            "proxy mismatch",
+        )
+
+    def test_protocol_batch_rejects_malformed_json_before_execution(self):
+        from starlette.requests import Request
+
+        async def receive():
+            return {"type": "http.request", "body": b"{", "more_body": False}
+
+        request = Request({
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/chatgpt-plus/protocol-batch",
+            "raw_path": b"/api/chatgpt-plus/protocol-batch",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8800),
+        }, receive)
+        response = asyncio.run(webui_server.api_chatgpt_plus_protocol_batch(request))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("有效的 JSON", response.body.decode("utf-8"))
+
+    def test_plus_checkout_gate_allows_only_zero_price_accounts(self):
+        with patch.object(
+            webui_server,
+            "_plus_trial_gate_sync",
+            return_value={
+                "email": "zero@example.com",
+                "plus_trial": "zero_price",
+                "detail": "zero price",
+                "evidence": "accounts_check:200:zero_price",
+            },
+        ):
+            allowed = asyncio.run(
+                webui_server._plus_trial_gate(
+                    "/standalone-flow/quick-checkout",
+                    "POST",
+                    json.dumps({"access_token": "secret"}).encode(),
+                )
+            )
+        self.assertIsNone(allowed)
+
+        with patch.object(
+            webui_server,
+            "_plus_trial_gate_sync",
+            return_value={
+                "email": "free@example.com",
+                "plus_trial": "ineligible",
+                "detail": "no campaign",
+                "evidence": "accounts_check:200:no_plus_campaign",
+            },
+        ):
+            blocked = asyncio.run(
+                webui_server._plus_trial_gate(
+                    "/standalone-flow/quick-checkout",
+                    "POST",
+                    json.dumps({"access_token": "secret"}).encode(),
+                )
+            )
+        self.assertEqual(blocked.status_code, 422)
+        body = json.loads(blocked.body.decode("utf-8"))
+        self.assertEqual(body["accounts"][0]["plus_trial"], "ineligible")
+        self.assertNotIn("secret", blocked.body.decode("utf-8"))
 
     def test_batch_selects_latest_27_unexpired_free_accounts(self):
         def jwt(index, expires):
@@ -252,7 +463,7 @@ class ChatGPTPlusTests(unittest.TestCase):
         self.assertNotIn("localStorage.setItem(PROXY", frontend)
         self.assertIn("主程序网络出口", frontend)
 
-    def test_plus_proxy_prefers_residential_over_chatgpt_mode(self):
+    def test_plus_proxy_defaults_to_clash_even_with_residential_pool(self):
         with tempfile.TemporaryDirectory() as temp:
             env_path = Path(temp) / ".env"
             env_path.write_text(
@@ -274,8 +485,18 @@ class ChatGPTPlusTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     webui_server._plus_runtime_environment()["REG_FACTORY_PLUS_PROXY"],
-                    "http://home.test:9000",
+                    "http://127.0.0.1:7897",
                 )
+
+    def test_plus_proxy_explicit_residential_route_remains_supported(self):
+        with patch.object(webui_server, "_plus_residential_proxy_url", return_value="http://home.test:9000"):
+            self.assertEqual(
+                webui_server._plus_route_proxy_url(
+                    {"CLASH_PROXY": "http://127.0.0.1:7897"},
+                    "residential",
+                ),
+                "http://home.test:9000",
+            )
 
     def test_plus_proxy_falls_back_to_clash_without_residential_config(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -326,7 +547,7 @@ class ChatGPTPlusTests(unittest.TestCase):
             self.assertEqual(values["REG_FACTORY_PLUS_LINK_PROXY"], "http://127.0.0.1:7901")
             self.assertEqual(values["REG_FACTORY_PLUS_BIND_PROXY"], "http://127.0.0.1:7902")
 
-    def test_plus_runtime_uses_residential_for_link_and_clash_for_bind_by_default(self):
+    def test_plus_runtime_uses_clash_for_link_and_bind_by_default(self):
         with tempfile.TemporaryDirectory() as temp:
             env_path = Path(temp) / ".env"
             env_path.write_text(
@@ -346,7 +567,7 @@ class ChatGPTPlusTests(unittest.TestCase):
                 clear=False,
             ):
                 values = webui_server._plus_runtime_environment()
-            self.assertEqual(values["REG_FACTORY_PLUS_LINK_PROXY"], "http://home.test:9000")
+            self.assertEqual(values["REG_FACTORY_PLUS_LINK_PROXY"], "http://127.0.0.1:7897")
             self.assertEqual(values["REG_FACTORY_PLUS_BIND_PROXY"], "http://127.0.0.1:7897")
 
     def test_plus_server_injects_stage_specific_proxy_pools(self):

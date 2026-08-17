@@ -409,6 +409,7 @@ def get_code_by_token(
     max_wait=120,
     poll=5,
     received_after=None,
+    exclude_codes=(),
 ):
     """轮询 inbox+junk，匹配发件人/主题后用正则提取验证码。返回 code 字符串或 None。
     sender_contains / subject_contains 任一命中即视为目标邮件（宽松匹配，二者满足其一）。
@@ -419,6 +420,7 @@ def get_code_by_token(
         return None
 
     pat = re.compile(code_regex)
+    excluded = {str(code) for code in (exclude_codes or ())}
     start = time.time()
     first_poll = True
     while time.time() - start < max_wait:
@@ -450,6 +452,8 @@ def get_code_by_token(
                     mm = pat.search(text)
                     if mm:
                         code = _first_group(mm)
+                        if str(code) in excluded:
+                            continue
                         print(f"  [mail] code found in {folder} (from={m['from']}): {code}")
                         return code
                     elif elapsed_first_log:

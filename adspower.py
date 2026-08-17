@@ -263,6 +263,16 @@ class AdsPower:
         profile_id = payload.get("id") or payload.get("user_id") or payload.get("profile_id")
         if not profile_id:
             raise RuntimeError(f"AdsPower create returned no id: {payload}")
+        try:
+            from common.browser_registry import register
+            register(
+                profile_id,
+                name=name,
+                provider=self.provider_name,
+                api_base=self.api_base,
+            )
+        except Exception:
+            pass
         print(f"  AdsPower profile created: {name} (ID: {profile_id})")
         return str(profile_id)
 
@@ -330,6 +340,11 @@ class AdsPower:
 
     def delete_browser(self, profile_id):
         result = self._api_post("/api/v1/user/delete", {"user_ids": [str(profile_id)]}, timeout=60)
+        try:
+            from common.browser_registry import unregister
+            unregister(profile_id)
+        except Exception:
+            pass
         print(f"  AdsPower profile deleted: {profile_id}")
         return result
 

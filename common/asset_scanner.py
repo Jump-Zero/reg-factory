@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import base64
 import json
 import os
 import random
@@ -38,6 +40,7 @@ STATUSES = (
 PLUS_TRIAL_STATUSES = (
     "eligible",
     "zero_price",
+    "discount",
     "ineligible",
     "active",
     "unknown",
@@ -47,6 +50,10 @@ PLUS_TRIAL_STATUSES = (
 SAFE_SCAN_DEFAULT_CACHE_SECONDS = 6 * 60 * 60
 SAFE_SCAN_DEFAULT_MIN_INTERVAL = 3.0
 SAFE_SCAN_DEFAULT_MAX_INTERVAL = 6.0
+REPORT_CACHE_SECONDS = 5.0
+
+_REPORT_CACHE_LOCK = threading.Lock()
+_REPORT_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 
 _BANNED_MARKERS = (
     "account_deactivated",
@@ -85,6 +92,11 @@ def _scan_path() -> Path:
     return asset_store._data_root() / "runtime" / "state" / "asset_pool_scan.json"
 
 
+def invalidate_report_cache() -> None:
+    with _REPORT_CACHE_LOCK:
+        _REPORT_CACHE.clear()
+
+
 def _stable_id(platform: str, email: str, source: str) -> str:
     identity = email.strip().lower() or source.strip().lower()
     return hashlib.sha256(f"{platform}|{identity}".encode("utf-8")).hexdigest()[:20]
@@ -104,6 +116,7 @@ def _write_cache(report: dict) -> None:
     temporary = path.with_suffix(f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+    invalidate_report_cache()
 
 
 def _history_outcomes() -> dict[str, dict]:
@@ -358,49 +371,74 @@ def _load_sub2api_uploaded() -> dict[str, set[str]]:
 
 
 def get_report() -> dict:
-    cache = _read_cache()
-    cached_items = {
-        str(item.get("id")): item
-        for item in cache.get("items", [])
-        if isinstance(item, dict) and item.get("id")
-    }
-    sub2api_map = _load_sub2api_uploaded()
-    items = []
-    for record in _inventory_records():
-        public = _public_record(record)
-        cached = cached_items.get(public["id"], {})
-        for key in (
-            "status", "detail", "evidence", "checked_at", "latency_ms",
-            "plus_trial", "plus_trial_detail", "plus_trial_evidence",
-        ):
-            if key in cached:
-                public[key] = cached[key]
-        public.setdefault("status", "unknown")
-        public.setdefault("detail", "尚未扫描")
-        public.setdefault("evidence", "none")
-        public.setdefault("checked_at", "")
-        platform = public.get("platform", "")
-        email = str(public.get("email", "")).strip().lower()
-        uploaded_set = sub2api_map.get(platform)
-        public["sub2api_uploaded"] = bool(uploaded_set and email in uploaded_set)
-        if public.get("platform") == "chatgpt":
-            public.setdefault("plus_trial", "unknown")
-            public.setdefault("plus_trial_detail", "尚未检测 Plus 试用资格")
-            public.setdefault("plus_trial_evidence", "none")
-        items.append(public)
-    report = {
-        "schema_version": 2,
-        "last_scan_at": cache.get("finished_at", ""),
-        "items": items,
-        "summary": _status_summary(items),
-        "sub2api_counts": {
-            "imported": sum(1 for item in items if item.get("sub2api_uploaded")),
-            "not_imported": sum(1 for item in items if not item.get("sub2api_uploaded")),
-        },
-    }
-    if isinstance(cache.get("safe_mode"), dict):
-        report["safe_mode"] = dict(cache["safe_mode"])
-    return report
+    report_key = (str(asset_store._data_root()).lower(), str(asset_store._token_root()).lower())
+    now = time.monotonic()
+    with _REPORT_CACHE_LOCK:
+        cached_report = _REPORT_CACHE.get(report_key)
+        if cached_report and cached_report[0] > now:
+            return copy.deepcopy(cached_report[1])
+
+        cache = _read_cache()
+        cached_items = {
+            str(item.get("id")): item
+            for item in cache.get("items", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        sub2api_map = _load_sub2api_uploaded()
+        items = []
+        for record in _inventory_records():
+            public = _public_record(record)
+            cached = cached_items.get(public["id"], {})
+            for key in (
+                "status", "detail", "evidence", "checked_at", "latency_ms",
+                "plus_trial", "plus_trial_detail", "plus_trial_evidence", "plan_type",
+            ):
+                if key in cached:
+                    public[key] = cached[key]
+            public.setdefault("status", "unknown")
+            public.setdefault("detail", "尚未扫描")
+            public.setdefault("evidence", "none")
+            public.setdefault("checked_at", "")
+            platform = public.get("platform", "")
+            email = str(public.get("email", "")).strip().lower()
+            uploaded_set = sub2api_map.get(platform)
+            public["sub2api_uploaded"] = bool(uploaded_set and email in uploaded_set)
+            if public.get("platform") == "chatgpt":
+                public.setdefault("plus_trial", "unknown")
+                public.setdefault("plus_trial_detail", "尚未检测 Plus 试用资格")
+                public.setdefault("plus_trial_evidence", "none")
+                # Older scanners used ``eligible`` for any campaign, including
+                # non-zero discounts. Fail closed until a fresh strict scan.
+                if public.get("plus_trial") == "eligible":
+                    public["plus_trial"] = "unknown"
+                    public["plus_trial_detail"] = "历史活动结果未确认 0 元，请重新扫描"
+                    public["plus_trial_evidence"] = (
+                        f"{public.get('plus_trial_evidence') or 'legacy'}:legacy_unconfirmed"
+                    )
+            if public.get("platform") == "grok" and public.get("status") == "normal":
+                authorization = _grok_authorization_status(record)
+                if authorization in {"failed", "pending"}:
+                    public["status"] = "restricted" if authorization == "failed" else "unknown"
+                    public["detail"] = {
+                        "failed": "Grok SSO 正常，但 OAuth 授权失败",
+                        "pending": "Grok SSO 正常，OAuth 授权尚未完成",
+                    }.get(authorization, "Grok OAuth 授权状态未知")
+                    public["evidence"] = f"local:grok_oauth_{authorization}"
+            items.append(public)
+        report = {
+            "schema_version": 2,
+            "last_scan_at": cache.get("finished_at", ""),
+            "items": items,
+            "summary": _status_summary(items),
+            "sub2api_counts": {
+                "imported": sum(1 for item in items if item.get("sub2api_uploaded")),
+                "not_imported": sum(1 for item in items if not item.get("sub2api_uploaded")),
+            },
+        }
+        if isinstance(cache.get("safe_mode"), dict):
+            report["safe_mode"] = dict(cache["safe_mode"])
+        _REPORT_CACHE[report_key] = (time.monotonic() + REPORT_CACHE_SECONDS, report)
+        return copy.deepcopy(report)
 
 
 def update_cached_outlook_statuses(outcomes: dict[str, dict]) -> int:
@@ -639,7 +677,143 @@ def _scan_chatgpt(record: dict, timeout: int) -> dict:
 def _chatgpt_plan_type(record: dict) -> str:
     token = record.get("_token") if isinstance(record.get("_token"), dict) else {}
     account = token.get("account") if isinstance(token.get("account"), dict) else {}
-    return str(account.get("planType") or token.get("planType") or "").strip().lower()
+    entitlement = token.get("entitlement") if isinstance(token.get("entitlement"), dict) else {}
+    raw = (
+        account.get("planType")
+        or account.get("plan_type")
+        or token.get("planType")
+        or token.get("plan_type")
+        or entitlement.get("subscription_plan")
+        or ""
+    )
+    plan = str(raw).strip().lower()
+    if plan in {"chatgptfreeplan", "free_plan", "free"}:
+        return "free"
+    return plan
+
+
+def _jwt_chatgpt_account_id(access_token: str) -> str:
+    """Read the account id claim used by ChatGPT's accounts/check endpoint."""
+    parts = str(access_token or "").split(".")
+    if len(parts) < 2:
+        return ""
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeError):
+        return ""
+    if not isinstance(claims, dict):
+        return ""
+    direct = claims.get("https://api.openai.com/auth.chatgpt_account_id")
+    if direct:
+        return str(direct).strip()
+    auth = claims.get("https://api.openai.com/auth")
+    if isinstance(auth, dict):
+        return str(auth.get("chatgpt_account_id") or auth.get("account_id") or "").strip()
+    return ""
+
+
+def _chatgpt_account_id(record: dict, access_token: str) -> str:
+    token = record.get("_token") if isinstance(record.get("_token"), dict) else {}
+    account = token.get("account") if isinstance(token.get("account"), dict) else {}
+    for value in (
+        token.get("chatgpt_account_id"),
+        token.get("account_id"),
+        account.get("id"),
+        account.get("account_id"),
+        record.get("chatgpt_account_id"),
+        record.get("account_id"),
+    ):
+        if value:
+            return str(value).strip()
+    return _jwt_chatgpt_account_id(access_token)
+
+
+def _decimal_value(value):
+    """Parse a finite numeric API value without treating malformed data as zero."""
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def parse_chatgpt_accounts_check(payload, account_id: str = "") -> dict:
+    """Normalize the read-only ``accounts/check`` response.
+
+    A free plan and a campaign are not enough to call an offer free. The
+    public scanner only treats an explicit zero price or a 100% discount as
+    ``plus_trial_zero_price``; campaigns with a lower discount are retained as
+    ``discount`` so they cannot enter the zero-price protocol pool.
+    """
+    accounts = payload.get("accounts") if isinstance(payload, dict) else None
+    if not isinstance(accounts, dict):
+        return {"ok": False, "error": "accounts_check_missing_accounts"}
+    selected_id = ""
+    selected = None
+    if account_id and isinstance(accounts.get(account_id), dict):
+        selected_id, selected = account_id, accounts.get(account_id)
+    elif isinstance(accounts.get("default"), dict):
+        selected_id, selected = "default", accounts.get("default")
+    else:
+        for key, value in accounts.items():
+            if key != "default" and isinstance(value, dict):
+                selected_id, selected = str(key), value
+                break
+    if not isinstance(selected, dict):
+        return {"ok": False, "error": "accounts_check_no_entry"}
+
+    account = selected.get("account") if isinstance(selected.get("account"), dict) else {}
+    entitlement = selected.get("entitlement") if isinstance(selected.get("entitlement"), dict) else {}
+    campaigns = selected.get("eligible_promo_campaigns")
+    campaigns = campaigns if isinstance(campaigns, dict) else {}
+    plus_campaign = campaigns.get("plus")
+    if isinstance(plus_campaign, list):
+        plus_campaign = plus_campaign[0] if plus_campaign else None
+    if not isinstance(plus_campaign, dict):
+        plus_campaign = None
+    metadata = plus_campaign.get("metadata") if plus_campaign else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    discount = metadata.get("discount") if isinstance(metadata.get("discount"), dict) else {}
+    duration = metadata.get("duration") if isinstance(metadata.get("duration"), dict) else {}
+
+    plan_type = str(account.get("plan_type") or account.get("planType") or "").strip()
+    subscription_plan = str(entitlement.get("subscription_plan") or "").strip()
+    plan_lower = plan_type.lower()
+    subscription_lower = subscription_plan.lower()
+    is_free = plan_lower in {"free", "free_plan", "chatgptfreeplan"} or subscription_lower == "chatgptfreeplan"
+    offers = selected.get("eligible_offers") if isinstance(selected.get("eligible_offers"), dict) else {}
+    offer_rows = offers.get("offers") if isinstance(offers.get("offers"), list) else []
+    offer_ids = [str(row.get("id")) for row in offer_rows if isinstance(row, dict) and row.get("id")]
+
+    discount_percentage = discount.get("percentage") if plus_campaign else None
+    discount_value = _decimal_value(discount_percentage)
+    explicit_zero_path = _zero_price_offer(plus_campaign) if plus_campaign else ""
+    zero_price = bool(
+        is_free
+        and plus_campaign
+        and (explicit_zero_path or (discount_value is not None and discount_value >= 100))
+    )
+    has_campaign = bool(is_free and plus_campaign)
+
+    return {
+        "ok": True,
+        "account_id": selected_id,
+        "current_plan_type": plan_type,
+        "subscription_plan": subscription_plan,
+        "has_active_subscription": bool(entitlement.get("has_active_subscription")),
+        "is_active_subscription_gratis": bool(entitlement.get("is_active_subscription_gratis")),
+        "expires_at": entitlement.get("expires_at"),
+        "plus_trial_eligible": bool(has_campaign and zero_price),
+        "plus_trial_has_campaign": has_campaign,
+        "plus_trial_zero_price": bool(zero_price),
+        "plus_trial_campaign_id": plus_campaign.get("id") if plus_campaign else None,
+        "plus_trial_title": metadata.get("title") if plus_campaign else None,
+        "plus_trial_discount_percentage": discount_percentage,
+        "plus_trial_duration_num_periods": duration.get("num_periods") if plus_campaign else None,
+        "plus_trial_duration_period": duration.get("period") if plus_campaign else None,
+        "eligible_offer_ids": offer_ids,
+    }
 
 
 _ZERO_PRICE_KEYS = {
@@ -706,7 +880,172 @@ def _zero_price_offer(payload) -> str:
     return ""
 
 
+def _discount_percentage(payload):
+    """Find an explicit percentage discount in a promotion response."""
+    queue = [payload]
+    while queue:
+        value = queue.pop(0)
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                normalized_key = re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).lower()
+                if normalized_key in {"percentage", "percent", "discount_percentage"}:
+                    parsed = _decimal_value(nested)
+                    if parsed is not None:
+                        return parsed
+                if isinstance(nested, (dict, list)):
+                    queue.append(nested)
+        elif isinstance(value, list):
+            queue.extend(nested for nested in value if isinstance(nested, (dict, list)))
+    return None
+
+
 def _scan_chatgpt_plus_trial(record: dict, access_token: str, timeout: int) -> dict:
+    """Check trial eligibility through ChatGPT's authoritative accounts API."""
+    enabled = str(os.environ.get("ASSET_SCAN_CHATGPT_PLUS_TRIAL", "true")).strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return {
+            "plus_trial": "disabled",
+            "plus_trial_detail": "Plus trial eligibility check disabled",
+            "plus_trial_evidence": "config:disabled",
+        }
+
+    plan_type = _chatgpt_plan_type(record)
+    if plan_type and plan_type not in {"free", "unknown"}:
+        return {
+            "plus_trial": "active",
+            "plus_trial_detail": f"ChatGPT account has {plan_type} plan",
+            "plus_trial_evidence": f"session:plan:{plan_type}",
+        }
+    token = str(access_token or "").strip()
+    if not token:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": "Missing access token; trial eligibility was not checked",
+            "plus_trial_evidence": "local:missing_access_token",
+        }
+
+    account_id = _chatgpt_account_id(record, token)
+    identity = str(record.get("email") or hashlib.sha256(token.encode("utf-8")).hexdigest())
+    device_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"reg-factory-plus-trial:{identity.lower()}"))
+    endpoint = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Origin": "https://chatgpt.com",
+        "Referer": "https://chatgpt.com/",
+        "oai-device-id": device_id,
+        "oai-language": "en-US",
+        "x-openai-target-path": "/backend-api/accounts/check/v4-2023-04-27",
+        "x-openai-target-route": "/backend-api/accounts/check/{version}",
+    }
+    if account_id:
+        headers["Chatgpt-Account-Id"] = account_id
+
+    try:
+        with _web_session("chatgpt") as session:
+            response = session.get(
+                endpoint,
+                params={"timezone_offset_min": "-"},
+                headers=headers,
+                timeout=timeout,
+            )
+            try:
+                payload = response.json() if response.status_code < 500 else {}
+            except Exception:
+                payload = {}
+    except requests.Timeout:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": "ChatGPT accounts check timed out",
+            "plus_trial_evidence": "accounts_check:timeout",
+        }
+    except requests.RequestException as exc:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": f"ChatGPT accounts check failed: {type(exc).__name__}",
+            "plus_trial_evidence": "accounts_check:network_error",
+        }
+    except Exception as exc:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": f"ChatGPT accounts check failed: {type(exc).__name__}",
+            "plus_trial_evidence": "accounts_check:error",
+        }
+
+    if response.status_code == 401:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": "ChatGPT access token is invalid",
+            "plus_trial_evidence": "accounts_check:401",
+        }
+    if response.status_code == 403:
+        return {
+            "plus_trial": "unknown",
+            "plus_trial_detail": "ChatGPT accounts check was blocked or restricted",
+            "plus_trial_evidence": "accounts_check:403",
+        }
+
+    parsed = parse_chatgpt_accounts_check(payload, account_id=account_id)
+    if response.status_code == 200 and parsed.get("ok"):
+        evidence = "accounts_check:200"
+        if parsed.get("plus_trial_zero_price"):
+            detail = "ChatGPT Plus trial explicitly priced at 0"
+            title = parsed.get("plus_trial_title")
+            if title:
+                detail = f"{detail}: {title}"
+            return {
+                "plus_trial": "zero_price",
+                "plus_trial_detail": detail,
+                "plus_trial_evidence": f"{evidence}:zero_price",
+                "plus_trial_campaign_id": parsed.get("plus_trial_campaign_id"),
+                "plus_trial_discount_percentage": parsed.get("plus_trial_discount_percentage"),
+                "plus_trial_duration_num_periods": parsed.get("plus_trial_duration_num_periods"),
+                "plus_trial_duration_period": parsed.get("plus_trial_duration_period"),
+            }
+        if parsed.get("plus_trial_has_campaign"):
+            percentage = _decimal_value(parsed.get("plus_trial_discount_percentage"))
+            title = parsed.get("plus_trial_title")
+            if percentage is not None and percentage < 100:
+                detail = f"ChatGPT Plus campaign is {parsed.get('plus_trial_discount_percentage')}% off; not free"
+                if title:
+                    detail = f"{detail}: {title}"
+                return {
+                    "plus_trial": "discount",
+                    "plus_trial_detail": detail,
+                    "plus_trial_evidence": f"{evidence}:discount",
+                    "plus_trial_campaign_id": parsed.get("plus_trial_campaign_id"),
+                    "plus_trial_discount_percentage": parsed.get("plus_trial_discount_percentage"),
+                    "plus_trial_duration_num_periods": parsed.get("plus_trial_duration_num_periods"),
+                    "plus_trial_duration_period": parsed.get("plus_trial_duration_period"),
+                }
+            return {
+                "plus_trial": "unknown",
+                "plus_trial_detail": "Plus campaign found, but the payable amount is not confirmed as 0",
+                "plus_trial_evidence": f"{evidence}:price_unconfirmed",
+                "plus_trial_campaign_id": parsed.get("plus_trial_campaign_id"),
+                "plus_trial_discount_percentage": parsed.get("plus_trial_discount_percentage"),
+                "plus_trial_duration_num_periods": parsed.get("plus_trial_duration_num_periods"),
+                "plus_trial_duration_period": parsed.get("plus_trial_duration_period"),
+            }
+        return {
+            "plus_trial": "ineligible",
+            "plus_trial_detail": "Free ChatGPT account has no eligible Plus trial campaign",
+            "plus_trial_evidence": f"{evidence}:no_plus_campaign",
+            "plus_trial_offer_ids": parsed.get("eligible_offer_ids") or [],
+        }
+
+    # Keep compatibility with older deployments that only expose the coupon
+    # endpoint. A valid accounts response without a Plus campaign is final;
+    # fallback is only for responses that do not contain the new shape.
+    if not isinstance(payload, dict) or "accounts" not in payload:
+        return _scan_chatgpt_coupon_trial(record, token, timeout)
+    return {
+        "plus_trial": "unknown",
+        "plus_trial_detail": f"ChatGPT accounts check returned HTTP {response.status_code}",
+        "plus_trial_evidence": f"accounts_check:{response.status_code}",
+    }
+
+
+def _scan_chatgpt_coupon_trial(record: dict, access_token: str, timeout: int) -> dict:
     enabled = str(os.environ.get("ASSET_SCAN_CHATGPT_PLUS_TRIAL", "true")).strip().lower()
     if enabled in {"0", "false", "no", "off"}:
         return {
@@ -769,10 +1108,25 @@ def _scan_chatgpt_plus_trial(record: dict, access_token: str, timeout: int) -> d
                 "plus_trial_evidence": f"{evidence}:zero:{zero_price_path}",
             }
         if response.status_code == 200 and state == "eligible" and not redeemed_by_user:
+            discount_percentage = _discount_percentage(payload)
+            if discount_percentage is not None and discount_percentage >= 100:
+                return {
+                    "plus_trial": "zero_price",
+                    "plus_trial_detail": "命中 Plus 100% 折扣，按 0 元试用处理",
+                    "plus_trial_evidence": f"{evidence}:zero_discount",
+                    "plus_trial_discount_percentage": str(discount_percentage),
+                }
+            if discount_percentage is not None and discount_percentage < 100:
+                return {
+                    "plus_trial": "discount",
+                    "plus_trial_detail": f"命中 Plus 优惠，但折扣为 {discount_percentage}%（不是 0 元）",
+                    "plus_trial_evidence": f"{evidence}:discount",
+                    "plus_trial_discount_percentage": str(discount_percentage),
+                }
             return {
-                "plus_trial": "eligible",
-                "plus_trial_detail": "命中 Plus 免费试用资格",
-                "plus_trial_evidence": evidence,
+                "plus_trial": "unknown",
+                "plus_trial_detail": "命中 Plus 活动，但接口未确认应付金额为 0 元",
+                "plus_trial_evidence": f"{evidence}:price_unconfirmed",
             }
         if response.status_code == 200 and ineligible:
             return {
@@ -894,6 +1248,49 @@ def check_chatgpt_plus_trial_for_session(
     return public
 
 
+def _claude_plan_type(payload: dict) -> str:
+    """Return a conservative plan label from Claude's account payload."""
+    if not isinstance(payload, dict):
+        return "unknown"
+
+    def normalize(value) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        if "free" in text:
+            return "free"
+        for plan in ("max", "pro", "team", "enterprise"):
+            if plan in text:
+                return plan
+        return text
+
+    for key in ("plan", "plan_type", "subscription_type", "seat_tier"):
+        plan = normalize(payload.get(key))
+        if plan:
+            return plan
+    memberships = payload.get("memberships")
+    memberships = memberships if isinstance(memberships, list) else []
+    for membership in memberships:
+        if not isinstance(membership, dict):
+            continue
+        plan = normalize(membership.get("seat_tier"))
+        if plan:
+            return plan
+        organization = membership.get("organization")
+        organization = organization if isinstance(organization, dict) else {}
+        for key in ("plan", "plan_type", "subscription_type", "billing_type"):
+            plan = normalize(organization.get(key))
+            if plan:
+                return plan
+        if (
+            str(organization.get("rate_limit_tier") or "").strip().lower()
+            == "default_claude_ai"
+            and not organization.get("billing_type")
+        ):
+            return "free"
+    return "unknown"
+
+
 def _scan_claude(record: dict, timeout: int) -> dict:
     cookies = record.get("_cookies") or []
     token = record.get("_token") or {}
@@ -919,15 +1316,57 @@ def _scan_claude(record: dict, timeout: int) -> dict:
             payload = response.json()
         except Exception:
             payload = None
-        if isinstance(payload, dict) and (
-            "memberships" in payload or payload.get("uuid") or payload.get("email")
-        ):
-            return {"status": "normal", "detail": "Claude 登录会话正常", "evidence": "claude_account:200"}
+        if isinstance(payload, dict):
+            memberships = payload.get("memberships")
+            memberships = memberships if isinstance(memberships, list) else []
+            has_identity = bool(
+                payload.get("uuid") or payload.get("email") or payload.get("email_address")
+            )
+            if has_identity and memberships:
+                plan_type = _claude_plan_type(payload)
+                plan_label = "Free" if plan_type == "free" else plan_type.title()
+                detail = (
+                    f"Claude {plan_label} 登录会话正常"
+                    if plan_type != "unknown"
+                    else "Claude 登录会话正常（套餐未知）"
+                )
+                return {
+                    "status": "normal",
+                    "detail": detail,
+                    "evidence": "claude_account:200",
+                    "plan_type": plan_type,
+                }
+            if has_identity:
+                return {
+                    "status": "unknown",
+                    "detail": "Claude 会话有效，但账号没有可用组织成员关系",
+                    "evidence": "claude_account:no_membership",
+                    "plan_type": "unknown",
+                }
         text = (response.text or "").lower()
         if "just a moment" in text or "cf-chl" in text or "cloudflare" in text:
             return {"status": "restricted", "detail": "Claude 返回 Cloudflare 验证页", "evidence": "claude_account:challenge"}
         return {"status": "unknown", "detail": "Claude 未返回有效账号数据", "evidence": "claude_account:empty"}
     return {"status": "unknown", "detail": f"Claude HTTP {response.status_code}", "evidence": f"claude_account:{response.status_code}"}
+
+
+def _grok_authorization_status(record: dict) -> str:
+    """Resolve local Grok OAuth completion without exposing credentials."""
+    token = record.get("_token") if isinstance(record.get("_token"), dict) else {}
+    email = str(record.get("email") or token.get("email") or "").strip().lower()
+    marker = asset_store._token_root() / "grok" / "uploaded_sub2api.txt"
+    if email and marker.is_file():
+        uploaded = {
+            line.strip().lower()
+            for line in marker.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip()
+        }
+        if email in uploaded:
+            return "authorized"
+    status = str(token.get("authorization_status") or "").strip().lower()
+    if status in {"authorized", "failed", "pending", "not_requested"}:
+        return status
+    return "unverified"
 
 
 def _scan_grok(record: dict, timeout: int) -> dict:
@@ -952,7 +1391,38 @@ def _scan_grok(record: dict, timeout: int) -> dict:
     if classified:
         return classified
     if 200 <= response.status_code < 400:
-        return {"status": "normal", "detail": "Grok SSO 登录正常", "evidence": f"xai_account:{response.status_code}"}
+        authorization = _grok_authorization_status(record)
+        if authorization == "authorized":
+            return {
+                "status": "normal",
+                "detail": "Grok SSO 与 OAuth 授权均正常",
+                "evidence": f"xai_account:{response.status_code}:oauth_authorized",
+            }
+        if authorization == "failed":
+            return {
+                "status": "restricted",
+                "detail": "Grok SSO 正常，但 OAuth 授权失败",
+                "evidence": "local:grok_oauth_failed",
+            }
+        if authorization == "pending":
+            return {
+                "status": "unknown",
+                "detail": "Grok SSO 正常，OAuth 授权尚未完成",
+                "evidence": "local:grok_oauth_pending",
+            }
+        return {
+            "status": "normal",
+            "detail": (
+                "Grok SSO 与 OAuth 授权均正常"
+                if authorization == "authorized"
+                else "Grok SSO 登录正常（未要求 OAuth 导入）"
+            ),
+            "evidence": (
+                f"xai_account:{response.status_code}:oauth_authorized"
+                if authorization == "authorized"
+                else f"xai_account:{response.status_code}:sso_only"
+            ),
+        }
     return {"status": "unknown", "detail": f"Grok HTTP {response.status_code}", "evidence": f"xai_account:{response.status_code}"}
 
 
@@ -1000,7 +1470,11 @@ _SCANNERS = {
 }
 
 
-def _scan_record(record: dict, timeout: int) -> dict:
+def _scan_record(
+    record: dict,
+    timeout: int,
+    include_plus_trial: bool | None = None,
+) -> dict:
     started = time.monotonic()
     public = _public_record(record)
     try:
@@ -1016,7 +1490,14 @@ def _scan_record(record: dict, timeout: int) -> dict:
     access_token = str(outcome.pop("_access_token", "") or "")
     if record.get("platform") == "chatgpt" and "plus_trial" not in outcome:
         if outcome.get("status") == "normal":
-            outcome.update(_scan_chatgpt_plus_trial(record, access_token, timeout))
+            if include_plus_trial is False:
+                outcome.update({
+                    "plus_trial": "disabled",
+                    "plus_trial_detail": "本次健康扫描未启用 Plus 资格检测",
+                    "plus_trial_evidence": "scan:disabled",
+                })
+            else:
+                outcome.update(_scan_chatgpt_plus_trial(record, access_token, timeout))
         else:
             outcome.update({
                 "plus_trial": "unknown",
@@ -1058,54 +1539,92 @@ def _scan_platform_safely(
     min_interval: float,
     max_interval: float,
     on_result: Callable[[dict], None] | None = None,
+    account_concurrency: int = 1,
+    include_plus_trial: bool | None = None,
 ) -> list[dict]:
     results = []
     consecutive_risk = 0
     breaker_reason = ""
-    for record in records:
-        if breaker_reason:
-            result = _record_with_outcome(record, {
-                "status": "unknown",
-                "detail": f"为降低风控，本次已暂停 {platform} 后续检测",
-                "evidence": f"safe_scan:circuit_breaker:{breaker_reason}",
-            })
-            results.append(result)
-            if on_result:
-                on_result(result)
-            continue
+    account_concurrency = min(8, max(1, int(account_concurrency)))
+
+    def delayed_scan(record: dict) -> dict:
         if max_interval > 0:
             time.sleep(random.uniform(min_interval, max_interval))
-        result = _scan_record(record, timeout)
-        results.append(result)
-        if on_result:
-            on_result(result)
-        risk = _scan_should_trip_breaker(result)
-        if risk == "rate_limited":
-            breaker_reason = risk
-        elif risk:
-            consecutive_risk += 1
-            if consecutive_risk >= 2:
-                breaker_reason = risk
+        if include_plus_trial is None:
+            return _scan_record(record, timeout)
+        return _scan_record(record, timeout, include_plus_trial)
+
+    index = 0
+    while index < len(records):
+        if breaker_reason:
+            for record in records[index:]:
+                result = _record_with_outcome(record, {
+                    "status": "unknown",
+                    "detail": f"为降低风控，本次已暂停 {platform} 后续检测",
+                    "evidence": f"safe_scan:circuit_breaker:{breaker_reason}",
+                })
+                results.append(result)
+                if on_result:
+                    on_result(result)
+            break
+
+        batch = records[index:index + account_concurrency]
+        batch_results: list[dict | None] = [None] * len(batch)
+        if len(batch) == 1:
+            batch_results[0] = delayed_scan(batch[0])
+            if on_result:
+                on_result(batch_results[0])
         else:
-            consecutive_risk = 0
+            with ThreadPoolExecutor(
+                max_workers=len(batch),
+                thread_name_prefix=f"asset-scan-{platform}",
+            ) as executor:
+                futures = {
+                    executor.submit(delayed_scan, record): offset
+                    for offset, record in enumerate(batch)
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    batch_results[futures[future]] = result
+                    if on_result:
+                        on_result(result)
+
+        for result in batch_results:
+            if result is None:
+                continue
+            results.append(result)
+            risk = _scan_should_trip_breaker(result)
+            if risk == "rate_limited":
+                breaker_reason = risk
+            elif risk:
+                consecutive_risk += 1
+                if consecutive_risk >= 2:
+                    breaker_reason = risk
+            else:
+                consecutive_risk = 0
+        index += len(batch)
     return results
 
 
 def scan_pool(
     platforms: list[str] | tuple[str, ...] | None = None,
     concurrency: int = 1,
+    account_concurrency: int = 1,
     timeout: int = 15,
     progress: Callable[[dict], None] | None = None,
     emails: list[str] | None = None,
     force: bool = False,
+    include_plus_trial: bool | None = None,
 ) -> dict:
     requested = {str(item).strip().lower() for item in (platforms or PLATFORMS)}
     invalid = requested.difference(PLATFORMS)
     if invalid:
         raise ValueError(f"不支持的平台：{', '.join(sorted(invalid))}")
     # Concurrency controls independent platforms only. Accounts within one
-    # platform are always scanned serially to avoid a request burst.
+    # platform use bounded batches so breaker decisions are applied before the
+    # next batch is submitted.
     concurrency = min(2, max(1, int(concurrency)))
+    account_concurrency = min(8, max(1, int(account_concurrency)))
     timeout = min(60, max(5, int(timeout)))
     cache_seconds = int(_env_number(
         "ASSET_SCAN_CACHE_SECONDS",
@@ -1143,11 +1662,25 @@ def scan_pool(
     for record in selected:
         cached = previous.get(str(record.get("id")))
         cache_age = now - _checked_at_epoch(cached or {})
+        legacy_plus_result = (
+            include_plus_trial is not False
+            and record.get("platform") == "chatgpt"
+            and cached
+            and str(cached.get("plus_trial") or "") == "eligible"
+        )
+        legacy_grok_result = (
+            record.get("platform") == "grok"
+            and cached
+            and str(cached.get("status") or "") == "normal"
+            and _grok_authorization_status(record) in {"failed", "pending"}
+        )
         if (
             not force
             and cache_seconds > 0
             and cached
             and 0 <= cache_age < cache_seconds
+            and not legacy_plus_result
+            and not legacy_grok_result
         ):
             scanned[str(record["id"])] = dict(cached)
         else:
@@ -1226,6 +1759,8 @@ def scan_pool(
                 min_interval,
                 max_interval,
                 collect_result,
+                account_concurrency,
+                include_plus_trial,
             ): platform
             for platform, records in pending_by_platform.items()
         }
@@ -1241,7 +1776,7 @@ def scan_pool(
                 key: result[key]
                 for key in (
                     "status", "detail", "evidence", "checked_at", "latency_ms",
-                    "plus_trial", "plus_trial_detail", "plus_trial_evidence",
+                    "plus_trial", "plus_trial_detail", "plus_trial_evidence", "plan_type",
                 )
                 if key in result
             })
@@ -1261,11 +1796,12 @@ def scan_pool(
         "safe_mode": {
             "enabled": True,
             "platform_concurrency": concurrency,
-            "account_concurrency": 1,
+            "account_concurrency": account_concurrency,
             "min_interval_seconds": min_interval,
             "max_interval_seconds": max_interval,
             "cache_seconds": cache_seconds,
             "force": bool(force),
+            "include_plus_trial": include_plus_trial is not False,
         },
         "items": items,
         "summary": _status_summary(items),

@@ -7,13 +7,14 @@ mailbox. Use --parallel only when debugging isolated browser/profile behavior.
 
 Examples:
     python register_three_platforms.py --email a@outlook.com --password xxx --token REFRESH --client-id CID
-    python register_three_platforms.py --from-pool --platforms claude chatgpt grok
+    python register_three_platforms.py --from-pool --platforms claude
     python register_three_platforms.py --from-pool --parallel --keep-on-fail
 """
 
 import argparse
 import asyncio
 import os
+import subprocess
 import sys
 from datetime import datetime
 
@@ -26,6 +27,36 @@ from common import emails as email_pool
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_ROOT = os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or ROOT
 LOG_DIR = os.path.join(DATA_ROOT, "tri_register_logs")
+
+
+async def _terminate_child(proc):
+    """Stop a platform child and descendants if the parent task is cancelled."""
+    if proc is None or proc.returncode is not None:
+        return
+    pid = int(getattr(proc, "pid", 0) or 0)
+    try:
+        if os.name == "nt" and pid > 0:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        else:
+            proc.terminate()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=15)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 def build_command(platform, args, account):
@@ -174,20 +205,26 @@ async def run_platform(platform, cmd, run_id, child_env=None, retries=0):
         )
 
         saw_success = False
-        with open(log_path, "w", encoding="utf-8", errors="replace") as log:
-            assert proc.stdout is not None
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                text = line.decode("utf-8", errors="replace")
-                if "success: 1/1" in text.lower():
-                    saw_success = True
-                log.write(text)
-                log.flush()
-                print(f"[{platform}] {text}", end="")
-
-        rc = await proc.wait()
+        try:
+            with open(log_path, "w", encoding="utf-8", errors="replace") as log:
+                assert proc.stdout is not None
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace")
+                    if "success: 1/1" in text.lower():
+                        saw_success = True
+                    log.write(text)
+                    log.flush()
+                    print(f"[{platform}] {text}", end="")
+            rc = await proc.wait()
+        except asyncio.CancelledError:
+            await _terminate_child(proc)
+            raise
+        except Exception:
+            await _terminate_child(proc)
+            raise
         ok = rc == 0 and saw_success
         status = "OK" if ok else f"FAIL(exit={rc}, success_marker={saw_success})"
         print(f"[{platform}] done: {status}")
@@ -259,6 +296,14 @@ def results_exit_code(results):
     return 0 if results and all(ok for _platform, ok, _rc, _log in results) else 1
 
 
+def platform_retry_count(platform, args):
+    """Give the end-to-end ChatGPT stage one same-mailbox recovery attempt."""
+    configured = max(0, int(getattr(args, "platform_retries", 0) or 0))
+    if configured:
+        return configured
+    return 1 if str(platform).strip().lower() == "chatgpt" else 0
+
+
 async def process_account(account, args, child_env):
     email = account[0]
     # Explicit/端到端邮箱不会经过 next_email；仍需从 Outlook 单独售卖中永久排除。
@@ -272,21 +317,25 @@ async def process_account(account, args, child_env):
     print(f"  account: {email}  platforms={','.join(args.platforms)}  mode={'parallel' if args.parallel else 'sequential'}")
     print("=" * 60)
 
-    jobs = [(p, build_command(p, args, account)) for p in args.platforms]
-    retries = max(0, getattr(args, "platform_retries", 0))
-    if args.parallel:
-        results = await asyncio.gather(*(
-            run_platform(p, cmd, run_id, child_env, retries=retries)
-            for p, cmd in jobs
-        ))
-    else:
-        results = []
-        for platform, cmd in jobs:
-            results.append(await run_platform(
-                platform, cmd, run_id, child_env, retries=retries
+    try:
+        jobs = [(p, build_command(p, args, account)) for p in args.platforms]
+        if args.parallel:
+            results = await asyncio.gather(*(
+                run_platform(
+                    p, cmd, run_id, child_env,
+                    retries=platform_retry_count(p, args),
+                )
+                for p, cmd in jobs
             ))
-
-    broker_release(args.broker, email)   # 释放该号 Outlook 会话
+        else:
+            results = []
+            for platform, cmd in jobs:
+                results.append(await run_platform(
+                    platform, cmd, run_id, child_env,
+                    retries=platform_retry_count(platform, args),
+                ))
+    finally:
+        broker_release(args.broker, email)
     print(f"\n  Summary [{email}]")
     for platform, ok, rc, log_path in results:
         print(f"    {platform}: {'OK' if ok else f'FAIL(exit={rc})'}  log={log_path}")
@@ -294,14 +343,14 @@ async def process_account(account, args, child_env):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Register one mailbox on the selected platforms (broker + loop)")
+    parser = argparse.ArgumentParser(description="Register one mailbox on one selected platform (broker + loop)")
     parser.add_argument("--email", default=None)
     parser.add_argument("--password", default="")
     parser.add_argument("--token", default="", help="Outlook refresh_token")
     parser.add_argument("--client-id", default="", help="Outlook OAuth client_id")
     parser.add_argument("--from-pool", action="store_true", help="reserve one mailbox from emails.txt")
-    parser.add_argument("--platforms", nargs="+", choices=["claude", "chatgpt", "grok", "kiro", "github"], default=["claude", "chatgpt", "grok"])
-    parser.add_argument("--parallel", action="store_true", help="run platforms in parallel; default is sequential")
+    parser.add_argument("--platforms", nargs="+", choices=["claude", "chatgpt", "grok", "kiro", "github"], default=["claude"])
+    parser.add_argument("--parallel", action="store_true", help="兼容旧参数；单邮箱仅运行一个平台")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--platform-retries", type=int, default=0,
                         help="extra retries after a platform process fails")
@@ -353,6 +402,8 @@ async def main():
     parser.add_argument("--max-inflight", type=int, default=1, help="同时在处理的邮箱数（每号峰值≈3注册窗口+1broker窗口）")
     parser.add_argument("--poll-wait", type=int, default=20, help="池空时等待产号的轮询秒数")
     args = parser.parse_args()
+    if len(args.platforms) != 1:
+        raise SystemExit("同一邮箱一次只能注册一个平台，请为每个平台分配不同邮箱")
     child_env = child_env_for(args)
 
     if args.loop:

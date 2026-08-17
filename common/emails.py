@@ -19,6 +19,17 @@ if sys.platform == "win32":
 EMAILS_FILE = "emails.txt"
 _lock = threading.Lock()
 
+_CHATGPT_RETRYABLE_ERROR_MARKERS = (
+    "goto_failed",
+    "auth_assets_failed",
+    "cf_blocked",
+    "email_verification_not_completed",
+    "email_verification_",
+    "email_submit_stuck",
+    "no_session_cookie",
+    "entry_",
+)
+
 
 def _used_file(platform):
     return f"emails_used_{platform}.txt"
@@ -143,6 +154,91 @@ def latest_email(platform, require_token=False, validate_token=False):
             return email, password, token, client_id
         print(f"  [email] no unused latest mailbox for {platform} "
               f"(require_token={require_token}, validate_token={validate_token})")
+        return None
+
+
+def retryable_email(platform, require_token=False, validate_token=False):
+    """Reserve a mailbox whose platform flow failed but whose mailbox may be reused.
+
+    This deliberately ignores the cross-platform registration exclusion: it is a
+    retry of the same platform, not a return to the pristine Outlook sale pool.
+    Permanent sale exclusions and successful platform records still win.
+    """
+    normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform != "chatgpt":
+        return None
+    with _lock, file_lock(f"{EMAILS_FILE}.{platform}.retry"):
+        if not os.path.exists(EMAILS_FILE):
+            return None
+        sold = set()
+        sale_path = _outlook_sale_file()
+        if os.path.exists(sale_path):
+            with open(sale_path, "r", encoding="utf-8") as handle:
+                sold = {
+                    line.strip().lower()
+                    for line in handle
+                    if line.strip() and not line.startswith("#")
+                }
+        used_path = _used_file(platform)
+        latest_status = {}
+        if os.path.exists(used_path):
+            with open(used_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    parts = line.strip().split("----")
+                    if parts and parts[0].strip():
+                        latest_status[parts[0].strip().lower()] = (
+                            parts[2].strip().lower() if len(parts) >= 3 else ""
+                        )
+        error_path = _error_file(platform)
+        retry_candidates = []
+        if os.path.exists(error_path):
+            with open(error_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    parts = line.strip().split("----")
+                    if len(parts) < 3:
+                        continue
+                    email = parts[0].strip().lower()
+                    reason = "----".join(parts[2:]).strip().lower()
+                    if any(marker in reason for marker in _CHATGPT_RETRYABLE_ERROR_MARKERS):
+                        retry_candidates.append(email)
+        if not retry_candidates:
+            return None
+        records = {}
+        with open(EMAILS_FILE, "r", encoding="utf-8") as handle:
+            for line in handle:
+                raw = line.strip()
+                if not raw or raw.startswith("#"):
+                    continue
+                parts = raw.split("----")
+                records[parts[0].strip().lower()] = (parts, raw)
+        from common.mailbox import check_mailbox_access
+        for email in reversed(retry_candidates):
+            if email in sold or latest_status.get(email) == "ok":
+                continue
+            record = records.get(email)
+            if not record:
+                continue
+            parts, _raw = record
+            password = parts[1].strip() if len(parts) >= 2 else ""
+            token = parts[2].strip() if len(parts) >= 3 else ""
+            client_id = parts[3].strip() if len(parts) >= 4 else ""
+            if require_token and (not token or not client_id):
+                continue
+            if validate_token:
+                validation = check_mailbox_access(email, token, client_id) if token else {
+                    "ok": False, "permanent": True, "reason": "missing_refresh_token"
+                }
+                if not validation.get("ok"):
+                    if validation.get("permanent"):
+                        append_line(
+                            _error_file(platform),
+                            f"{email}----{password}----{validation.get('reason') or 'refresh_token_unusable'}",
+                        )
+                    continue
+            append_line(used_path, f"{email}----{password}----reserved")
+            _exclude_from_outlook_sale(platform, email)
+            print(f"  [email] retrying failed ChatGPT mailbox: {email}")
+            return email, password, token, client_id
         return None
 
 

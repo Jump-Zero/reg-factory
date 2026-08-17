@@ -13,6 +13,7 @@ import asyncio
 import base64
 import contextlib
 import hmac
+import io
 import importlib.util
 import json
 import os
@@ -27,6 +28,8 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -168,6 +171,7 @@ ASSET_SCAN_STATE = {
     "finished_at": "",
     "error": "",
     "progress": {"completed": 0, "total": 0, "current": ""},
+    "quarantine": {"moved_accounts": 0, "moved_files": 0},
 }
 ASSET_SCAN_LOCK = threading.Lock()
 
@@ -594,16 +598,12 @@ def _plus_runtime_environment():
     data_root = os.path.abspath(os.environ.get("REG_FACTORY_DATA_DIR") or ROOT)
     runtime_dir = os.path.join(data_root, "runtime", "chatgpt_plus")
     os.makedirs(runtime_dir, exist_ok=True)
-    residential = _plus_residential_proxy_url(env)
     clash = str(env.get("CLASH_PROXY") or "http://127.0.0.1:7897").strip()
-    link_route = str(
-        env.get("REG_FACTORY_PLUS_LINK_ROUTE")
-        or ("residential" if residential else "clash")
-    ).strip()
-    bind_route = str(
-        env.get("REG_FACTORY_PLUS_BIND_ROUTE")
-        or ("clash" if clash else "residential")
-    ).strip()
+    # Plus checkout and payment stay on the selected ChatGPT egress by
+    # default. A residential route remains available only when explicitly
+    # requested through REG_FACTORY_PLUS_*_ROUTE or *_PROXY_OVERRIDE.
+    link_route = str(env.get("REG_FACTORY_PLUS_LINK_ROUTE") or "clash").strip()
+    bind_route = str(env.get("REG_FACTORY_PLUS_BIND_ROUTE") or "clash").strip()
     link_proxy = str(
         env.get("REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE")
         or _plus_route_proxy_url(env, link_route, _plus_proxy_url(env))
@@ -1110,14 +1110,118 @@ async def api_asset_cursor_reset(request: Request):
     return _asset_result(lambda: asset_store.reset_cursor(scope))
 
 
-def _asset_scan_payload():
-    from common import asset_scanner
+def _asset_export_zip(results: list[dict], resource: str, output_format: str) -> bytes:
+    buffer = io.BytesIO()
+    manifest = []
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        if resource == "emails" or output_format == "email_four":
+            if output_format == "json":
+                archive.writestr(
+                    "emails.json",
+                    json.dumps([item.get("data") for item in results], ensure_ascii=False, indent=2),
+                )
+            else:
+                lines = [str(item.get("data") or "") for item in results]
+                name = "chatgpt-registration-emails.txt" if resource == "chatgpt" else "emails.txt"
+                archive.writestr(name, "\n".join(lines) + "\n")
+            manifest.extend({
+                "platform": resource if resource != "emails" else "outlook",
+                "email": str(item.get("email") or ""),
+                "source": str(item.get("source") or ""),
+                "format": output_format,
+            } for item in results)
+        else:
+            for index, item in enumerate(results, start=1):
+                data = item.get("data")
+                extension = "txt" if isinstance(data, str) else "json"
+                email = str(item.get("email") or item.get("source") or f"account-{index}")
+                safe_name = re.sub(r"[^a-zA-Z0-9@._-]+", "-", email).strip("-.") or f"account-{index}"
+                preferred = str(item.get("file_name") or "").strip()
+                if preferred:
+                    safe_name = re.sub(r"[^a-zA-Z0-9@._-]+", "-", os.path.basename(preferred)).strip("-.")
+                    if safe_name.lower().endswith(f".{extension}"):
+                        safe_name = safe_name[: -(len(extension) + 1)]
+                payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, indent=2)
+                archive.writestr(f"{resource}/{index:04d}-{safe_name}.{extension}", payload)
+                manifest.append({
+                    "platform": resource,
+                    "email": str(item.get("email") or ""),
+                    "source": str(item.get("source") or ""),
+                    "format": output_format,
+                })
+        archive.writestr(
+            "manifest.json",
+            json.dumps({"resource": resource, "format": output_format, "count": len(results), "items": manifest}, ensure_ascii=False, indent=2),
+        )
+    return buffer.getvalue()
 
-    report = asset_scanner.get_report()
-    report["scan"] = {
+
+@app.post("/api/assets/export")
+async def api_asset_export(request: Request):
+    denied = _asset_api_denied(request)
+    if denied:
+        return denied
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    resource = str(data.get("resource") or "emails").strip().lower()
+    output_format = str(data.get("format") or ("four" if resource == "emails" else "raw")).strip().lower()
+    consume = data.get("consume", True)
+    normal_only = data.get("normal_only", True)
+    include_claimed = data.get("include_claimed", consume)
+    if not all(isinstance(value, bool) for value in (consume, normal_only, include_claimed)):
+        return JSONResponse({"error": "consume, normal_only and include_claimed must be boolean"}, status_code=400)
+    from common import asset_store
+
+    try:
+        def build_export():
+            results = asset_store.export_batch(
+                resource,
+                output_format=output_format,
+                limit=data.get("limit", 100),
+                verified_only=normal_only,
+                email_provider=str(data.get("email_provider") or ""),
+                codex_phone_status=str(data.get("codex_phone_status") or ""),
+                include_claimed=include_claimed,
+            )
+            payload = _asset_export_zip(results, resource, output_format)
+            lifecycle = (
+                asset_store.archive_asset_results(results, bucket="exported", reason="manual_batch_export")
+                if consume else {"moved_accounts": 0, "moved_files": 0}
+            )
+            return results, payload, lifecycle
+
+        results, payload, lifecycle = await asyncio.to_thread(build_export)
+    except asset_store.AssetError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)[:240]}, status_code=400)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    return Response(
+        payload,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="asset-export-{resource}-{stamp}.zip"',
+            "X-Asset-Count": str(len(results)),
+            "X-Asset-Consumed": str(lifecycle.get("moved_accounts", 0)),
+        },
+    )
+
+
+def _asset_scan_payload(progress_only=False):
+    scan = {
         **ASSET_SCAN_STATE,
         "progress": dict(ASSET_SCAN_STATE.get("progress") or {}),
     }
+    if progress_only:
+        return {"scan": scan}
+    from common import asset_scanner
+
+    report = asset_scanner.get_report()
+    report["scan"] = scan
     # 合并邮箱分类(自主导入/自主注册)和母/子邮箱关系到 outlook 扫描项
     meta = _load_emails_meta()
     source_counts = {"imported": 0, "registered": 0}
@@ -1148,21 +1252,41 @@ def _set_asset_scan_progress(value):
     }
 
 
-def _scan_assets_sync(platforms, concurrency=1, timeout=15, progress=None, emails=None, force=False):
+def _scan_assets_sync(
+    platforms,
+    concurrency=1,
+    account_concurrency=4,
+    timeout=15,
+    progress=None,
+    emails=None,
+    force=False,
+    include_plus_trial=False,
+):
     from common import asset_scanner
 
     with ASSET_SCAN_LOCK:
         return asset_scanner.scan_pool(
             platforms=platforms,
             concurrency=concurrency,
+            account_concurrency=account_concurrency,
             timeout=timeout,
             progress=progress,
             emails=emails,
             force=force,
+            include_plus_trial=include_plus_trial,
         )
 
 
-async def _run_asset_scan(platforms, concurrency, timeout, emails=None, force=False):
+async def _run_asset_scan(
+    platforms,
+    concurrency,
+    account_concurrency,
+    timeout,
+    emails=None,
+    force=False,
+    quarantine_bad=True,
+    include_plus_trial=False,
+):
     global ASSET_SCAN_TASK
     from common import asset_scanner
 
@@ -1176,11 +1300,21 @@ async def _run_asset_scan(platforms, concurrency, timeout, emails=None, force=Fa
             _scan_assets_sync,
             platforms=platforms,
             concurrency=concurrency,
+            account_concurrency=account_concurrency,
             timeout=timeout,
             progress=progress,
             emails=emails,
             force=force,
+            include_plus_trial=include_plus_trial,
         )
+        if quarantine_bad:
+            from common import asset_store
+
+            ASSET_SCAN_STATE["quarantine"] = await asyncio.to_thread(
+                asset_store.quarantine_scan_report, report
+            )
+        else:
+            ASSET_SCAN_STATE["quarantine"] = {"moved_accounts": 0, "moved_files": 0}
         ASSET_SCAN_STATE["finished_at"] = report.get("finished_at", "")
         ASSET_SCAN_STATE["error"] = ""
     except Exception as exc:
@@ -1192,11 +1326,11 @@ async def _run_asset_scan(platforms, concurrency, timeout, emails=None, force=Fa
 
 
 @app.get("/api/assets/scan")
-def api_asset_scan_get(request: Request):
+def api_asset_scan_get(request: Request, progress_only: bool = False):
     denied = _asset_api_denied(request)
     if denied:
         return denied
-    return _asset_result(_asset_scan_payload)
+    return _asset_result(lambda: _asset_scan_payload(progress_only=progress_only))
 
 
 @app.post("/api/assets/scan")
@@ -1225,6 +1359,7 @@ async def api_asset_scan_start(request: Request):
         return JSONResponse({"error": f"不支持的平台：{', '.join(invalid)}"}, status_code=400)
     try:
         concurrency = min(2, max(1, int((data or {}).get("concurrency") or 1)))
+        account_concurrency = min(8, max(1, int((data or {}).get("account_concurrency") or 4)))
         timeout = min(60, max(5, int((data or {}).get("timeout") or 15)))
     except (TypeError, ValueError):
         return JSONResponse({"error": "concurrency 和 timeout 必须是整数"}, status_code=400)
@@ -1233,11 +1368,19 @@ async def api_asset_scan_start(request: Request):
     emails = None
     if isinstance(raw_emails, list) and raw_emails:
         emails = [str(e).strip() for e in raw_emails if str(e).strip()]
-    force = (data or {}).get("force", False)
+    # A POST represents an explicit/manual scan. Reuse remains available to
+    # programmatic scanner callers, but the WebUI action must probe accounts.
+    force = (data or {}).get("force", True)
     if not isinstance(force, bool):
         return JSONResponse({"error": "force 必须是布尔值"}, status_code=400)
+    quarantine_bad = (data or {}).get("quarantine_bad", True)
+    if not isinstance(quarantine_bad, bool):
+        return JSONResponse({"error": "quarantine_bad 必须是布尔值"}, status_code=400)
+    include_plus_trial = (data or {}).get("include_plus_trial", False)
+    if not isinstance(include_plus_trial, bool):
+        return JSONResponse({"error": "include_plus_trial 必须是布尔值"}, status_code=400)
 
-    current = asset_scanner.get_report()
+    current = await asyncio.to_thread(asset_scanner.get_report)
     if emails:
         email_set = {e.lower() for e in emails}
         total = sum(1 for item in current["items"] if item.get("platform") in set(platforms) and (item.get("email") or "").lower() in email_set)
@@ -1250,12 +1393,30 @@ async def api_asset_scan_start(request: Request):
         "finished_at": "",
         "error": "",
         "progress": {"completed": 0, "total": total, "current": ""},
+        "quarantine": {"moved_accounts": 0, "moved_files": 0},
     })
-    ASSET_SCAN_TASK = asyncio.create_task(_run_asset_scan(platforms, concurrency, timeout, emails, force))
+    ASSET_SCAN_TASK = asyncio.create_task(
+        _run_asset_scan(
+            platforms,
+            concurrency,
+            account_concurrency,
+            timeout,
+            emails=emails,
+            force=force,
+            quarantine_bad=quarantine_bad,
+            include_plus_trial=include_plus_trial,
+        )
+    )
     return {
         "ok": True,
         "platforms": platforms,
-        "safe_mode": {"platform_concurrency": concurrency, "account_concurrency": 1, "force": force},
+        "safe_mode": {
+            "platform_concurrency": concurrency,
+            "account_concurrency": account_concurrency,
+            "force": force,
+            "quarantine_bad": quarantine_bad,
+            "include_plus_trial": include_plus_trial,
+        },
         "scan": dict(ASSET_SCAN_STATE),
     }
 
@@ -1402,7 +1563,11 @@ async def api_chatgpt_plus_import_codex(request: Request):
             _build_cmd(script, args), "plus_codex_import", task_env, data_root
         )
         RUNS[started["run_id"]]["sensitive_input_path"] = input_path
-        return {**started, "accepted": len(records)}
+        return {
+            **started,
+            "accepted": len(records),
+            "accepted_emails": [str(record.get("email") or "").strip().lower() for record in records],
+        }
     except Exception as exc:
         with contextlib.suppress(OSError):
             os.unlink(input_path)
@@ -1415,6 +1580,340 @@ def _decode_access_token_claims(token):
         raise ValueError("invalid JWT")
     payload = parts[1] + "=" * (-len(parts[1]) % 4)
     return json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+
+
+def _chatgpt_protocol_accounts(emails=None, limit=100):
+    """Load current saved ChatGPT sessions for the protocol-link worker.
+
+    Tokens never leave this process except through the short-lived, local input
+    file consumed by the child worker.  The API only returns redacted counts.
+    """
+    filter_requested = emails is not None
+    requested = {
+        str(value or "").strip().lower()
+        for value in (emails or [])
+        if str(value or "").strip()
+    }
+    data_root = os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or ROOT
+    tokens_dir = os.path.join(data_root, "tokens", "chatgpt")
+    accounts = []
+    seen = set()
+    if os.path.isdir(tokens_dir):
+        for name in os.listdir(tokens_dir):
+            if not name.endswith(".session.json"):
+                continue
+            path = os.path.join(tokens_dir, name)
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    session = json.load(handle)
+                token = str(session.get("accessToken") or session.get("access_token") or "").strip()
+                claims = _decode_access_token_claims(token)
+                if float(claims.get("exp") or 0) <= time.time() or token in seen:
+                    continue
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                account = session.get("account") if isinstance(session.get("account"), dict) else {}
+                email = str(user.get("email") or session.get("email") or claims.get("email") or "").strip().lower()
+                if not email or (filter_requested and email not in requested):
+                    continue
+                seen.add(token)
+                accounts.append({
+                    "email": email,
+                    "access_token": token,
+                    "account_id": str(account.get("id") or session.get("account_id") or "").strip(),
+                    "modified_at": os.path.getmtime(path),
+                })
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+    accounts.sort(key=lambda item: item["modified_at"], reverse=True)
+    bounded_limit = max(1, min(100, int(limit or 100)))
+    return accounts[:bounded_limit]
+
+
+def _protocol_pool_eligible_emails():
+    """Return cached, redacted pool identities that previously passed trial scan."""
+    from common import asset_scanner
+
+    # Only an explicitly zero-priced offer may enter the protocol pool.
+    allowed = {"zero_price"}
+    report = asset_scanner.get_report()
+    emails = []
+    seen = set()
+    for item in report.get("items", []):
+        if not isinstance(item, dict) or item.get("platform") != "chatgpt":
+            continue
+        email = str(item.get("email") or "").strip().lower()
+        if not email or email in seen or str(item.get("plus_trial") or "") not in allowed:
+            continue
+        seen.add(email)
+        emails.append(email)
+    return emails
+
+
+def _luhn_valid(number):
+    total = 0
+    parity = len(number) % 2
+    for index, character in enumerate(number):
+        digit = int(character)
+        if index % 2 == parity:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+def _parse_paypal_payment_details(value):
+    """Normalize optional, per-run PayPal details without persisting raw input."""
+    if value in (None, "", {}):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("payment_details 必须是对象")
+
+    raw_cards = str(value.get("cards") or "").strip()
+    raw_addresses = str(value.get("addresses") or "").strip()
+    raw_phones = str(value.get("phones") or "").strip()
+    if not any((raw_cards, raw_addresses, raw_phones)):
+        return {}
+    if not all((raw_cards, raw_addresses, raw_phones)):
+        raise ValueError("本次支付资料必须同时填写卡片、账单地址和手机号接码")
+
+    def lines(raw, label):
+        values = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not values or len(values) > 100:
+            raise ValueError(f"{label} 必须是 1 到 100 行")
+        return values
+
+    cards = []
+    for line in lines(raw_cards, "卡片"):
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) == 3 and "/" in parts[1]:
+            number, expiry, cvv = parts
+            expiry_parts = [part.strip() for part in expiry.split("/", 1)]
+            if len(expiry_parts) != 2:
+                raise ValueError("卡片格式应为 卡号|MM/YY|CVC")
+            month, year = expiry_parts
+        elif len(parts) == 4:
+            number, month, year, cvv = parts
+        else:
+            raise ValueError("卡片格式应为 卡号|MM/YY|CVC")
+        number = re.sub(r"[ -]", "", number)
+        if not re.fullmatch(r"\d{12,19}", number) or not _luhn_valid(number):
+            raise ValueError("卡号格式或校验位不正确")
+        if not re.fullmatch(r"\d{1,2}", month) or not 1 <= int(month) <= 12:
+            raise ValueError("卡片有效期月份不正确")
+        if not re.fullmatch(r"\d{2}|\d{4}", year):
+            raise ValueError("卡片有效期年份不正确")
+        full_year = 2000 + int(year) if len(year) == 2 else int(year)
+        current = time.localtime()
+        if (full_year, int(month)) < (current.tm_year, current.tm_mon) or full_year > current.tm_year + 20:
+            raise ValueError("卡片已过期或有效期年份超出范围")
+        if not re.fullmatch(r"\d{3,4}", cvv):
+            raise ValueError("CVC 必须是 3 或 4 位数字")
+        cards.append({
+            "number": number,
+            "exp_month": f"{int(month):02d}",
+            "exp_year": str(full_year),
+            "cvv": cvv,
+        })
+
+    addresses = []
+    for line in lines(raw_addresses, "账单地址"):
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) != 4 or not all(parts):
+            raise ValueError("账单地址格式应为 街道|城市|州|邮编")
+        line1, city, state, postal_code = parts
+        if max(map(len, parts)) > 120 or len(state) > 40:
+            raise ValueError("账单地址字段过长")
+        if not re.fullmatch(r"[A-Za-z0-9 -]{3,12}", postal_code):
+            raise ValueError("账单邮编格式不正确")
+        addresses.append({"line1": line1, "city": city, "state": state, "postal_code": postal_code})
+
+    phones = []
+    for line in lines(raw_phones, "手机号接码"):
+        separator = "----" if "----" in line else "|"
+        parts = [part.strip() for part in line.split(separator, 1)]
+        if len(parts) != 2 or not re.fullmatch(r"\+\d{8,15}", parts[0]):
+            raise ValueError("手机号接码格式应为 +国家码手机号----短信记录 URL")
+        parsed_url = urllib.parse.urlsplit(parts[1])
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ValueError("短信记录 URL 必须是有效的 http(s) 地址")
+        phones.append({"phone": parts[0], "sms_api_url": parts[1]})
+
+    return {
+        "cards": cards,
+        "addresses": addresses,
+        "phone_numbers": phones,
+        "reverse_engineering": True,
+    }
+
+
+def _protocol_batch_script():
+    return {
+        "file": "tools/run_protocol_payment_batch.py",
+        "args": [
+            {"flag": "--accounts-file", "type": "str"},
+            {"flag": "--method", "type": "str"},
+            {"flag": "--operation", "type": "str"},
+            {"flag": "--payment-confirmed", "type": "bool"},
+            {"flag": "--engine-root", "type": "str"},
+            {"flag": "--workers", "type": "int"},
+            {"flag": "--timeout", "type": "int"},
+            {"flag": "--report", "type": "str"},
+            {"flag": "--delete-input", "type": "bool"},
+        ],
+    }
+
+
+@app.get("/api/chatgpt-plus/protocol-status")
+def api_chatgpt_plus_protocol_status():
+    from common.protocol_payment import paypal_payment_ready, protocol_catalog, resolve_protocol_engine_root
+
+    root = resolve_protocol_engine_root()
+    pool_emails = _protocol_pool_eligible_emails()
+    payment_ready = paypal_payment_ready(root or "")
+    return {
+        "ok": True,
+        "engine_ready": bool(root),
+        "account_count": len(_chatgpt_protocol_accounts(limit=100)),
+        "pool_eligible_count": len(_chatgpt_protocol_accounts(pool_emails, limit=100)),
+        "payment_ready": bool(root),
+        "payment_configured": payment_ready,
+        "payment_message": "可使用引擎默认支付资料" if payment_ready else "支付时需录入本次任务资料",
+        "methods": protocol_catalog(root or ""),
+        "message": "协议引擎已就绪" if root else "未找到协议引擎；设置 REG_FACTORY_PROTOCOL_PAYMENT_ROOT 后可用",
+    }
+
+
+@app.post("/api/chatgpt-plus/protocol-batch")
+async def api_chatgpt_plus_protocol_batch(request: Request):
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return JSONResponse({"error": "请求必须是有效的 JSON 对象"}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "请求必须是 JSON 对象"}, status_code=400)
+    from common.protocol_payment import payment_method, paypal_payment_ready, resolve_protocol_engine_root
+
+    method = payment_method(data.get("method"))
+    if not method:
+        return JSONResponse({"error": "未知协议渠道"}, status_code=400)
+    if not method["batch_enabled"]:
+        return JSONResponse({"error": f"{method['label']} 的上游协议不支持批量提链"}, status_code=400)
+    engine_root = resolve_protocol_engine_root()
+    if not engine_root:
+        return JSONResponse(
+            {"error": "未找到协议引擎；设置 REG_FACTORY_PROTOCOL_PAYMENT_ROOT 后重试"},
+            status_code=503,
+        )
+    operation = str(data.get("operation") or "extract").strip().lower()
+    if operation not in {"extract", "pay"}:
+        return JSONResponse({"error": "未知协议操作"}, status_code=400)
+    payment_config = {}
+    if operation == "pay":
+        if method["id"] != "paypal":
+            return JSONResponse({"error": "当前只有 PayPal 支持批量协议直接支付；其他渠道需提链后确认"}, status_code=400)
+        if data.get("confirm_payment") is not True:
+            return JSONResponse({"error": "执行真实支付前必须明确勾选支付确认"}, status_code=400)
+        try:
+            payment_config = _parse_paypal_payment_details(data.get("payment_details"))
+        except (TypeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if not payment_config and not paypal_payment_ready(engine_root):
+            return JSONResponse({"error": "请录入本次 PayPal 卡片、账单地址和手机号接码资料"}, status_code=400)
+    raw_emails = data.get("emails") or []
+    if not isinstance(raw_emails, list) or len(raw_emails) > 100:
+        return JSONResponse({"error": "emails 必须是最多 100 条的数组"}, status_code=400)
+    source = str(data.get("source") or "saved").strip().lower()
+    if source not in {"saved", "pool"}:
+        return JSONResponse({"error": "未知账号来源"}, status_code=400)
+    try:
+        workers = 1 if operation == "pay" else max(1, min(4, int(data.get("workers") or 1)))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "批量并发必须是整数"}, status_code=400)
+    selected_emails = _protocol_pool_eligible_emails() if source == "pool" else (raw_emails or None)
+    candidates = _chatgpt_protocol_accounts(selected_emails, limit=100)
+    if not candidates:
+        message = "号池中没有已缓存为 Plus 优惠资格且会话可用的账号" if source == "pool" else "没有找到可用的本地 ChatGPT 会话"
+        return JSONResponse({"error": message}, status_code=400)
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def check_one(item):
+        async with semaphore:
+            return item, await asyncio.to_thread(_plus_trial_gate_sync, item)
+
+    checks = await asyncio.gather(*(check_one(item) for item in candidates))
+    # A campaign/discount is not proof of a 0 yuan checkout.
+    allowed = {"zero_price"}
+    eligible = [item for item, result in checks if result.get("plus_trial") in allowed]
+    skipped = [
+        {"email": result.get("email") or item["email"], "reason": result.get("plus_trial") or "unknown"}
+        for item, result in checks
+        if result.get("plus_trial") not in allowed
+    ]
+    if not eligible:
+        return JSONResponse(
+            {"error": "没有命中明确 0 元试用资格的账号，未创建协议任务", "skipped": skipped},
+            status_code=422,
+        )
+
+    data_root = os.path.abspath(os.environ.get("REG_FACTORY_DATA_DIR") or ROOT)
+    runtime_dir = os.path.join(data_root, "runtime", "protocol_payment")
+    os.makedirs(runtime_dir, exist_ok=True)
+    descriptor, input_path = tempfile.mkstemp(prefix="accounts-", suffix=".json", dir=runtime_dir, text=True)
+    report_path = os.path.join(runtime_dir, f"{method['id']}-{int(time.time())}.report.json")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "accounts": [
+                        {"email": item["email"], "access_token": item["access_token"], "account_id": item["account_id"]}
+                        for item in eligible
+                    ],
+                    "payment_config": payment_config,
+                },
+                handle,
+                ensure_ascii=False,
+            )
+        with contextlib.suppress(OSError):
+            os.chmod(input_path, 0o600)
+        task_env = _child_env("chatgpt")
+        runtime_values = _plus_runtime_environment()
+        task_env.update(runtime_values)
+        task_env["REG_FACTORY_PROTOCOL_PAYMENT_ROOT"] = str(engine_root)
+        task_env["REG_FACTORY_PROTOCOL_CHECKOUT_PROXY"] = runtime_values.get("REG_FACTORY_PLUS_LINK_PROXY", "")
+        task_env["REG_FACTORY_PROTOCOL_APPROVE_PROXY"] = runtime_values.get("REG_FACTORY_PLUS_BIND_PROXY", "")
+        from common import proxy_switch
+
+        await asyncio.to_thread(proxy_switch.ensure_proxy_mode, task_env)
+        args = {
+            "--accounts-file": input_path,
+            "--method": method["id"],
+            "--operation": operation,
+            "--payment-confirmed": operation == "pay",
+            "--engine-root": str(engine_root),
+            "--workers": workers,
+            "--timeout": 300,
+            "--report": report_path,
+            "--delete-input": True,
+        }
+        started = await _start_managed_run(
+            _build_cmd(_protocol_batch_script(), args), "plus_protocol_batch", task_env, data_root
+        )
+        RUNS[started["run_id"]]["sensitive_input_path"] = input_path
+        return {
+            **started,
+            "accepted": len(eligible),
+            "skipped": skipped,
+            "payment_method": method["id"],
+            "operation": operation,
+            "source": source,
+            "report": os.path.basename(report_path),
+        }
+    except Exception as exc:
+        with contextlib.suppress(OSError):
+            os.unlink(input_path)
+        return JSONResponse({"error": str(exc)[:240]}, status_code=400)
 
 
 def _chatgpt_plus_free_ats(limit=PLUS_BATCH_SIZE):
@@ -1460,7 +1959,99 @@ def api_chatgpt_plus_export_ats(limit: int = PLUS_BATCH_SIZE):
     )
 
 
-async def _proxy_local_plus(request: Request, upstream_path: str):
+_PLUS_CHECKOUT_GATE_PATHS = frozenset({
+    "/card-bind/session",
+    "/standalone-flow/preflight",
+    "/standalone-flow/quick-checkout",
+    "/standalone-flow/quick-checkout-batch",
+})
+
+
+def _plus_trial_gate_sync(payload: dict) -> dict:
+    """Return a redacted trial decision for one checkout payload."""
+    token = str(payload.get("access_token") or payload.get("accessToken") or "").strip()
+    email = str(payload.get("email") or "").strip()
+    if not token:
+        return {
+            "email": email,
+            "plus_trial": "unknown",
+            "detail": "missing access token",
+            "evidence": "local:missing_access_token",
+        }
+    try:
+        from common.asset_scanner import _scan_chatgpt_plus_trial
+
+        token_view = {
+            "account_id": str(payload.get("account_id") or "").strip(),
+        }
+        result = _scan_chatgpt_plus_trial(
+            {"platform": "chatgpt", "email": email, "_token": token_view},
+            token,
+            20,
+        )
+        return {
+            "email": email,
+            "plus_trial": str(result.get("plus_trial") or "unknown"),
+            "detail": str(result.get("plus_trial_detail") or ""),
+            "evidence": str(result.get("plus_trial_evidence") or ""),
+        }
+    except Exception as exc:  # keep the gate fail-closed and redact credentials
+        return {
+            "email": email,
+            "plus_trial": "unknown",
+            "detail": f"trial check failed: {type(exc).__name__}",
+            "evidence": "accounts_check:error",
+        }
+
+
+def _plus_gate_items(path: str, payload: dict) -> list[dict]:
+    if path == "/standalone-flow/quick-checkout-batch":
+        source = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
+        return [
+            item.get("payload")
+            for item in source
+            if isinstance(item, dict) and isinstance(item.get("payload"), dict)
+        ]
+    return [payload]
+
+
+async def _plus_trial_gate(path: str, method: str, body: bytes):
+    """Reject Checkout/payment requests unless every account has a Plus offer."""
+    if method.upper() != "POST" or path not in _PLUS_CHECKOUT_GATE_PATHS:
+        return None
+    try:
+        payload = json.loads(body or b"{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return JSONResponse({"ok": False, "error": "request body must be JSON"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "error": "request body must be an object"}, status_code=400)
+    items = _plus_gate_items(path, payload)
+    if not items:
+        return JSONResponse({"ok": False, "error": "no checkout accounts supplied"}, status_code=400)
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def check_one(item: dict) -> dict:
+        async with semaphore:
+            return await asyncio.to_thread(_plus_trial_gate_sync, item)
+
+    results = await asyncio.gather(*(check_one(item) for item in items))
+    # Fail closed unless the latest read-only check proved a zero price.
+    allowed = {"zero_price"}
+    blocked = [item for item in results if item.get("plus_trial") not in allowed]
+    if blocked:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "提链/支付仅允许明确 0 元试用资格的账号",
+                "accounts": blocked,
+            },
+            status_code=422,
+        )
+    return None
+
+
+async def _proxy_local_plus(request: Request, upstream_path: str, body: bytes | None = None):
     _plus_runtime_environment()
     if not _plus_health():
         await asyncio.to_thread(_start_plus_service_sync)
@@ -1475,7 +2066,8 @@ async def _proxy_local_plus(request: Request, upstream_path: str):
         )
     }
     fwd_headers["Accept-Encoding"] = "identity"
-    body = await request.body()
+    if body is None:
+        body = await request.body()
 
     def _do_proxy():
         req = urllib.request.Request(
@@ -1513,10 +2105,8 @@ async def _proxy_local_plus(request: Request, upstream_path: str):
 
 @app.api_route("/chatgpt-plus/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def proxy_chatgpt_plus_page(request: Request, path: str):
-    del request, path
-    return JSONResponse(
-        {"error": "Plus 提链和绑卡工作台已移除"}, status_code=410
-    )
+    upstream_path = "/" + path.lstrip("/") if path else "/"
+    return await _proxy_local_plus(request, upstream_path)
 
 
 @app.api_route(
@@ -1524,10 +2114,12 @@ async def proxy_chatgpt_plus_page(request: Request, path: str):
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
 )
 async def proxy_chatgpt_plus_api(request: Request, path: str):
-    del request, path
-    return JSONResponse(
-        {"error": "Plus 提链和绑卡 API 已移除"}, status_code=410
-    )
+    upstream_path = "/" + path.lstrip("/") if path else "/"
+    body = await request.body() if request.method.upper() == "POST" else b""
+    blocked = await _plus_trial_gate(upstream_path, request.method, body)
+    if blocked is not None:
+        return blocked
+    return await _proxy_local_plus(request, upstream_path, body=body)
 
 
 # ============================================================ 邮箱池批量导入
@@ -3038,8 +3630,61 @@ def _terminate_process_tree(pid):
     return not _pid_exists(pid)
 
 
+def _cleanup_registered_browser_profiles(owner=None):
+    """Close and remove profiles created by reg-factory child tasks.
+
+    BitBrowser launches Chrome outside the Python process tree, so taskkill on
+    the task PID alone cannot close those windows. The registry contains only
+    profiles created by this project and is safe to process on Stop All.
+    """
+    try:
+        from bitbrowser import BitBrowser
+        from common.browser_registry import active_profiles, unregister
+        records = active_profiles(owner=owner)
+    except Exception:
+        return {"closed": 0, "failed": []}
+    if owner is None:
+        # Global cleanup also adopts generated profiles created by older builds
+        # before the per-run registry was introduced.
+        try:
+            browser = BitBrowser()
+            listed = browser.list_browsers(page=0, page_size=200)
+            known = {str(item.get("id") or "") for item in records}
+            for item in (listed.get("data", {}).get("list") or []):
+                name = str(item.get("name") or "").strip().lower()
+                remark = str(item.get("remark") or "").strip().lower()
+                generated_name = name.startswith((
+                    "outlook_loop_", "chatgpt_", "claude_", "grok_", "kiro_", "github_", "mail_",
+                ))
+                generated_remark = "outlook reg loop" in remark or "reg-factory" in remark
+                if (generated_name or generated_remark) and str(item.get("id") or "") not in known:
+                    records.append({"id": item.get("id"), "api_base": getattr(browser, "api_base", "")})
+        except Exception:
+            pass
+    closed = 0
+    failed = []
+    for record in records:
+        profile_id = str(record.get("id") or "").strip()
+        if not profile_id:
+            continue
+        try:
+            browser = BitBrowser(api_base=record.get("api_base") or None)
+            try:
+                browser.close_browser(profile_id)
+            except Exception:
+                pass
+            browser.delete_browser(profile_id)
+            unregister(profile_id)
+            closed += 1
+        except Exception as exc:
+            failed.append({"id": profile_id, "error": str(exc)[:160]})
+    return {"closed": closed, "failed": failed}
+
+
 async def _start_managed_run(cmd, sid, task_env, task_cwd):
     os.makedirs(task_cwd, exist_ok=True)
+    task_env = dict(task_env)
+    task_env.setdefault("REG_FACTORY_RUN_ID", f"webui-{uuid.uuid4().hex}")
     process_options = (
         {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
         if os.name == "nt"
@@ -3054,17 +3699,24 @@ async def _start_managed_run(cmd, sid, task_env, task_cwd):
     run_id = f"r{_run_seq[0]}"
     rec = {"proc": proc, "lines": [], "done": False, "stopped": False,
            "returncode": None, "script": sid,
-           "cmd": " ".join(cmd), "started": time.strftime("%H:%M:%S")}
+           "cmd": " ".join(cmd), "started": time.strftime("%H:%M:%S"),
+           "run_owner": task_env["REG_FACTORY_RUN_ID"],
+           "keep_on_fail": "--keep-on-fail" in cmd}
     RUNS[run_id] = rec
 
     def _sanitize_line(value):
         line = str(value or "")
-        if sid != "plus_codex_import":
+        if sid not in {"plus_codex_import", "plus_protocol_batch"}:
             return line
         # OTPs and rented numbers must not be copied into the WebUI log stream.
         line = re.sub(r"\b\d{6}\b", "******", line)
         line = re.sub(r"(?<!\d)\+(\d{8,15})\b", lambda match: "+***" + match.group(1)[-4:], line)
         line = re.sub(r"\bM\.[A-Za-z0-9*!._-]{24,}\b", "[redacted-token]", line)
+        line = re.sub(
+            r"(?i)(access[_-]?token|authorization|refresh[_-]?token|card|cvc)([=:])[^\s,}]+",
+            r"\1\2[redacted]",
+            line,
+        )
         return line
 
     async def _pump():
@@ -3078,8 +3730,19 @@ async def _start_managed_run(cmd, sid, task_env, task_cwd):
         finally:
             await proc.wait()
             rec["returncode"] = proc.returncode
-            rec["done"] = True
             rec["lines"].append(f"[webui] 进程结束 exit={proc.returncode}")
+            keep_failed_profiles = (
+                rec["keep_on_fail"] and proc.returncode != 0 and not rec["stopped"]
+            )
+            if not keep_failed_profiles:
+                cleanup = await asyncio.to_thread(
+                    _cleanup_registered_browser_profiles, rec["run_owner"]
+                )
+                if cleanup["closed"] or cleanup["failed"]:
+                    rec["lines"].append(
+                        f"[webui] 浏览器环境清理 closed={cleanup['closed']} failed={len(cleanup['failed'])}"
+                    )
+            rec["done"] = True
             sensitive_input = rec.get("sensitive_input_path")
             if sensitive_input:
                 with contextlib.suppress(OSError):
@@ -3098,6 +3761,7 @@ async def api_run(request: Request):
     if not script:
         return JSONResponse({"error": f"未知脚本: {sid}"}, status_code=400)
     task_env = _child_env(script.get("platform", ""))
+    task_env["REG_FACTORY_RUN_ID"] = f"webui-{uuid.uuid4().hex}"
     try:
         from common import proxy_switch
         await asyncio.to_thread(proxy_switch.ensure_proxy_mode, task_env)
@@ -3151,7 +3815,17 @@ async def api_stop(run_id: str):
     if not rec["done"]:
         rec["stopped"] = True
         stopped = await asyncio.to_thread(_terminate_process_tree, rec["proc"].pid)
-        return {"ok": stopped, "stopped": 1 if stopped else 0}
+        owner = rec.get("run_owner")
+        browser_cleanup = (
+            await asyncio.to_thread(_cleanup_registered_browser_profiles, owner)
+            if owner
+            else {"closed": 0, "failed": []}
+        )
+        return {
+            "ok": stopped and not browser_cleanup["failed"],
+            "stopped": 1 if stopped else 0,
+            "browser_profiles": browser_cleanup,
+        }
     return {"ok": True, "stopped": 0}
 
 
@@ -3182,12 +3856,14 @@ async def api_stop_all():
             stopped += 1
         else:
             failed.append(pid)
+    browser_cleanup = await asyncio.to_thread(_cleanup_registered_browser_profiles)
     return {
         "ok": not failed,
         "stopped": stopped,
         "tracked": len(tracked),
         "orphaned": orphaned,
         "failed": failed,
+        "browser_profiles": browser_cleanup,
     }
 
 
@@ -3209,6 +3885,7 @@ async def shutdown_local_services():
     K12_START_TASK = None
     await _stop_k12_service()
     await asyncio.to_thread(_stop_plus_service_sync)
+    await asyncio.to_thread(_cleanup_registered_browser_profiles)
 
 
 _ensure_proxy_env()

@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from common.session_export import (
@@ -33,6 +36,9 @@ class AssetUnverified(AssetError):
 
 
 _CURSOR_LOCK = threading.Lock()
+_RECORD_CACHE_LOCK = threading.Lock()
+_RECORD_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
+_RECORD_CACHE_SECONDS = 5.0
 _PLATFORMS = {
     "claude": {
         "key_names": {"sessionKey"},
@@ -53,6 +59,8 @@ _PLATFORMS = {
 }
 
 EMAIL_PROVIDERS = ("outlook", "icloud", "temporary", "other")
+LIFECYCLE_BUCKETS = ("exported", "quarantine")
+QUARANTINE_STATUSES = ("banned", "expired", "invalid")
 _OUTLOOK_EMAIL_DOMAINS = {"outlook.com", "hotmail.com", "live.com", "msn.com"}
 _ICLOUD_EMAIL_DOMAINS = {"icloud.com", "me.com", "mac.com"}
 _TEMPORARY_EMAIL_MARKERS = (
@@ -105,6 +113,17 @@ def _claim_path() -> Path:
     return _data_root() / "runtime" / "state" / "asset_api_claims.json"
 
 
+def _lifecycle_manifest_path() -> Path:
+    return _data_root() / "runtime" / "state" / "asset_lifecycle.jsonl"
+
+
+def _lifecycle_root(bucket: str) -> Path:
+    normalized = str(bucket or "").strip().lower()
+    if normalized not in LIFECYCLE_BUCKETS:
+        raise AssetError(f"asset lifecycle bucket must be one of: {', '.join(LIFECYCLE_BUCKETS)}")
+    return _data_root() / "runtime" / "assets" / normalized
+
+
 def _outlook_sale_exclusion_path() -> Path:
     return _data_root() / "runtime" / "state" / "outlook_sale_emails.txt"
 
@@ -133,6 +152,40 @@ def _exclude_outlook_sale_from_registration(email: str) -> None:
 def _read_json(path: Path):
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _cached_records(key: tuple, loader) -> list[dict]:
+    now = time.monotonic()
+    with _RECORD_CACHE_LOCK:
+        cached = _RECORD_CACHE.get(key)
+        if cached and cached[0] > now:
+            return list(cached[1])
+    records = loader()
+    with _RECORD_CACHE_LOCK:
+        _RECORD_CACHE[key] = (now + _RECORD_CACHE_SECONDS, list(records))
+    return list(records)
+
+
+def invalidate_record_cache(platform: str = "") -> None:
+    normalized = str(platform or "").strip().lower()
+    with _RECORD_CACHE_LOCK:
+        if not normalized:
+            _RECORD_CACHE.clear()
+            return
+        for key in list(_RECORD_CACHE):
+            if normalized in key:
+                _RECORD_CACHE.pop(key, None)
+
+
+def _invalidate_scanner_report() -> None:
+    try:
+        from common import asset_scanner
+
+        callback = getattr(asset_scanner, "invalidate_report_cache", None)
+        if callback:
+            callback()
+    except Exception:
+        pass
 
 
 def _read_cursors() -> dict[str, int]:
@@ -182,6 +235,326 @@ def _write_claims(value: dict[str, set[str]]) -> None:
     }
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+def _lifecycle_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _relative_asset_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(_data_root()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def _append_lifecycle_event(event: dict) -> None:
+    path = _lifecycle_manifest_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        **event,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _mapping_email(value) -> str:
+    if not isinstance(value, dict):
+        return ""
+    user = value.get("user") if isinstance(value.get("user"), dict) else {}
+    credentials = value.get("credentials") if isinstance(value.get("credentials"), dict) else {}
+    return str(
+        value.get("email")
+        or value.get("username")
+        or user.get("email")
+        or credentials.get("email")
+        or ""
+    ).strip().lower()
+
+
+def _move_paths(paths: list[Path], bucket: str, platform: str, stamp: str) -> list[str]:
+    destination = _lifecycle_root(bucket) / platform / stamp
+    moved = []
+    for source in paths:
+        if not source.is_file():
+            continue
+        destination.mkdir(parents=True, exist_ok=True)
+        target = destination / source.name
+        suffix = 1
+        while target.exists():
+            target = destination / f"{source.stem}-{suffix}{source.suffix}"
+            suffix += 1
+        source.replace(target)
+        moved.append(_relative_asset_path(target))
+    return moved
+
+
+def _platform_asset_paths(platform: str, email: str = "", source: str = "") -> list[Path]:
+    normalized_email = str(email or "").strip().lower()
+    source_names = {
+        item.strip()
+        for item in re.split(r"\s*,\s*", str(source or ""))
+        if item.strip()
+    }
+    paths: dict[str, Path] = {}
+
+    for record in _cookie_records(platform):
+        record_email = str(record.get("email") or "").strip().lower()
+        path = record["path"]
+        if path.name in source_names or (normalized_email and record_email == normalized_email):
+            paths[str(path.resolve()).lower()] = path
+
+    if platform in {"chatgpt", "grok", "kiro"}:
+        for record in _token_records(platform):
+            path = record["path"]
+            record_email = _email_from_session(
+                record["data"], path.stem.replace(".session", "")
+            ).strip().lower()
+            if path.name in source_names or (normalized_email and record_email == normalized_email):
+                paths[str(path.resolve()).lower()] = path
+
+    # ChatGPT exports several per-account companion JSON files beside the
+    # canonical session. Move all companions that identify the same mailbox.
+    directory = _token_root() / platform
+    if normalized_email and directory.is_dir():
+        for path in directory.glob("*.json"):
+            if str(path.resolve()).lower() in paths:
+                continue
+            try:
+                data = _read_json(path)
+            except Exception:
+                continue
+            if _mapping_email(data) == normalized_email:
+                paths[str(path.resolve()).lower()] = path
+
+    return sorted(paths.values(), key=lambda item: str(item).lower())
+
+
+def move_platform_asset(
+    platform: str,
+    email: str = "",
+    source: str = "",
+    bucket: str = "exported",
+    reason: str = "",
+) -> dict:
+    """Move one logical platform account out of the active pool, recoverably."""
+    platform = str(platform or "").strip().lower()
+    if platform not in _PLATFORMS:
+        raise AssetError("unsupported platform lifecycle target")
+    stamp = _lifecycle_timestamp()
+    with _CURSOR_LOCK:
+        moved = _move_paths(
+            _platform_asset_paths(platform, email=email, source=source),
+            bucket,
+            platform,
+            stamp,
+        )
+        if moved:
+            _append_lifecycle_event({
+                "bucket": bucket,
+                "platform": platform,
+                "email": str(email or "").strip().lower(),
+                "source": str(source or ""),
+                "reason": str(reason or ""),
+                "files": moved,
+            })
+    if moved:
+        invalidate_record_cache(platform)
+        _invalidate_scanner_report()
+    return {"platform": platform, "email": str(email or "").strip(), "moved": moved}
+
+
+def move_mailbox_asset(
+    email: str,
+    bucket: str = "exported",
+    reason: str = "",
+) -> dict:
+    """Move matching four-field mailbox lines out of ``emails.txt``."""
+    normalized = str(email or "").strip().lower()
+    if not normalized or "@" not in normalized:
+        raise AssetError("mailbox lifecycle target requires an email")
+    source_path = _data_root() / "emails.txt"
+    stamp = _lifecycle_timestamp()
+    moved_lines = []
+    with _CURSOR_LOCK:
+        if source_path.is_file():
+            raw_lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            kept = []
+            for raw in raw_lines:
+                candidate = raw.lstrip("\ufeff").strip().split("----", 1)[0].strip().lower()
+                if candidate == normalized:
+                    moved_lines.append(raw.lstrip("\ufeff"))
+                else:
+                    kept.append(raw)
+            if moved_lines:
+                temporary = source_path.with_suffix(f".{os.getpid()}.tmp")
+                temporary.write_text(
+                    ("\n".join(kept) + "\n") if kept else "",
+                    encoding="utf-8",
+                )
+                temporary.replace(source_path)
+                destination = _lifecycle_root(bucket) / "outlook" / stamp / "emails.txt"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text("\n".join(moved_lines) + "\n", encoding="utf-8")
+                relative = _relative_asset_path(destination)
+                _append_lifecycle_event({
+                    "bucket": bucket,
+                    "platform": "outlook",
+                    "email": normalized,
+                    "reason": str(reason or ""),
+                    "files": [relative],
+                })
+            else:
+                relative = ""
+        else:
+            relative = ""
+    if moved_lines:
+        invalidate_record_cache()
+        _invalidate_scanner_report()
+    return {
+        "platform": "outlook",
+        "email": normalized,
+        "moved": [relative] if relative else [],
+        "lines": len(moved_lines),
+    }
+
+
+def _platform_asset_index(platform: str) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
+    by_email: dict[str, dict[str, Path]] = {}
+    by_source: dict[str, dict[str, Path]] = {}
+
+    def add(path: Path, email: str = "") -> None:
+        resolved = str(path.resolve()).lower()
+        by_source.setdefault(path.name, {})[resolved] = path
+        normalized = str(email or "").strip().lower()
+        if normalized:
+            by_email.setdefault(normalized, {})[resolved] = path
+
+    for record in _cookie_records(platform):
+        add(record["path"], record.get("email", ""))
+    if platform in {"chatgpt", "grok", "kiro"}:
+        for record in _token_records(platform):
+            path = record["path"]
+            add(path, _email_from_session(record["data"], path.stem.replace(".session", "")))
+    directory = _token_root() / platform
+    if directory.is_dir():
+        for path in directory.glob("*.json"):
+            try:
+                add(path, _mapping_email(_read_json(path)))
+            except Exception:
+                continue
+    return (
+        {email: list(paths.values()) for email, paths in by_email.items()},
+        {source: list(paths.values()) for source, paths in by_source.items()},
+    )
+
+
+def archive_asset_results(results: list[dict], bucket: str = "exported", reason: str = "") -> dict:
+    """Move a batch out of active inventory using one index per platform."""
+    _lifecycle_root(bucket)
+    grouped: dict[str, list[dict]] = {}
+    seen = set()
+    for result in results or []:
+        if not isinstance(result, dict):
+            continue
+        platform = str(
+            result.get("platform") or ("outlook" if result.get("kind") == "email" else "")
+        ).strip().lower()
+        email = str(result.get("email") or "").strip().lower()
+        source = str(result.get("source") or "")
+        identity = (platform, email or source.lower())
+        if not platform or identity in seen:
+            continue
+        seen.add(identity)
+        grouped.setdefault(platform, []).append({"email": email, "source": source})
+
+    details = []
+    for item in grouped.pop("outlook", []):
+        detail = move_mailbox_asset(item["email"], bucket=bucket, reason=reason)
+        if detail.get("moved"):
+            details.append(detail)
+
+    for platform, items in grouped.items():
+        by_email, by_source = _platform_asset_index(platform)
+        moved_for_platform = False
+        with _CURSOR_LOCK:
+            for item in items:
+                paths: dict[str, Path] = {}
+                for path in by_email.get(item["email"], []):
+                    paths[str(path.resolve()).lower()] = path
+                for source_name in re.split(r"\s*,\s*", item["source"]):
+                    for path in by_source.get(source_name.strip(), []):
+                        paths[str(path.resolve()).lower()] = path
+                moved = _move_paths(
+                    sorted(paths.values(), key=lambda path: str(path).lower()),
+                    bucket,
+                    platform,
+                    _lifecycle_timestamp(),
+                )
+                if not moved:
+                    continue
+                moved_for_platform = True
+                detail = {"platform": platform, "email": item["email"], "moved": moved}
+                details.append(detail)
+                _append_lifecycle_event({
+                    "bucket": bucket,
+                    "platform": platform,
+                    "email": item["email"],
+                    "source": item["source"],
+                    "reason": str(reason or ""),
+                    "files": moved,
+                })
+        if moved_for_platform:
+            invalidate_record_cache(platform)
+
+    if details:
+        _invalidate_scanner_report()
+    return {
+        "bucket": bucket,
+        "moved_accounts": len(details),
+        "moved_files": sum(len(detail["moved"]) for detail in details),
+        "details": details,
+    }
+
+
+def quarantine_scan_report(
+    report: dict,
+    statuses: tuple[str, ...] | list[str] = QUARANTINE_STATUSES,
+) -> dict:
+    selected_statuses = {
+        str(status or "").strip().lower() for status in statuses if str(status or "").strip()
+    }
+    invalid = selected_statuses.difference(QUARANTINE_STATUSES)
+    if invalid:
+        raise AssetError(f"unsupported automatic quarantine status: {', '.join(sorted(invalid))}")
+    candidates = [
+        item for item in (report or {}).get("items", [])
+        if isinstance(item, dict) and str(item.get("status") or "").lower() in selected_statuses
+    ]
+    result = archive_asset_results(candidates, bucket="quarantine", reason="asset_scan")
+    result["statuses"] = sorted(selected_statuses)
+    result["candidates"] = len(candidates)
+    return result
+
+
+def lifecycle_summary() -> dict:
+    counts = {bucket: {"accounts": 0, "files": 0} for bucket in LIFECYCLE_BUCKETS}
+    path = _lifecycle_manifest_path()
+    if not path.is_file():
+        return counts
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        bucket = str(event.get("bucket") or "") if isinstance(event, dict) else ""
+        if bucket not in counts:
+            continue
+        counts[bucket]["accounts"] += 1
+        files = event.get("files") if isinstance(event.get("files"), list) else []
+        counts[bucket]["files"] += len(files)
+    return counts
 
 
 def _claim_id(scope: str, identity: str) -> str:
@@ -308,6 +681,21 @@ def _mailboxes() -> list[dict]:
     return records
 
 
+def _mailbox_map() -> dict[str, dict]:
+    return {
+        str(record.get("email") or "").strip().lower(): record
+        for record in _mailboxes()
+        if str(record.get("email") or "").strip()
+    }
+
+
+def _mailbox_four_line(record: dict) -> str:
+    return "----".join(
+        str(record.get(key) or "").strip()
+        for key in ("email", "password", "refresh_token", "client_id")
+    )
+
+
 def _no_graph_mailboxes() -> list[dict]:
     path = _data_root() / "outlook_no_graph.txt"
     if not path.is_file():
@@ -387,64 +775,52 @@ def registered_mailbox_usage() -> dict[str, tuple[str, ...]]:
     }
 
 
-def _verification_for(platform: str, email: str, source: str) -> dict | None:
-    """Return a recent normal scan record that identifies this local asset.
+def _verification_payload(platform: str, item: dict) -> dict:
+    verification = {
+        "status": "normal",
+        "checked_at": str(item.get("checked_at") or ""),
+        "evidence": str(item.get("evidence") or ""),
+    }
+    if platform == "chatgpt":
+        verification.update({
+            "plus_trial": str(item.get("plus_trial") or "unknown"),
+            "plus_trial_detail": str(item.get("plus_trial_detail") or ""),
+            "plus_trial_evidence": str(item.get("plus_trial_evidence") or ""),
+            "registration_country": str(item.get("registration_country") or ""),
+            "network_node": str(item.get("network_node") or ""),
+        })
+    return verification
 
-    This import stays lazy because asset_scanner imports this module to read the
-    local pools.  Matching by email handles merged token/cookie records; the
-    source fallback keeps records without an embedded email usable.
-    """
+
+def _verification_indexes(platform: str) -> tuple[dict[str, dict], dict[str, dict]]:
     from common import asset_scanner
 
-    normalized_email = str(email or "").strip().lower()
-    normalized_source = str(source or "").strip()
+    by_email = {}
+    by_source = {}
     for item in asset_scanner.get_report().get("items", []):
         if not isinstance(item, dict):
             continue
         if item.get("platform") != platform or item.get("status") != "normal":
             continue
         item_email = str(item.get("email") or "").strip().lower()
-        if normalized_email and item_email == normalized_email:
-            verification = {
-                "status": "normal",
-                "checked_at": str(item.get("checked_at") or ""),
-                "evidence": str(item.get("evidence") or ""),
-            }
-            if platform == "chatgpt":
-                verification.update({
-                    "plus_trial": str(item.get("plus_trial") or "unknown"),
-                    "plus_trial_detail": str(item.get("plus_trial_detail") or ""),
-                    "plus_trial_evidence": str(item.get("plus_trial_evidence") or ""),
-                    "registration_country": str(item.get("registration_country") or ""),
-                    "network_node": str(item.get("network_node") or ""),
-                })
-            return verification
-        sources = {part.strip() for part in str(item.get("source") or "").split(",")}
-        if normalized_source and normalized_source in sources:
-            verification = {
-                "status": "normal",
-                "checked_at": str(item.get("checked_at") or ""),
-                "evidence": str(item.get("evidence") or ""),
-            }
-            if platform == "chatgpt":
-                verification.update({
-                    "plus_trial": str(item.get("plus_trial") or "unknown"),
-                    "plus_trial_detail": str(item.get("plus_trial_detail") or ""),
-                    "plus_trial_evidence": str(item.get("plus_trial_evidence") or ""),
-                    "registration_country": str(item.get("registration_country") or ""),
-                    "network_node": str(item.get("network_node") or ""),
-                })
-            return verification
-    return None
+        verification = _verification_payload(platform, item)
+        if item_email:
+            by_email[item_email] = verification
+        for source in str(item.get("source") or "").split(","):
+            normalized_source = source.strip()
+            if normalized_source:
+                by_source[normalized_source] = verification
+    return by_email, by_source
 
 
 def _verified_records(platform: str, records: list[dict], source_for) -> list[dict]:
+    by_email, by_source = _verification_indexes(platform)
     verified = []
     for record in records:
         email = str(record.get("email") or "").strip()
         if not email and isinstance(record.get("data"), dict):
             email = _email_from_session(record["data"])
-        verification = _verification_for(platform, email, source_for(record))
+        verification = by_email.get(email.lower()) or by_source.get(str(source_for(record)).strip())
         if verification:
             verified.append({**record, "_verification": verification})
     if not verified:
@@ -460,10 +836,11 @@ def get_email(
     email_provider: str = "",
     pristine_only: bool = False,
     no_graph_only: bool = False,
+    _defer_claim: bool = False,
 ) -> dict:
     output_format = str(output_format or "json").strip().lower()
-    if output_format not in {"json", "line", "password"}:
-        raise AssetError("邮箱 format 仅支持 json、line、password")
+    if output_format not in {"json", "line", "four", "password"}:
+        raise AssetError("邮箱 format 仅支持 json、line、four、password")
     provider_filter = str(email_provider or "").strip().lower()
     if provider_filter and provider_filter not in EMAIL_PROVIDERS:
         raise AssetError("email_provider must be outlook, icloud, temporary, or other")
@@ -489,7 +866,8 @@ def get_email(
         raise AssetError("no_graph_only 不能与 normal_only 同时使用")
     if verified_only:
         records = _verified_records("outlook", records, lambda record: record["_asset_source"])
-    if verified_only or claim_once:
+    should_claim = (verified_only or claim_once) and not _defer_claim
+    if should_claim:
         selected, record, total, remaining, advanced = _claim_record(
             records,
             "outlook",
@@ -501,9 +879,15 @@ def get_email(
         selected, next_index, advanced = _select_index(len(records), "email", index)
         record = records[selected]
         total = len(records)
-    data = record["line"] if output_format in {"line", "password"} else {
-        key: value for key, value in record.items() if key != "line" and not key.startswith("_")
-    }
+    if output_format == "four":
+        data = _mailbox_four_line(record)
+    elif output_format in {"line", "password"}:
+        data = record["line"]
+    else:
+        data = {
+            key: value for key, value in record.items()
+            if key != "line" and not key.startswith("_")
+        }
     result = {
         "kind": "email",
         "format": output_format,
@@ -511,23 +895,25 @@ def get_email(
         "total": total,
         "next_index": next_index,
         "cursor_advanced": advanced,
+        "email": record.get("email", ""),
+        "source": record.get("_asset_source", ""),
         "data": data,
         "email_provider": record.get("email_provider") or classify_email_provider(record.get("email", "")),
     }
     if verified_only:
         result["verification"] = record["_verification"]
-    if verified_only or claim_once:
+    if should_claim:
         result.update({
             "claim_recorded": True,
             "claim_scope": "outlook",
             "remaining": remaining,
         })
     if pristine_only:
-        if verified_only or claim_once:
+        if should_claim:
             _exclude_outlook_sale_from_registration(record.get("email", ""))
         result["pristine"] = True
     if no_graph_only:
-        if verified_only or claim_once:
+        if should_claim:
             _exclude_outlook_sale_from_registration(record.get("email", ""))
         result["no_graph_only"] = True
     return result
@@ -559,55 +945,64 @@ def _account_map(directory: Path) -> dict[str, str]:
 
 
 def _cookie_records(platform: str) -> list[dict]:
-    config = _PLATFORMS[platform]
-    records = []
-    seen_paths = set()
-    for directory in _cookie_directories(platform):
-        accounts = _account_map(directory)
-        paths = directory.glob("full_*.json") if directory.is_dir() else ()
-        for path in paths:
-            resolved = str(path.resolve()).lower()
-            if resolved in seen_paths:
-                continue
-            seen_paths.add(resolved)
-            try:
-                raw_cookies = _read_json(path)
-            except Exception:
-                continue
-            if not isinstance(raw_cookies, list):
-                continue
-            cookies = [
-                item for item in raw_cookies
-                if isinstance(item, dict) and _domain_allowed(item.get("domain", ""), config["domains"])
-            ]
-            key_cookie = next(
-                (item for item in cookies if item.get("name") in config["key_names"] and item.get("value")),
-                None,
-            )
-            if not key_cookie:
-                continue
-            records.append({
-                "path": path,
-                "email": accounts.get(str(key_cookie["value"]), ""),
-                "email_provider": classify_email_provider(accounts.get(str(key_cookie["value"]), "")),
-                "cookies": cookies,
-            })
-    return sorted(records, key=lambda item: (item["path"].stat().st_mtime, str(item["path"]).lower()))
+    def load() -> list[dict]:
+        config = _PLATFORMS[platform]
+        records = []
+        seen_paths = set()
+        for directory in _cookie_directories(platform):
+            accounts = _account_map(directory)
+            paths = directory.glob("full_*.json") if directory.is_dir() else ()
+            for path in paths:
+                resolved = str(path.resolve()).lower()
+                if resolved in seen_paths:
+                    continue
+                seen_paths.add(resolved)
+                try:
+                    raw_cookies = _read_json(path)
+                except Exception:
+                    continue
+                if not isinstance(raw_cookies, list):
+                    continue
+                cookies = [
+                    item for item in raw_cookies
+                    if isinstance(item, dict) and _domain_allowed(item.get("domain", ""), config["domains"])
+                ]
+                key_cookie = next(
+                    (item for item in cookies if item.get("name") in config["key_names"] and item.get("value")),
+                    None,
+                )
+                if not key_cookie:
+                    continue
+                records.append({
+                    "path": path,
+                    "email": accounts.get(str(key_cookie["value"]), ""),
+                    "email_provider": classify_email_provider(accounts.get(str(key_cookie["value"]), "")),
+                    "cookies": cookies,
+                })
+        return sorted(records, key=lambda item: (item["path"].stat().st_mtime, str(item["path"]).lower()))
+
+    key = ("cookies", str(_data_root()).lower(), platform)
+    return _cached_records(key, load)
 
 
 def _token_records(platform: str) -> list[dict]:
     directory = _token_root() / platform
     pattern = "*.session.json" if platform == "chatgpt" else "*.account.json" if platform == "kiro" else "*.sso.json"
-    records = []
-    paths = directory.glob(pattern) if directory.is_dir() else ()
-    for path in paths:
-        try:
-            data = _read_json(path)
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            records.append({"path": path, "data": data})
-    return sorted(records, key=lambda item: (item["path"].stat().st_mtime, str(item["path"]).lower()))
+
+    def load() -> list[dict]:
+        records = []
+        paths = directory.glob(pattern) if directory.is_dir() else ()
+        for path in paths:
+            try:
+                data = _read_json(path)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                records.append({"path": path, "data": data})
+        return sorted(records, key=lambda item: (item["path"].stat().st_mtime, str(item["path"]).lower()))
+
+    key = ("tokens", str(directory.resolve()).lower(), platform, pattern)
+    return _cached_records(key, load)
 
 
 def _cookie_header(cookies: list[dict]) -> str:
@@ -669,6 +1064,37 @@ def _email_provider_from_session(session: dict, fallback: str = "") -> str:
     return classify_email_provider(_email_from_session(session, fallback))
 
 
+def _chatgpt_registration_mailbox_map(records: list[dict]) -> dict[str, dict]:
+    """Merge static Outlook mailboxes with dynamic iCloud registrations."""
+    mailboxes = _mailbox_map()
+    account_passwords = {}
+    for directory in _cookie_directories("chatgpt"):
+        path = directory / "accounts.txt"
+        if not path.is_file():
+            continue
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = raw.strip().split("|", 2)
+            if len(parts) >= 2 and parts[0].strip():
+                account_passwords[parts[0].strip().lower()] = parts[1].strip()
+
+    for record in records:
+        session = record["data"]
+        fallback = record["path"].stem.replace(".session", "")
+        email = _email_from_session(session, fallback)
+        normalized = email.strip().lower()
+        provider = _email_provider_from_session(session, fallback)
+        if not normalized or normalized in mailboxes or provider != "icloud":
+            continue
+        mailboxes[normalized] = {
+            "email": email,
+            "email_provider": "icloud",
+            "password": account_passwords.get(normalized, ""),
+            "refresh_token": "",
+            "client_id": "",
+        }
+    return mailboxes
+
+
 def get_platform_asset(
     platform: str,
     output_format: str = "raw",
@@ -677,6 +1103,7 @@ def get_platform_asset(
     claim_once: bool = False,
     codex_phone_status: str = "",
     email_provider: str = "",
+    _defer_claim: bool = False,
 ) -> dict:
     platform = str(platform or "").strip().lower()
     output_format = str(output_format or "raw").strip().lower()
@@ -692,7 +1119,8 @@ def get_platform_asset(
     if provider_filter and provider_filter not in EMAIL_PROVIDERS:
         raise AssetError("email_provider must be outlook, icloud, temporary, or other")
 
-    token_formats = {"session", "sub2api", "cpa", "chatgpt2api"}
+    token_formats = {"session", "sub2api", "cpa", "chatgpt2api", "email_four"}
+    should_claim = (verified_only or claim_once) and not _defer_claim
     if output_format in {"raw", "cookies", "header"}:
         records = _cookie_records(platform)
         if provider_filter:
@@ -701,7 +1129,7 @@ def get_platform_asset(
             records = []
         if verified_only:
             records = _verified_records(platform, records, lambda record: record["path"].name)
-        if verified_only or claim_once:
+        if should_claim:
             selected, record, total, remaining, advanced = _claim_record(
                 records,
                 platform,
@@ -728,12 +1156,38 @@ def get_platform_asset(
             raise AssetError("Claude 不支持 session、sub2api、cpa 或 chatgpt2api 格式，请使用 cookies/raw/header")
         if platform == "grok" and output_format not in {"session", "sub2api"}:
             raise AssetError("Grok 仅支持 cookies、raw、header、session、sub2api 格式")
+        if output_format == "email_four" and platform != "chatgpt":
+            raise AssetError("email_four 仅适用于 ChatGPT 注册邮箱")
         records = _token_records(platform)
-        if provider_filter:
+        mailbox_records = (
+            _chatgpt_registration_mailbox_map(records)
+            if output_format == "email_four"
+            else {}
+        )
+        if output_format == "email_four":
+            records = [
+                record for record in records
+                if _email_from_session(
+                    record["data"], record["path"].stem.replace(".session", "")
+                ).strip().lower() in mailbox_records
+            ]
+        if provider_filter and output_format == "email_four":
+            records = [
+                record for record in records
+                if mailbox_records[
+                    _email_from_session(
+                        record["data"], record["path"].stem.replace(".session", "")
+                    ).strip().lower()
+                ].get("email_provider") == provider_filter
+            ]
+        elif provider_filter:
             records = [
                 record for record in records
                 if _email_provider_from_session(record["data"], record["path"].stem.replace(".session", "")) == provider_filter
             ]
+        if output_format == "email_four" and not records:
+            provider_label = f" {provider_filter}" if provider_filter else ""
+            raise AssetNotFound(f"没有找到可导出的 ChatGPT{provider_label} 注册邮箱记录")
         if phone_filter:
             records = [
                 record for record in records
@@ -745,7 +1199,7 @@ def get_platform_asset(
                 records,
                 lambda record: record["path"].name,
             )
-        if verified_only or claim_once:
+        if should_claim:
             selected, record, total, remaining, advanced = _claim_record(
                 records,
                 platform,
@@ -771,6 +1225,10 @@ def get_platform_asset(
         }
         if output_format == "session":
             data = session
+        elif output_format == "email_four":
+            mailbox = mailbox_records[email.strip().lower()]
+            data = _mailbox_four_line(mailbox)
+            extra["email_provider"] = mailbox.get("email_provider") or classify_email_provider(email)
         elif platform == "grok":
             data = {"sso_tokens": [str(session.get("sso") or "")], "name": email}
         elif platform == "kiro":
@@ -787,7 +1245,7 @@ def get_platform_asset(
         else:
             data = build_chatgpt2api_account(session, email=email)
     else:
-        raise AssetError("format 仅支持 raw、cookies、header、session、sub2api、cpa、chatgpt2api")
+        raise AssetError("format 仅支持 raw、cookies、header、session、sub2api、cpa、chatgpt2api、email_four")
 
     result = {
         "kind": "platform_cookie",
@@ -798,20 +1256,96 @@ def get_platform_asset(
         "next_index": next_index,
         "cursor_advanced": advanced,
         "email": email,
-        "email_provider": _email_provider_from_session(session, email) if output_format in token_formats else classify_email_provider(email),
+        "email_provider": extra.get("email_provider") or (_email_provider_from_session(session, email) if output_format in token_formats else classify_email_provider(email)),
         "source": source,
         "data": data,
         **extra,
     }
     if verified_only:
         result["verification"] = record["_verification"]
-    if verified_only or claim_once:
+    if should_claim:
         result.update({
             "claim_recorded": True,
             "claim_scope": platform,
             "remaining": remaining,
         })
     return result
+
+
+def export_batch(
+    resource: str,
+    output_format: str = "",
+    limit: int = 100,
+    verified_only: bool = False,
+    email_provider: str = "",
+    codex_phone_status: str = "",
+    include_claimed: bool = False,
+) -> list[dict]:
+    """Build and claim a bounded batch without reparsing files per account."""
+    resource = str(resource or "").strip().lower()
+    if resource not in {"emails", *_PLATFORMS}:
+        raise AssetError("resource must be emails, claude, chatgpt, grok, or kiro")
+    try:
+        bounded_limit = min(500, max(1, int(limit)))
+    except (TypeError, ValueError) as exc:
+        raise AssetError("limit must be an integer") from exc
+    output_format = str(output_format or ("four" if resource == "emails" else "raw")).strip().lower()
+    scope = "outlook" if resource == "emails" else resource
+    with _CURSOR_LOCK:
+        existing_claims = set(_read_claims().get(scope, set()))
+    blocked = set() if include_claimed else existing_claims
+    results = []
+    selected_claims = set()
+    index = 0
+    total = None
+    while len(results) < bounded_limit and (total is None or index < total):
+        try:
+            if resource == "emails":
+                result = get_email(
+                    index=index,
+                    output_format=output_format,
+                    verified_only=verified_only,
+                    claim_once=False,
+                    email_provider=email_provider,
+                    _defer_claim=True,
+                )
+            else:
+                result = get_platform_asset(
+                    resource,
+                    output_format=output_format,
+                    index=index,
+                    verified_only=verified_only,
+                    claim_once=False,
+                    email_provider=email_provider,
+                    codex_phone_status=codex_phone_status,
+                    _defer_claim=True,
+                )
+        except (AssetExhausted, AssetNotFound, AssetUnverified):
+            if not results:
+                raise
+            break
+        total = int(result.get("total") or 0)
+        index += 1
+        identity = _asset_identity(result.get("email", ""), result.get("source", ""))
+        claim = _claim_id(scope, identity)
+        if claim in blocked or claim in selected_claims:
+            continue
+        selected_claims.add(claim)
+        results.append(result)
+    if not results:
+        raise AssetExhausted("没有可批量导出的未领取资产")
+    with _CURSOR_LOCK:
+        claims = _read_claims()
+        claims.setdefault(scope, set()).update(selected_claims)
+        _write_claims(claims)
+    remaining = max(0, (total or len(results)) - index)
+    for result in results:
+        result.update({
+            "claim_recorded": True,
+            "claim_scope": scope,
+            "remaining": remaining,
+        })
+    return results
 
 
 def summary() -> dict:
@@ -827,4 +1361,5 @@ def summary() -> dict:
         },
         "cursors": _read_cursors(),
         "claims": {scope: len(items) for scope, items in sorted(claims.items())},
+        "lifecycle": lifecycle_summary(),
     }

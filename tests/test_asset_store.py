@@ -395,6 +395,186 @@ class AssetStoreTests(unittest.TestCase):
         with self.assertRaises(asset_store.AssetError):
             asset_store.get_platform_asset("claude", "cpa", index=0)
 
+    def test_four_field_email_batch_is_archived_after_export(self):
+        (self.root / "emails.txt").write_text(
+            "first@example.com----pw1----rt1----cid1\n"
+            "second@example.com----pw2\n",
+            encoding="utf-8",
+        )
+
+        results = asset_store.export_batch("emails", output_format="four", limit=2)
+        lifecycle = asset_store.archive_asset_results(
+            results, bucket="exported", reason="test_export"
+        )
+
+        self.assertEqual(
+            [item["data"] for item in results],
+            [
+                "first@example.com----pw1----rt1----cid1",
+                "second@example.com----pw2--------",
+            ],
+        )
+        self.assertEqual(lifecycle["moved_accounts"], 2)
+        self.assertEqual((self.root / "emails.txt").read_text(encoding="utf-8"), "")
+        archived = list((self.root / "runtime" / "assets" / "exported").rglob("emails.txt"))
+        self.assertEqual(len(archived), 2)
+        self.assertEqual(asset_store.summary()["lifecycle"]["exported"]["accounts"], 2)
+
+    def test_definitive_bad_platform_asset_moves_to_quarantine(self):
+        self._write_chatgpt_assets()
+        report = {
+            "items": [{
+                "platform": "chatgpt",
+                "email": "user@example.com",
+                "source": "full_profile_20260101_000000.json,user@example.com.session.json",
+                "status": "banned",
+            }],
+        }
+
+        lifecycle = asset_store.quarantine_scan_report(report)
+
+        self.assertEqual(lifecycle["moved_accounts"], 1)
+        self.assertEqual(lifecycle["moved_files"], 2)
+        self.assertEqual(asset_store.summary()["platforms"]["chatgpt"], {"cookies": 0, "sessions": 0})
+        quarantined = list((self.root / "runtime" / "assets" / "quarantine").rglob("*.json"))
+        self.assertEqual(len(quarantined), 2)
+
+    def test_chatgpt_can_export_registration_mailbox_by_provider(self):
+        (self.root / "emails.txt").write_text(
+            "outlook@outlook.com----pw1----rt1----cid1\n"
+            "icloud@icloud.com----pw2----rt2----cid2\n",
+            encoding="utf-8",
+        )
+        token_dir = self.root / "tokens" / "chatgpt"
+        token_dir.mkdir(parents=True)
+        for email in ("outlook@outlook.com", "icloud@icloud.com"):
+            (token_dir / f"{email}.session.json").write_text(json.dumps({
+                "user": {"email": email},
+                "accessToken": f"token-{email}",
+            }), encoding="utf-8")
+
+        outlook = asset_store.get_platform_asset(
+            "chatgpt", "email_four", index=0, email_provider="outlook"
+        )
+        icloud = asset_store.get_platform_asset(
+            "chatgpt", "email_four", index=0, email_provider="icloud"
+        )
+
+        self.assertEqual(outlook["data"], "outlook@outlook.com----pw1----rt1----cid1")
+        self.assertEqual(outlook["email_provider"], "outlook")
+        self.assertEqual(icloud["data"], "icloud@icloud.com----pw2----rt2----cid2")
+        self.assertEqual(icloud["email_provider"], "icloud")
+
+    def test_chatgpt_icloud_export_uses_registration_account_ledger(self):
+        token_dir = self.root / "tokens" / "chatgpt"
+        token_dir.mkdir(parents=True)
+        (token_dir / "icloud@icloud.com.session.json").write_text(json.dumps({
+            "user": {"email": "icloud@icloud.com"},
+            "accessToken": "access-token",
+        }), encoding="utf-8")
+        cookie_dir = self.root / "cookies" / "chatgpt"
+        cookie_dir.mkdir(parents=True)
+        (cookie_dir / "accounts.txt").write_text(
+            "icloud@icloud.com|chatgpt-password|session-secret\n",
+            encoding="utf-8",
+        )
+
+        result = asset_store.get_platform_asset(
+            "chatgpt", "email_four", index=0, email_provider="icloud"
+        )
+
+        self.assertEqual(
+            result["data"],
+            "icloud@icloud.com----chatgpt-password--------",
+        )
+        self.assertNotIn("session-secret", result["data"])
+
+    def test_chatgpt_icloud_export_allows_dynamic_mailbox_without_password(self):
+        token_dir = self.root / "tokens" / "chatgpt"
+        token_dir.mkdir(parents=True)
+        (token_dir / "icloud@icloud.com.session.json").write_text(json.dumps({
+            "email": "icloud@icloud.com",
+            "accessToken": "access-token",
+        }), encoding="utf-8")
+
+        result = asset_store.get_platform_asset(
+            "chatgpt", "email_four", index=0, email_provider="icloud"
+        )
+
+        self.assertEqual(result["data"], "icloud@icloud.com------------")
+
+    def test_consuming_batch_can_include_previously_claimed_active_account(self):
+        self._write_chatgpt_assets()
+        claimed = asset_store.get_platform_asset("chatgpt", "session", claim_once=True)
+
+        results = asset_store.export_batch(
+            "chatgpt", "session", limit=10, include_claimed=True
+        )
+
+        self.assertEqual([item["email"] for item in results], [claimed["email"]])
+
+    def test_verified_batch_can_include_previously_claimed_normal_account(self):
+        self._write_chatgpt_assets()
+        from common import asset_scanner
+
+        report = {"items": [{
+            "platform": "chatgpt",
+            "email": "user@example.com",
+            "source": "user@example.com.session.json",
+            "status": "normal",
+            "checked_at": "2026-08-16T00:00:00Z",
+        }]}
+        with patch.object(asset_scanner, "get_report", return_value=report):
+            claimed = asset_store.get_platform_asset(
+                "chatgpt", "session", verified_only=True
+            )
+            with self.assertRaises(asset_store.AssetExhausted):
+                asset_store.export_batch(
+                    "chatgpt", "session", verified_only=True, include_claimed=False
+                )
+            results = asset_store.export_batch(
+                "chatgpt", "session", verified_only=True, include_claimed=True
+            )
+
+        self.assertEqual([item["email"] for item in results], [claimed["email"]])
+
+    def test_batch_export_only_selects_cached_normal_accounts(self):
+        self._write_chatgpt_assets()
+        token_dir = self.root / "tokens" / "chatgpt"
+        (token_dir / "bad@example.com.session.json").write_text(json.dumps({
+            "user": {"email": "bad@example.com"},
+            "accessToken": "bad-token",
+        }), encoding="utf-8")
+        from common import asset_scanner
+
+        report = {"items": [
+            {
+                "platform": "chatgpt",
+                "email": "user@example.com",
+                "source": "user@example.com.session.json",
+                "status": "normal",
+                "checked_at": "2026-08-16T00:00:00Z",
+            },
+            {
+                "platform": "chatgpt",
+                "email": "bad@example.com",
+                "source": "bad@example.com.session.json",
+                "status": "banned",
+                "checked_at": "2026-08-16T00:00:00Z",
+            },
+        ]}
+        with patch.object(asset_scanner, "get_report", return_value=report) as get_report:
+            results = asset_store.export_batch(
+                "chatgpt",
+                "session",
+                limit=10,
+                verified_only=True,
+                include_claimed=True,
+            )
+
+        self.assertEqual([item["email"] for item in results], ["user@example.com"])
+        get_report.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -104,7 +104,8 @@ class ProxySwitchTests(unittest.TestCase):
             {"FINGERPRINT_BROWSER": "bitbrowser"},
             clear=False,
         ):
-            with patch.object(outlook_reg_loop, "_bb_call", return_value=response) as request:
+            with patch.object(outlook_reg_loop, "_bb_call", return_value=response) as request, \
+                    patch("common.browser_registry.register") as register:
                 profile_id = outlook_reg_loop.bb_create_for_outlook_reg(
                     "outlook-test",
                     "http://resident:secret@home.test:9000",
@@ -117,6 +118,12 @@ class ProxySwitchTests(unittest.TestCase):
         self.assertEqual(payload["port"], "9000")
         self.assertEqual(payload["proxyUserName"], "resident")
         self.assertEqual(payload["proxyPassword"], "secret")
+        register.assert_called_once_with(
+            "profile-1",
+            name="outlook-test",
+            provider="bitbrowser",
+            api_base=outlook_reg_loop.BB_API,
+        )
 
     def test_outlook_loop_keeps_noproxy_profile_for_clash_tun(self):
         self.assertEqual(

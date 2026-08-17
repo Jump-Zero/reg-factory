@@ -280,6 +280,11 @@ class BitBrowserClient:
 
         result = self._post("/browser/update", data)
         profile_id = result["data"]["id"]
+        try:
+            from common.browser_registry import register
+            register(profile_id, name=name, provider="bitbrowser", api_base=self.api_base)
+        except Exception:
+            pass
         print(f"  browser created: {name} (ID: {profile_id})")
         return profile_id
 
@@ -308,8 +313,14 @@ class BitBrowserClient:
         """Delete browser profile"""
         try:
             self._post("/browser/delete", {"id": profile_id})
+            try:
+                from common.browser_registry import unregister
+                unregister(profile_id)
+            except Exception:
+                pass
+            return True
         except Exception:
-            pass
+            return False
 
     def cleanup_browsers(self, keep=0):
         """Delete all browser profiles (release quota)"""

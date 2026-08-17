@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
-<link rel="stylesheet" href="/static/style.css?v=20260812-outlook-regcol-1">
+<link rel="stylesheet" href="/static/style.css?v=20260816-plus-payment-3">
 </head>
 <body>
 <header class="topbar">
@@ -140,12 +140,44 @@
         <div class="plus-import-head">
           <div>
             <h2>已开通 Plus 导入 SUB2API</h2>
+            <p class="plus-import-copy">授权完成后可直接批量协议提链；每个账号先检查 Plus 优惠资格。</p>
             <span id="plus-import-state" role="status" aria-live="polite">正在检查配置</span>
           </div>
           <div id="plus-run-summary" class="plus-run-summary">等待任务</div>
         </div>
         <div class="plus-import-grid">
           <div class="plus-import-form">
+            <div class="plus-protocol">
+              <div class="plus-protocol-head">
+                <span>批量协议提链</span>
+                <small id="plus-protocol-state">正在检查协议引擎</small>
+              </div>
+              <div class="plus-protocol-grid">
+                <label class="plus-field"><span>账号来源</span><select id="plus-protocol-source"><option value="saved">本次 / 已授权账号</option><option value="pool">号池有资格账号</option></select></label>
+                <label class="plus-field"><span>协议操作</span><select id="plus-protocol-action"><option value="">只授权导入</option><option value="extract">批量协议提链</option><option value="pay">批量协议支付（PayPal）</option></select></label>
+                <label class="plus-field"><span>提链渠道</span><select id="plus-protocol-method">
+                  <option value="paypal">PayPal · US / USD</option>
+                  <option value="gopay">GoPay · ID / IDR</option>
+                  <option value="gcash">GCash · PH / PHP</option>
+                  <option value="grabpay">GrabPay · PH / PHP</option>
+                  <option value="upi">UPI · IN / INR</option>
+                  <option value="ideal">iDEAL · NL / EUR</option>
+                  <option value="pix">PIX · BR / BRL</option>
+                  <option value="kakao">Kakao Pay · KR / KRW</option>
+                  <option value="blik" disabled>BLIK · PL / PLN（不支持批量）</option>
+                  <option value="twint">TWINT · CH / CHF</option>
+                  <option value="direct_card">Direct Card Checkout · PH / PHP</option>
+                  <option value="momo">MoMo · VN / VND</option>
+                </select></label>
+                <label class="plus-field"><span>协议并发</span><input id="plus-protocol-concurrency" type="number" min="1" max="4" value="1"></label>
+              </div>
+              <div id="plus-payment-confirm-row" class="plus-payment-actions" hidden>
+                <button id="btn-plus-payment-config" class="btn-secondary" type="button">支付资料</button>
+                <span id="plus-payment-details-state">尚未录入本次资料</span>
+                <label class="plus-payment-confirm"><input id="plus-payment-confirm" type="checkbox"><span>确认执行真实 PayPal 支付</span></label>
+              </div>
+              <div id="plus-protocol-note" class="plus-protocol-note">只处理命中免费 Plus 优惠的已授权账号；执行前会实时复检资格。</div>
+            </div>
             <label class="plus-field plus-field-wide">
               <span>Plus 邮箱 / Cookie / OAuth Token（每行一个）</span>
               <textarea id="plus-account-input" spellcheck="false" autocomplete="off"
@@ -175,19 +207,36 @@
             <label class="plus-toggle"><input id="plus-skip-phone" type="checkbox"><span>跳过手机号 / 2FA 验证</span></label>
             <label class="plus-toggle"><input id="plus-no-import" type="checkbox"><span>仅保存凭据，不导入 SUB2API</span></label>
             <div class="plus-import-actions">
-              <button id="btn-plus-import" class="btn-run" type="button">开始登录并接码</button>
+              <button id="btn-plus-import" class="btn-run" type="button">开始授权导入</button>
+              <button id="btn-plus-protocol-run" class="btn-secondary" type="button">执行协议任务</button>
               <button id="btn-plus-stop" class="btn-secondary" type="button" disabled>停止任务</button>
             </div>
           </div>
           <div class="plus-log-surface">
             <div class="plus-stage-row">
-              <span>邮箱登录</span><span>手机号验证</span><span>OAuth 换码</span><span>SUB2API</span>
+              <span>邮箱登录</span><span>手机号验证</span><span>OAuth / SUB2API</span><span>资格 / 协议提链</span>
             </div>
             <pre id="plus-run-log" data-empty="任务日志"></pre>
           </div>
         </div>
       </div>
     </section>
+
+    <dialog id="plus-payment-dialog" class="plus-payment-dialog" aria-labelledby="plus-payment-title">
+      <div class="plus-payment-dialog-head">
+        <div><h3 id="plus-payment-title">本次 PayPal 支付资料</h3><span>仅用于当前任务，不写入配置或报告</span></div>
+        <button id="btn-plus-payment-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="plus-payment-dialog-body">
+        <label class="plus-field plus-field-wide"><span>卡片（每行一张）</span><textarea id="plus-payment-cards" spellcheck="false" autocomplete="off" placeholder="卡号|MM/YY|CVC"></textarea></label>
+        <label class="plus-field plus-field-wide"><span>美国账单地址（每行一个）</span><textarea id="plus-payment-addresses" spellcheck="false" autocomplete="off" placeholder="街道|城市|州|邮编"></textarea></label>
+        <label class="plus-field plus-field-wide"><span>手机号接码（每行一个）</span><textarea id="plus-payment-phones" spellcheck="false" autocomplete="off" placeholder="+国家码手机号----短信记录 URL"></textarea></label>
+      </div>
+      <div class="plus-payment-dialog-foot">
+        <span id="plus-payment-dialog-message" role="status" aria-live="polite"></span>
+        <button id="btn-plus-payment-apply" class="btn-run" type="button">用于本次任务</button>
+      </div>
+    </dialog>
 
     <!-- 邮箱池视图 -->
     <section id="view-mailpool" style="display:none">
@@ -238,6 +287,10 @@
               <label class="asset-scan-concurrency"><span>平台并行</span>
                 <select id="asset-scan-concurrency"><option value="1" selected>1（最稳）</option><option value="2">2</option></select>
               </label>
+              <label class="asset-scan-concurrency"><span>账号并行</span>
+                <select id="asset-scan-account-concurrency"><option value="1">1</option><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select>
+              </label>
+              <label class="asset-scan-concurrency"><input id="asset-scan-plus-trial" type="checkbox"><span>同时检测 Plus 资格</span></label>
               <button id="btn-scan-current" class="btn-secondary" type="button">扫描当前类型</button>
               <button id="btn-scan-all" class="btn-run" type="button">一键扫描全部</button>
             </div>
@@ -350,6 +403,9 @@
               </select>
             </label>
             <label class="asset-field"><span>输出格式</span><select id="asset-format"></select></label>
+            <label class="asset-field"><span>注册邮箱来源</span>
+              <select id="asset-email-provider"><option value="">全部</option><option value="outlook">Outlook 四段式</option><option value="icloud">iCloud</option></select>
+            </label>
             <div class="asset-field asset-pick-field"><span>取用方式</span>
               <div class="asset-mode-switch" role="group" aria-label="资产取用方式">
                 <button type="button" data-asset-pick="sequence" class="active">顺序取用</button>
@@ -357,6 +413,7 @@
               </div>
             </div>
             <label class="asset-field"><span>Index</span><input id="asset-index" type="number" min="0" step="1" value="0" disabled></label>
+            <label class="asset-field"><span>批量数量</span><input id="asset-batch-limit" type="number" min="1" max="500" step="1" value="100"></label>
           </div>
           <label class="asset-normal-only">
             <input id="asset-normal-only" type="checkbox">
@@ -374,6 +431,7 @@
 
           <div class="asset-actions">
             <button id="btn-call-asset" class="btn-run" type="button">直接领取</button>
+            <button id="btn-export-assets" class="btn-secondary" type="button">批量导出正常号并移出号池</button>
             <select id="asset-reset-scope" aria-label="领取记录重置范围"><option value="current">重置当前资产领取记录</option><option value="all">重置全部领取记录</option></select>
             <button id="btn-reset-asset" class="btn-secondary" type="button">重置</button>
             <span id="asset-call-msg" class="asset-message" role="status" aria-live="polite"></span>
@@ -385,7 +443,7 @@
           <div class="asset-section-head"><div><h3 id="asset-reference-title">接口速查</h3></div></div>
           <div class="asset-endpoints">
             <code>GET /api/assets/emails</code><span><code>json</code>、<code>line</code></span>
-            <code>GET /api/assets/cookies/chatgpt</code><span><code>raw</code>、<code>header</code>、<code>session</code>、<code>sub2api</code>、<code>cpa</code>、<code>chatgpt2api</code></span>
+            <code>GET /api/assets/cookies/chatgpt</code><span><code>raw</code>、<code>header</code>、<code>session</code>、<code>email_four</code>、<code>sub2api</code>、<code>cpa</code>、<code>chatgpt2api</code></span>
             <code>GET /api/assets/cookies/claude</code><span><code>raw</code>、<code>header</code></span>
             <code>GET /api/assets/cookies/grok</code><span><code>raw</code>、<code>header</code>、<code>session</code>、<code>sub2api</code></span>
             <code>GET /api/assets/cookies/kiro</code><span><code>session</code></span>
@@ -449,6 +507,14 @@
             <label class="network-field"><span>Grok</span><select id="proxy-mode-grok" data-platform-proxy><option value="inherit">继承全局</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">动态住宅 IP</option></select></label>
             <label class="network-field"><span>Kiro</span><select id="proxy-mode-kiro" data-platform-proxy><option value="inherit">继承全局</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">动态住宅 IP</option></select></label>
             <label class="network-field"><span>轮换/测试目标</span><select id="proxy-platform-target"><option value="">全局出口</option><option value="outlook">Outlook</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="grok">Grok</option><option value="kiro">Kiro</option></select></label>
+          </div>
+        </div>
+
+        <div class="network-fields" data-guide="protocol-proxy-overrides">
+          <div class="network-section-title">协议出口</div>
+          <div class="network-grid">
+            <label class="network-field"><span>提链代理</span><input id="proxy-plus-link-override" type="password" autocomplete="off" placeholder="http://user:pass@host:port"></label>
+            <label class="network-field"><span>支付代理</span><input id="proxy-plus-bind-override" type="password" autocomplete="off" placeholder="http://user:pass@host:port"></label>
           </div>
         </div>
 
@@ -519,6 +585,6 @@
 
 <div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
 
-<script src="/static/app.js?v=20260815-recycle-1"></script>
+<script src="/static/app.js?v=20260816-view-state-10"></script>
 </body>
 </html>

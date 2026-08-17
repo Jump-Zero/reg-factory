@@ -9,6 +9,8 @@ let k12Url = 'http://127.0.0.1:8806/';
 let k12Starting = false;
 let plusRun = null;
 let plusEventSource = null;
+let plusAfterImport = null;
+let plusProtocolStatus = null;
 let proxyMode = 'clash_auto';
 let assetPickMode = 'sequence';
 let assetScanData = null;
@@ -53,6 +55,8 @@ let guideTarget = null;
 let guidePositionFrame = null;
 let scriptsReady = null;
 let guideOriginalProxyMode = null;
+const initializedViews = new Set(['run']);
+const scriptDrafts = new Map();
 
 const $ = (s, r=document) => r.querySelector(s);
 const $$ = (s, r=document) => [...r.querySelectorAll(s)];
@@ -206,16 +210,27 @@ async function showView(v){
   $('#view-embed').style.display = v==='embed' ? 'block' : 'none';
   $('#view-mailpool').style.display = v==='mailpool' ? 'block' : 'none';
   $('#view-k12').style.display = v==='k12' ? 'block' : 'none';
-  $('#view-plus').style.display = v==='plus' ? 'block' : 'none';
+  $('#view-plus').style.display = v==='plus' ? 'flex' : 'none';
   $$('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.view===v));
   if(v!=='run' && v!=='embed') $$('.scriptbtn').forEach(b=>b.classList.remove('active'));
-  if(v==='env') return loadEnv();
-  if(v==='assets') return loadAssetPanel();
-  if(v==='network') return loadProxyPanel();
-  if(v==='mailpool') return loadMailpool();
-  if(v==='k12') return openK12Channel();
-  if(v==='plus') return loadPlusImportStatus();
-  return Promise.resolve();
+  if(initializedViews.has(v)) return Promise.resolve();
+  const loaders = {
+    env:loadEnv,
+    assets:loadAssetPanel,
+    network:loadProxyPanel,
+    mailpool:loadMailpool,
+    k12:openK12Channel,
+    plus:loadPlusImportStatus,
+  };
+  const loader = loaders[v];
+  if(!loader) return Promise.resolve();
+  initializedViews.add(v);
+  try{
+    return await loader();
+  }catch(error){
+    initializedViews.delete(v);
+    throw error;
+  }
 }
 $$('.navbtn').forEach(b=> b.onclick = ()=> showView(b.dataset.view));
 
@@ -282,6 +297,8 @@ async function loadProxyPanel(includeNodes=false){
     $('#proxy-clash-group').value = config.CLASH_GROUP || '';
     $('#proxy-residential-url').value = config.REG_FACTORY_PROXY || '';
     $('#proxy-residential-pool').value = config.REG_FACTORY_PROXY_POOL || '';
+    $('#proxy-plus-link-override').value = config.REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE || '';
+    $('#proxy-plus-bind-override').value = config.REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE || '';
     $('#proxy-rotate-url').value = config.REG_FACTORY_PROXY_ROTATE_URL || '';
     $('#proxy-rotate-method').value = config.REG_FACTORY_PROXY_ROTATE_METHOD || 'GET';
     $('#proxy-chatgpt-retries').value = config.CHATGPT_RESIDENTIAL_ROTATE_RETRIES || '3';
@@ -321,6 +338,8 @@ function collectProxyConfig(){
     CLASH_FIXED_NODE: $('#proxy-fixed-node').value,
     REG_FACTORY_PROXY: $('#proxy-residential-url').value.trim(),
     REG_FACTORY_PROXY_POOL: $('#proxy-residential-pool').value.trim(),
+    REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE: $('#proxy-plus-link-override').value.trim(),
+    REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE: $('#proxy-plus-bind-override').value.trim(),
     REG_FACTORY_PROXY_ROTATE_URL: $('#proxy-rotate-url').value.trim(),
     REG_FACTORY_PROXY_ROTATE_METHOD: $('#proxy-rotate-method').value,
     CHATGPT_RESIDENTIAL_ROTATE_RETRIES: $('#proxy-chatgpt-retries').value,
@@ -405,8 +424,8 @@ $('#btn-refresh-nodes').onclick = ()=>loadProxyPanel(true);
 
 // ---------------------------------------------------------------- 本地资产 API
 const ASSET_FORMATS = {
-  emails: ['json', 'line'],
-  chatgpt: ['cookies', 'raw', 'header', 'session', 'sub2api', 'cpa', 'chatgpt2api'],
+  emails: ['four', 'json', 'line'],
+  chatgpt: ['cookies', 'raw', 'header', 'session', 'email_four', 'sub2api', 'cpa', 'chatgpt2api'],
   claude: ['cookies', 'raw', 'header'],
   grok: ['cookies', 'raw', 'header', 'session', 'sub2api'],
   kiro: ['session'],
@@ -419,7 +438,7 @@ const ASSET_SCAN_PLATFORM_LABELS = {
   outlook:'Outlook', chatgpt:'ChatGPT', claude:'Claude', grok:'Grok', kiro:'Kiro',
 };
 const ASSET_PLUS_TRIAL_LABELS = {
-  eligible:'可试用', zero_price:'0 元优惠', ineligible:'暂无优惠', active:'已有套餐', unknown:'资格未知', disabled:'检测关闭',
+  eligible:'待确认', zero_price:'0 元试用', discount:'有折扣（非0元）', ineligible:'暂无优惠', active:'已有套餐', unknown:'资格未知', disabled:'检测关闭',
 };
 const PLATFORM_REG_NUM = { claude:1, chatgpt:2, grok:3, kiro:4 };
 const PLATFORM_REG_LABELS = { 1:'Claude', 2:'ChatGPT', 3:'Grok', 4:'Kiro' };
@@ -455,6 +474,9 @@ function updateAssetFormats(){
   });
   $('#asset-normal-only').disabled = resource !== 'emails';
   $('.asset-normal-only').classList.toggle('disabled', resource !== 'emails');
+  const provider = $('#asset-email-provider');
+  provider.disabled = !['emails', 'chatgpt'].includes(resource);
+  if(provider.disabled) provider.value = '';
   updateAssetRequestPreview();
 }
 
@@ -466,6 +488,8 @@ function buildAssetRequest(){
   if(resource === 'emails' && $('#asset-normal-only').checked){
     params.set('normal_only', 'true');
   }
+  const emailProvider = $('#asset-email-provider').value;
+  if(emailProvider) params.set('email_provider', emailProvider);
   if(assetPickMode === 'index'){
     const index = Math.max(0, parseInt($('#asset-index').value || '0', 10));
     params.set('index', String(index));
@@ -776,6 +800,8 @@ function renderAssetScan(data){
   $('#btn-scan-current').disabled = !!scan.running;
   $('#btn-scan-selected').disabled = !!scan.running || getCheckedScanEmails().length === 0;
   $('#asset-scan-concurrency').disabled = !!scan.running;
+  $('#asset-scan-account-concurrency').disabled = !!scan.running;
+  $('#asset-scan-plus-trial').disabled = !!scan.running;
   if(scan.running){
     const current = progress.current ? ` · ${progress.current}` : '';
     $('#asset-scan-progress-text').textContent = `扫描中 ${completed}/${total}${current}`;
@@ -783,7 +809,9 @@ function renderAssetScan(data){
   }else if(scan.error){
     $('#asset-scan-progress-text').textContent = `扫描失败：${scan.error}`;
   }else if(data.last_scan_at){
-    $('#asset-scan-progress-text').textContent = `扫描完成 ${(data.summary?.statuses?.normal) || 0}/${data.summary?.total || 0} 正常`;
+    const moved = scan.quarantine?.moved_accounts || 0;
+    const quarantine = moved ? `，已隔离 ${moved} 个坏号` : '';
+    $('#asset-scan-progress-text').textContent = `扫描完成 ${(data.summary?.statuses?.normal) || 0}/${data.summary?.total || 0} 正常${quarantine}`;
   }else{
     $('#asset-scan-progress-text').textContent = '尚未扫描';
   }
@@ -792,13 +820,23 @@ function renderAssetScan(data){
   renderAssetScanTable();
 }
 
-async function loadAssetScan(){
+async function loadAssetScan(progressOnly=false){
   if(assetScanTimer){ clearTimeout(assetScanTimer); assetScanTimer = null; }
   try{
-    const response = await fetch('/api/assets/scan', {headers:assetHeaders()});
+    const suffix = progressOnly ? '?progress_only=true' : '';
+    const response = await fetch(`/api/assets/scan${suffix}`, {headers:assetHeaders()});
     const data = await readAssetResponse(response);
+    if(progressOnly && !data.scan?.running){
+      await loadAssetScan(false);
+      return;
+    }
+    if(progressOnly && assetScanData){
+      data.items = assetScanData.items;
+      data.summary = assetScanData.summary;
+      data.last_scan_at = assetScanData.last_scan_at;
+    }
     renderAssetScan(data);
-    if(data.scan?.running) assetScanTimer = setTimeout(loadAssetScan, 1000);
+    if(data.scan?.running) assetScanTimer = setTimeout(()=>loadAssetScan(true), 1000);
   }catch(error){
     setAssetMessage('#asset-scan-msg', error.message || String(error), false);
   }
@@ -812,7 +850,11 @@ async function startAssetScan(all=false){
     const response = await fetch('/api/assets/scan', {method:'POST', headers:assetHeaders(true), body:JSON.stringify({
       platforms,
       concurrency:parseInt($('#asset-scan-concurrency').value || '1', 10),
+      account_concurrency:parseInt($('#asset-scan-account-concurrency').value || '4', 10),
       timeout:15,
+      force:true,
+      quarantine_bad:true,
+      include_plus_trial:$('#asset-scan-plus-trial').checked,
     })});
     await readAssetResponse(response);
     setAssetMessage('#asset-scan-msg', `已开始扫描 ${all || platform === 'all' ? '全部号池' : ASSET_SCAN_PLATFORM_LABELS[platforms[0]]}`, true);
@@ -910,6 +952,52 @@ async function callAssetApi(){
   }finally{ button.disabled = false; }
 }
 
+async function exportAssetBatch(){
+  const button = $('#btn-export-assets');
+  button.disabled = true;
+  const request = buildAssetRequest();
+  const limit = Math.min(500, Math.max(1, parseInt($('#asset-batch-limit').value || '100', 10)));
+  setAssetMessage('#asset-call-msg', '正在筛选正常账号并生成批量导出文件…');
+  try{
+    const response = await fetch('/api/assets/export', {
+      method:'POST',
+      headers:assetHeaders(true),
+      body:JSON.stringify({
+        resource:request.resource,
+        format:request.format,
+        limit,
+        normal_only:true,
+        email_provider:$('#asset-email-provider').value,
+        consume:true,
+        include_claimed:true,
+      }),
+    });
+    if(!response.ok){
+      const data = await readAssetResponse(response);
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const name = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `asset-export-${request.resource}.zip`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    const count = response.headers.get('X-Asset-Count') || '0';
+    const consumed = response.headers.get('X-Asset-Consumed') || '0';
+    setAssetMessage('#asset-call-msg', `已导出 ${count} 个正常账号，${consumed} 个已移出号池`, true);
+    await Promise.all([refreshAssetSummary(true), loadAssetScan()]);
+  }catch(error){
+    setAssetMessage('#asset-call-msg', error.message || String(error), false);
+  }finally{
+    button.disabled = false;
+  }
+}
+
 async function resetAssetCursor(){
   const button = $('#btn-reset-asset');
   button.disabled = true;
@@ -930,11 +1018,13 @@ $('#asset-resource').onchange = updateAssetFormats;
 $('#asset-format').onchange = updateAssetRequestPreview;
 $('#asset-index').oninput = updateAssetRequestPreview;
 $('#asset-normal-only').onchange = updateAssetRequestPreview;
+$('#asset-email-provider').onchange = updateAssetRequestPreview;
 $('#asset-api-key').oninput = updateAssetRequestPreview;
 $$('[data-asset-pick]').forEach(button=>button.onclick=()=>setAssetPickMode(button.dataset.assetPick));
 $('#btn-refresh-assets').onclick = ()=>Promise.all([refreshAssetSummary(), loadAssetScan()]);
 $('#btn-save-asset-key').onclick = saveAssetKey;
 $('#btn-call-asset').onclick = callAssetApi;
+$('#btn-export-assets').onclick = exportAssetBatch;
 $('#btn-reset-asset').onclick = resetAssetCursor;
 $('#btn-copy-url').onclick = ()=>copyText($('#asset-request-url').textContent, $('#btn-copy-url'));
 $('#btn-copy-curl').onclick = ()=>copyText($('#asset-curl-example').textContent, $('#btn-copy-curl'));
@@ -1198,6 +1288,7 @@ $('#btn-k12-start').onclick = startK12Service;
 $('#btn-k12-retry').onclick = openK12Channel;
 
 // ---------------------------------------------------------------- Existing Plus accounts -> Codex OAuth -> SUB2API
+
 function setPlusImportState(text, kind=''){
   const state = $('#plus-import-state');
   if(!state) return;
@@ -1234,13 +1325,15 @@ function appendPlusLog(line){
 
 function setPlusRunControls(running){
   $('#btn-plus-import').disabled = running;
+  $('#btn-plus-protocol-run').disabled = running;
   $('#btn-plus-stop').disabled = !running;
   $('#plus-account-input').disabled = running;
-  $$('#view-plus input, #view-plus select').forEach(element=>{
+  $$('#view-plus .plus-import-form input, #view-plus .plus-import-form select').forEach(element=>{
     if(element.id !== 'plus-keep-on-fail') element.disabled = running;
   });
   $('#custom-sms-input').disabled = running;
   $('#btn-custom-sms-import').disabled = running;
+  $('#btn-plus-payment-config').disabled = running;
 }
 
 function renderCustomSmsSummary(pool){
@@ -1296,15 +1389,173 @@ $('#custom-sms-import').addEventListener('toggle', event=>{
   if(event.currentTarget.open) loadCustomSmsPool();
 });
 
-function monitorPlusRun(runId, accepted){
+function setPlusProtocolState(text, kind=''){
+  const node = $('#plus-protocol-state');
+  if(!node) return;
+  node.textContent = text;
+  node.className = kind;
+}
+
+async function loadPlusProtocolStatus(){
+  try{
+    const response = await fetch('/api/chatgpt-plus/protocol-status', {cache:'no-store'});
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const select = $('#plus-protocol-method');
+    (data.methods || []).forEach(method=>{
+      const option = select.querySelector(`option[value="${method.id}"]`);
+      if(!option) return;
+      option.disabled = !method.available || !method.batch_enabled;
+      option.title = method.reason || '';
+    });
+    if(select.selectedOptions[0] && select.selectedOptions[0].disabled){
+      const fallback = [...select.options].find(option=>!option.disabled);
+      if(fallback) select.value = fallback.value;
+    }
+    const poolOption = $('#plus-protocol-source').querySelector('option[value="pool"]');
+    if(poolOption) poolOption.textContent = `号池有资格账号（${data.pool_eligible_count || 0}）`;
+    plusProtocolStatus = data;
+    const payOption = $('#plus-protocol-action').querySelector('option[value="pay"]');
+    if(payOption){
+      payOption.disabled = !data.payment_ready;
+      payOption.title = data.payment_ready ? '' : data.payment_message || 'PayPal 支付资料未配置';
+    }
+    setPlusProtocolState(
+      `${data.message} · 已授权 ${data.account_count || 0} · 号池有资格 ${data.pool_eligible_count || 0}`,
+      data.engine_ready ? 'ok' : 'bad',
+    );
+    syncPlusProtocolAction();
+    return data;
+  }catch(error){
+    setPlusProtocolState(error.message || '协议状态读取失败', 'bad');
+    return null;
+  }
+}
+
+function protocolRequestPayload(emails=[]){
+  const operation = $('#plus-protocol-action').value || 'extract';
+  const payload = {
+    method: $('#plus-protocol-method').value,
+    workers: Number($('#plus-protocol-concurrency').value),
+    source: $('#plus-protocol-source').value,
+    operation,
+    confirm_payment: operation === 'pay' && $('#plus-payment-confirm').checked,
+    emails,
+  };
+  if(operation === 'pay' && hasInlinePaymentDetails()){
+    payload.payment_details = {
+      cards: $('#plus-payment-cards').value,
+      addresses: $('#plus-payment-addresses').value,
+      phones: $('#plus-payment-phones').value,
+    };
+  }
+  return payload;
+}
+
+function hasInlinePaymentDetails(){
+  return [$('#plus-payment-cards'), $('#plus-payment-addresses'), $('#plus-payment-phones')]
+    .some(element=>element.value.trim());
+}
+
+function hasCompleteInlinePaymentDetails(){
+  return [$('#plus-payment-cards'), $('#plus-payment-addresses'), $('#plus-payment-phones')]
+    .every(element=>element.value.trim());
+}
+
+function syncPaymentDetailsState(){
+  const state = $('#plus-payment-details-state');
+  if(hasCompleteInlinePaymentDetails()){
+    state.textContent = '本次资料已录入';
+    state.className = 'ok';
+  }else if(plusProtocolStatus?.payment_configured){
+    state.textContent = '使用引擎默认资料';
+    state.className = '';
+  }else{
+    state.textContent = '需要录入本次资料';
+    state.className = 'bad';
+  }
+}
+
+function clearInlinePaymentDetails(){
+  $('#plus-payment-cards').value = '';
+  $('#plus-payment-addresses').value = '';
+  $('#plus-payment-phones').value = '';
+  $('#plus-payment-dialog-message').textContent = '';
+  syncPaymentDetailsState();
+}
+
+function syncPlusProtocolAction(){
+  const operation = $('#plus-protocol-action').value;
+  const paying = operation === 'pay';
+  const confirmRow = $('#plus-payment-confirm-row');
+  confirmRow.hidden = !paying;
+  if(paying){
+    $('#plus-protocol-method').value = 'paypal';
+    $('#plus-protocol-concurrency').value = '1';
+    $('#plus-protocol-note').textContent = 'PayPal 支付资料可在本次任务临时录入；每个账号支付前仍会实时复检 Plus 优惠。';
+    syncPaymentDetailsState();
+  }else{
+    $('#plus-payment-confirm').checked = false;
+    $('#plus-protocol-note').textContent = '号池来源只载入缓存为有资格的账号；所有账号执行前都会再次实时复检。';
+  }
+  $('#plus-protocol-concurrency').disabled = paying || !!plusRun;
+}
+
+async function startPlusProtocolBatch(emails=[]){
+  if(plusRun) return;
+  const operation = $('#plus-protocol-action').value || 'extract';
+  const method = $('#plus-protocol-method').selectedOptions[0];
+  if(!method || method.disabled){
+    setPlusProtocolState(method?.title || '请选择可执行的提链渠道', 'bad');
+    return;
+  }
+  if(operation === 'pay'){
+    if(!hasCompleteInlinePaymentDetails() && !plusProtocolStatus?.payment_configured){
+      setPlusProtocolState('请先录入本次 PayPal 支付资料', 'bad');
+      $('#plus-payment-dialog').showModal();
+      return;
+    }
+    if(!$('#plus-payment-confirm').checked){
+      setPlusProtocolState('执行真实支付前必须勾选支付确认', 'bad');
+      return;
+    }
+    if(!window.confirm('将对选中的 Plus 优惠账号执行真实 PayPal 支付。确认继续？')) return;
+  }
+  const label = method.textContent.split(' · ')[0];
+  const operationLabel = operation === 'pay' ? '批量支付' : '批量提链';
+  setPlusProtocolState(`正在检查 Plus 优惠并创建 ${label} ${operationLabel}任务`);
+  setPlusRunControls(true);
+  try{
+    const response = await fetch('/api/chatgpt-plus/protocol-batch', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(protocolRequestPayload(emails)),
+    });
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `协议任务创建失败 (${response.status})`);
+    const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
+    if(skipped) appendPlusLog(`[protocol] 资格不符或状态未知，跳过 ${skipped} 个账号`);
+    if(operation === 'pay') clearInlinePaymentDetails();
+    setPlusProtocolState(`已创建 ${data.accepted} 个账号的 ${label} ${operationLabel}任务`, 'ok');
+    monitorPlusRun(data.run_id, data.accepted, operation === 'pay' ? 'payment' : 'protocol');
+  }catch(error){
+    setPlusProtocolState(error.message || String(error), 'bad');
+    setPlusRunControls(false);
+  }
+}
+
+function monitorPlusRun(runId, accepted, kind='import'){
   if(plusEventSource) plusEventSource.close();
   plusRun = runId;
-  $('#plus-run-summary').textContent = `${accepted} 个账号运行中`;
+  $('#plus-run-summary').textContent = kind === 'payment' ? `${accepted} 个账号支付中` : kind === 'protocol' ? `${accepted} 个账号提链中` : `${accepted} 个账号运行中`;
   setPlusRunControls(true);
   plusEventSource = new EventSource(`/api/logs/${runId}`);
   plusEventSource.onmessage = event=>{
     appendPlusLog(event.data);
-    if(event.data.includes('[add-phone] 手机验证通过')){
+    if(kind !== 'import'){
+      if(event.data.includes('[protocol][OK]')) $('#plus-run-summary').textContent = kind === 'payment' ? '协议支付持续完成' : '协议提链持续产出结果';
+      else if(event.data.includes('[protocol][FAIL]')) $('#plus-run-summary').textContent = kind === 'payment' ? '协议支付存在失败账号' : '协议提链存在失败账号';
+    }else if(event.data.includes('[add-phone] 手机验证通过')){
       $('#plus-run-summary').textContent = '手机号验证通过，继续 OAuth';
     }else if(event.data.includes('[OK]')){
       $('#plus-run-summary').textContent = '已有账号导入成功';
@@ -1315,18 +1566,32 @@ function monitorPlusRun(runId, accepted){
   plusEventSource.addEventListener('done', event=>{
     let result = {};
     try{ result = JSON.parse(event.data || '{}'); }catch(e){}
-    appendPlusLog(result.returncode === 0 ? '[webui] 批量导入完成' : '[webui] 批量导入结束，请检查失败阶段');
-    $('#plus-run-summary').textContent = result.returncode === 0 ? '全部完成' : '执行结束';
-    setPlusImportState(result.returncode === 0 ? '批量导入完成' : '部分账号未导入', result.returncode === 0 ? 'ok' : 'bad');
+    const succeeded = result.returncode === 0;
+    appendPlusLog(succeeded ? (kind === 'payment' ? '[webui] 批量协议支付完成' : kind === 'protocol' ? '[webui] 批量协议提链完成' : '[webui] 批量导入完成') : '[webui] 任务结束，请检查失败阶段');
+    $('#plus-run-summary').textContent = succeeded ? '全部完成' : '执行结束';
+    if(kind === 'payment') setPlusProtocolState(succeeded ? '批量协议支付完成' : '批量协议支付存在失败', succeeded ? 'ok' : 'bad');
+    else if(kind === 'protocol') setPlusProtocolState(succeeded ? '批量协议提链完成' : '批量协议提链存在失败', succeeded ? 'ok' : 'bad');
+    else setPlusImportState(succeeded ? '批量导入完成' : '部分账号未导入', succeeded ? 'ok' : 'bad');
     plusEventSource.close();
     plusEventSource = null;
     plusRun = null;
     setPlusRunControls(false);
     loadPlusImportStatus();
     loadCustomSmsPool();
+    loadPlusProtocolStatus();
+    if(kind === 'import' && succeeded && plusAfterImport){
+      const pending = plusAfterImport;
+      plusAfterImport = null;
+      startPlusProtocolBatch(pending.emails);
+    }else if(kind !== 'import'){
+      plusAfterImport = null;
+    }
   });
   plusEventSource.onerror = ()=>{
-    if(plusRun) setPlusImportState('日志连接中断，正在等待任务状态', 'bad');
+    if(plusRun){
+      if(kind !== 'import') setPlusProtocolState('日志连接中断，正在等待任务状态', 'bad');
+      else setPlusImportState('日志连接中断，正在等待任务状态', 'bad');
+    }
   };
 }
 
@@ -1334,6 +1599,21 @@ async function startPlusCodexImport(){
   if(plusRun) return;
   const accounts = $('#plus-account-input').value.trim();
   if(!accounts){ setPlusImportState('请粘贴至少一个 Plus 账号', 'bad'); return; }
+  const runProtocol = !!$('#plus-protocol-action').value;
+  if(runProtocol && $('#plus-protocol-method').selectedOptions[0]?.disabled){
+    setPlusProtocolState($('#plus-protocol-method').selectedOptions[0]?.title || '请选择可执行的提链渠道', 'bad');
+    return;
+  }
+  if($('#plus-protocol-action').value === 'pay' && !hasCompleteInlinePaymentDetails() && !plusProtocolStatus?.payment_configured){
+    setPlusProtocolState('请先录入本次 PayPal 支付资料', 'bad');
+    $('#plus-payment-dialog').showModal();
+    return;
+  }
+  if($('#plus-protocol-action').value === 'pay' && !$('#plus-payment-confirm').checked){
+    setPlusProtocolState('授权后执行真实支付前必须勾选支付确认', 'bad');
+    return;
+  }
+  plusAfterImport = null;
   setPlusImportState('正在创建登录与手机号接码任务');
   $('#plus-run-log').textContent = '';
   setPlusRunControls(true);
@@ -1358,8 +1638,9 @@ async function startPlusCodexImport(){
     const data = await readJsonResponse(response);
     if(!response.ok) throw new Error(data.error || `任务创建失败 (${response.status})`);
     $('#plus-account-input').value = '';
+    if(runProtocol) plusAfterImport = {emails: data.accepted_emails || []};
     setPlusImportState(`已接收 ${data.accepted} 个账号，开始登录和手机号接码`, 'ok');
-    monitorPlusRun(data.run_id, data.accepted);
+    monitorPlusRun(data.run_id, data.accepted, 'import');
   }catch(error){
     setPlusImportState(error.message || String(error), 'bad');
     setPlusRunControls(false);
@@ -1379,6 +1660,28 @@ async function stopPlusCodexImport(){
 
 $('#btn-plus-import').onclick = startPlusCodexImport;
 $('#btn-plus-stop').onclick = stopPlusCodexImport;
+$('#btn-plus-protocol-run').onclick = ()=>startPlusProtocolBatch();
+$('#plus-protocol-action').onchange = syncPlusProtocolAction;
+$('#plus-protocol-source').onchange = ()=>loadPlusProtocolStatus();
+$('#btn-plus-payment-config').onclick = ()=>{
+  $('#plus-payment-dialog-message').textContent = '';
+  $('#plus-payment-dialog').showModal();
+};
+$('#btn-plus-payment-close').onclick = ()=>$('#plus-payment-dialog').close();
+$('#btn-plus-payment-apply').onclick = ()=>{
+  const message = $('#plus-payment-dialog-message');
+  if(!hasCompleteInlinePaymentDetails()){
+    message.textContent = '卡片、账单地址和手机号接码都需要填写';
+    message.className = 'bad';
+    return;
+  }
+  message.textContent = '';
+  message.className = '';
+  syncPaymentDetailsState();
+  $('#plus-payment-dialog').close();
+};
+syncPlusProtocolAction();
+loadPlusProtocolStatus();
 
 // ---------------------------------------------------------------- 脚本导航
 function appendNavGroup(nav, title, items, renderItem, open=false){
@@ -1441,13 +1744,18 @@ async function loadScripts(){
 }
 
 function selectScript(id){
-  curSrc = SCRIPTS.find(s=>s.id===id);
-  if(!curSrc) return;
+  const nextSrc = SCRIPTS.find(s=>s.id===id);
+  if(!nextSrc) return;
+  const sameScript = curSrc?.id === id;
+  if(curSrc && !sameScript) captureScriptDraft(curSrc);
+  curSrc = nextSrc;
   $$('.scriptbtn').forEach(b=>b.classList.toggle('active', b.dataset.id===id));
   const active = $(`.scriptbtn[data-id="${id}"]`);
   if(active?.closest('details')) active.closest('details').open = true;
   if(!evtSrc) setRunState('idle', '待运行');
+  if(sameScript && $('#form-panel')?.children.length) return;
   renderForm(curSrc);
+  restoreScriptDraft(curSrc);
 }
 
 // ---------------------------------------------------------------- 渲染表单
@@ -1541,6 +1849,46 @@ function collectArgs(s){
   return args;
 }
 
+function captureScriptDraft(s){
+  const panel = $('#form-panel');
+  if(!s || !panel?.children.length) return;
+  const draft = {};
+  s.args.forEach(a=>{
+    const label = a.flag.replace(/^--/,'');
+    if(a.type==='bool'){
+      draft[a.flag] = !!$(`#f_${label}`)?.checked;
+    }else if(a.type==='multi'){
+      draft[a.flag] = $$(`input[data-multi="${label}"]:checked`).map(x=>x.value);
+    }else{
+      draft[a.flag] = $(`#f_${label}`)?.value ?? '';
+    }
+  });
+  draft.__advancedOpen = !!$('.advanced-fields', panel)?.open;
+  scriptDrafts.set(s.id, draft);
+}
+
+function restoreScriptDraft(s){
+  const draft = scriptDrafts.get(s.id);
+  if(!draft) return;
+  s.args.forEach(a=>{
+    const label = a.flag.replace(/^--/,'');
+    if(a.type==='bool'){
+      const input = $(`#f_${label}`);
+      if(input) input.checked = !!draft[a.flag];
+    }else if(a.type==='multi'){
+      const selected = new Set(draft[a.flag] || []);
+      $$(`input[data-multi="${label}"]`).forEach(input=>{
+        input.checked = selected.has(input.value);
+      });
+    }else{
+      const input = $(`#f_${label}`);
+      if(input && Object.hasOwn(draft, a.flag)) input.value = draft[a.flag];
+    }
+  });
+  const advanced = $('.advanced-fields', $('#form-panel'));
+  if(advanced) advanced.open = !!draft.__advancedOpen;
+}
+
 // ---------------------------------------------------------------- 运行 + SSE 日志
 function setRunState(state, label){
   const el = $('#run-state');
@@ -1551,7 +1899,9 @@ function setRunState(state, label){
 async function runScript(){
   if(curRun && evtSrc){ evtSrc.close(); evtSrc = null; }
   const args = collectArgs(curSrc);
-  const selectedPlatforms = args['--platforms'] || [];
+  const selectedPlatforms = Array.isArray(args['--platforms'])
+    ? args['--platforms']
+    : (args['--platforms'] ? [args['--platforms']] : []);
   const plusRequested = !!args['--plus-subscription']
     && (curSrc.id === 'register_chatgpt' || selectedPlatforms.includes('chatgpt'));
   const log = $('#log'); log.textContent='';

@@ -217,71 +217,82 @@ async def open_and_connect(name, p=None, browser_options=None):
     pid = create_browser_with_retry(bb, name, **(browser_options or {}))
     if not pid:
         raise RuntimeError("create browser failed after retries")
-    # open 也可能遇到 BitBrowser TLS 抖动，多重试几次（BitBrowser API 不稳）
-    data = None
-    max_open = 10
-    for attempt in range(max_open):
+    try:
+        # open 也可能遇到 BitBrowser TLS 抖动，多重试几次（BitBrowser API 不稳）
+        data = None
+        max_open = 10
+        for attempt in range(max_open):
+            try:
+                data = bb.open_browser(pid)
+                break
+            except Exception as e:
+                msg = str(e)
+                if any(k in msg.lower() for k in ["tls", "socket", "econnreset", "network", "timeout", "disconnected", "未知错误", "正在打开", "opening", "启动中", "starting", "busy"]):
+                    print(f"  open browser retry (retry {attempt+1}/{max_open}): {msg[:80]}")
+                    await asyncio.sleep(3)
+                    continue
+                raise
+        if not data:
+            raise RuntimeError("open browser failed after retries")
+        ws = data["ws"]
+        print(f"  ws: {ws}")
+        browser = await p.chromium.connect_over_cdp(ws)
+        context = browser.contexts[0]
+        # BitBrowser can expose a zero-sized startup/navigation tab while its
+        # profile window is still settling. Install routing before creating a clean
+        # registration tab and close only the stale startup pages.
+        await install_traffic_saver(context)
+        startup_pages = list(context.pages)
+        page = await asyncio.wait_for(context.new_page(), timeout=20)
+        for startup_page in startup_pages:
+            try:
+                await asyncio.wait_for(startup_page.close(), timeout=5)
+            except Exception:
+                pass
+        # 强制英文界面：代理 IP 地区（如马来/法国）会让 OpenAI/x.ai 按 Accept-Language
+        # 返回本地化 UI（马来语 'Teruskan'/'Selesaikan...'），导致按钮文本匹配失效。
+        # stealth 只改 navigator.languages（页面内 JS），改不了 HTTP 请求头，故在此统一固定。
         try:
-            data = bb.open_browser(pid)
-            break
+            await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
         except Exception as e:
-            msg = str(e)
-            if any(k in msg.lower() for k in ["tls", "socket", "econnreset", "network", "timeout", "disconnected", "未知错误", "正在打开", "opening", "启动中", "starting", "busy"]):
-                print(f"  open browser retry (retry {attempt+1}/{max_open}): {msg[:80]}")
-                await asyncio.sleep(3)
-                continue
-            raise
-    if not data:
-        raise RuntimeError("open browser failed after retries")
-    ws = data["ws"]
-    print(f"  ws: {ws}")
-    browser = await p.chromium.connect_over_cdp(ws)
-    context = browser.contexts[0]
-    # BitBrowser can expose a zero-sized startup/navigation tab while its
-    # profile window is still settling. Install routing before creating a clean
-    # registration tab and close only the stale startup pages.
-    await install_traffic_saver(context)
-    startup_pages = list(context.pages)
-    page = await asyncio.wait_for(context.new_page(), timeout=20)
-    for startup_page in startup_pages:
+            print(f"  set Accept-Language failed: {e}")
+        await inject_stealth(context, page)
+        return bb, pid, browser, context, page
+    except BaseException:
+        # A failed CDP connection never reaches the caller's teardown block.
+        # Delete synchronously here so cancellation cannot strand the profile.
         try:
-            await asyncio.wait_for(startup_page.close(), timeout=5)
+            bb.close_browser(pid)
         except Exception:
             pass
-    # 强制英文界面：代理 IP 地区（如马来/法国）会让 OpenAI/x.ai 按 Accept-Language
-    # 返回本地化 UI（马来语 'Teruskan'/'Selesaikan...'），导致按钮文本匹配失效。
-    # stealth 只改 navigator.languages（页面内 JS），改不了 HTTP 请求头，故在此统一固定。
-    try:
-        await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-    except Exception as e:
-        print(f"  set Accept-Language failed: {e}")
-    await inject_stealth(context, page)
-    return bb, pid, browser, context, page
+        try:
+            bb.delete_browser(pid)
+        except Exception:
+            pass
+        raise
 
 
 async def teardown(bb, profile_id, delete=True):
     """关闭并（可选）删除窗口"""
-    if hasattr(bb, "close_browser_async"):
-        try:
-            await bb.close_browser_async(profile_id)
-        except Exception:
-            pass
+    try:
+        if hasattr(bb, "close_browser_async"):
+            try:
+                await bb.close_browser_async(profile_id)
+            except Exception:
+                pass
+        else:
+            try:
+                bb.close_browser(profile_id)
+            except Exception:
+                pass
+    finally:
+        # Do not sleep between close and delete. Registration workers are often
+        # cancelled as soon as their result is available.
         if delete:
             try:
                 bb.delete_browser(profile_id)
             except Exception:
                 pass
-        return
-    try:
-        bb.close_browser(profile_id)
-    except Exception:
-        pass
-    await asyncio.sleep(2)
-    if delete:
-        try:
-            bb.delete_browser(profile_id)
-        except Exception:
-            pass
 
 
 async def human_type(page, selector, text, delay_range=(0.05, 0.18)):

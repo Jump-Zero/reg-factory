@@ -34,7 +34,7 @@ curl "http://127.0.0.1:8799/api/assets/emails?format=json&email_provider=icloud"
 curl "http://127.0.0.1:8799/api/assets/emails?normal_only=true"
 ```
 
-`format=json` 返回 `email`、`password`、`refresh_token`、`client_id`；`format=line` 返回原始 `----` 分隔文本。默认领取不读取扫描状态，但会永久排除已经被任意平台注册领取、尝试或成功使用的邮箱，防止同一 Outlook 邮箱再被单独售卖。设置 `normal_only=true` 后只使用最近一次号池扫描缓存筛选，并在响应中返回 `verification`；领取请求本身仍不会联网检测。没有缓存为正常且尚未领取的邮箱时返回 HTTP 409。
+`format=json` 返回 `email`、`password`、`refresh_token`、`client_id`；`format=line` 返回原始 `----` 分隔文本；`format=four` 始终返回 `邮箱----密码----refresh_token----client_id` 四段。默认领取不读取扫描状态，但会永久排除已经被任意平台注册领取、尝试或成功使用的邮箱，防止同一 Outlook 邮箱再被单独售卖。设置 `normal_only=true` 后只使用最近一次号池扫描缓存筛选，并在响应中返回 `verification`；领取请求本身仍不会联网检测。没有缓存为正常且尚未领取的邮箱时返回 HTTP 409。
 
 邮箱与平台资产响应都会包含 `email_provider`：`outlook`、`icloud`、`temporary` 或 `other`。可用 `email_provider` 查询参数按注册邮箱来源筛选。
 
@@ -56,6 +56,12 @@ curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=sub2api"
 # ChatGPT -> 只领取 Outlook 注册账号
 curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=sub2api&email_provider=outlook"
 
+# ChatGPT -> Outlook 注册邮箱四段式
+curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=email_four&email_provider=outlook"
+
+# ChatGPT -> iCloud 注册邮箱
+curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=email_four&email_provider=icloud"
+
 # ChatGPT -> CPA codex 授权 JSON
 curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=cpa"
 
@@ -74,9 +80,25 @@ curl "http://127.0.0.1:8799/api/assets/cookies/kiro?format=session"
 | 平台 | 格式 |
 |---|---|
 | Claude | `cookies`、`raw`、`header` |
-| ChatGPT | `cookies`、`raw`、`header`、`session`、`sub2api`、`cpa`、`chatgpt2api` |
+| ChatGPT | `cookies`、`raw`、`header`、`session`、`email_four`、`sub2api`、`cpa`、`chatgpt2api` |
 | Grok | `cookies`、`raw`、`header`、`session`、`sub2api` |
 | Kiro | `session` |
+
+## 批量文件导出
+
+```bash
+curl -X POST http://127.0.0.1:8799/api/assets/export \
+  -H "Content-Type: application/json" \
+  -d '{"resource":"emails","format":"four","limit":100,"consume":true}' \
+  -o emails.zip
+
+curl -X POST http://127.0.0.1:8799/api/assets/export \
+  -H "Content-Type: application/json" \
+  -d '{"resource":"chatgpt","format":"sub2api","limit":100,"consume":true}' \
+  -o chatgpt-sub2api.zip
+```
+
+批量接口默认带 `normal_only=true`，只导出最近一次扫描缓存中 `status=normal` 的账号；导出请求本身不会联网扫描。ZIP 中每个账号保存为独立文件并附带不含凭据的 `manifest.json`。`consume` 默认是 `true`：ZIP 生成成功后，源记录会移动到 `runtime/assets/exported/`，因此不会再出现在活动号池；文件仍可人工恢复。消费式批量导出默认带 `include_claimed=true`，因此可排空仍在活动目录、但已被旧领取账本标记过的正常记录。设置 `consume=false` 时不会移动源文件，此时 `include_claimed` 默认也是 `false`。
 
 `cookies` 是浏览器扩展通用导入数组，包含 `domain`、`hostOnly`、`httpOnly`、`name`、`path`、`sameSite`、`secure`、`session`、`storeId`、`value`，持久 Cookie 额外包含 `expirationDate`。`raw` 保留注册脚本保存的原始字段，供旧调用兼容。
 
@@ -86,12 +108,15 @@ curl "http://127.0.0.1:8799/api/assets/cookies/kiro?format=session"
 
 ChatGPT 注册可通过 `--country JP` 等两位 ISO 国家码约束出口。脚本会在浏览器启动前校验 Cloudflare `loc`，找不到匹配网络则停止；成功后在 session 和号池扫描结果中写入 `registration_country` 与 `network_node`。
 
+首次打开 ChatGPT 登录页默认单次等待 30 秒、最多 3 次。若超时时登录文档已经提交，流程直接继续；否则在 `auto` Clash 模式下切换到下一个通过探测的节点、断开旧连接并新建标签页，避免在同一条卡死连接上重复等待。可用 `CHATGPT_GOTO_TIMEOUT_SECONDS` 和 `CHATGPT_GOTO_ATTEMPTS` 调整该边界。
+
 扫描 ChatGPT 账号时会额外调用只读优惠资格接口，并在号池扫描结果中写入 `plus_trial`、`plus_trial_detail`、`plus_trial_evidence`。该检测不创建结账单、不领取优惠、不绑卡、不扣款；失败只标记为 `unknown`，不会改变账号的健康状态。
 
 | `plus_trial` | 含义 |
 |---|---|
-| `eligible` | 活动接口明确返回可使用 Plus 免费试用 |
-| `zero_price` | 活动接口返回明确的应付 0 元或格式化 0 元价格 |
+| `eligible` | 兼容旧缓存的活动标记，不代表已确认 0 元，不能进入协议号池 |
+| `zero_price` | 活动接口返回明确的应付 0 元、格式化 0 元价格或 100% 折扣 |
+| `discount` | 活动接口确认有折扣但低于 100%，不是 0 元 |
 | `ineligible` | 活动接口明确返回不符合、已领取或已过期 |
 | `active` | 本地会话表明账号已有 Plus 或其他付费套餐 |
 | `unknown` | 缺少 AT、网络失败或接口没有返回明确资格 |
@@ -99,9 +124,17 @@ ChatGPT 注册可通过 `--country JP` 等两位 ISO 国家码约束出口。脚
 
 默认检测活动为 `plus-1-month-free`。可通过 `ASSET_SCAN_CHATGPT_PLUS_TRIAL=false` 关闭，或用 `ASSET_SCAN_CHATGPT_PLUS_CAMPAIGN` 修改活动标识。检测结果只用于标记，最终优惠仍以用户自行打开的官方结账页为准。
 
+## Plus 协议提链
+
+Plus 导入页把“授权导入”“渠道选择”“批量协议提链”和“批量协议支付”放在一个任务面板中。OAuth 导入成功后可从本地 session 读取当前 AT；也可选择“号池有资格账号”，直接载入资产扫描缓存中标记为 `zero_price` 且存在可用本地 session 的账号。`eligible`、`discount` 和 `unknown` 不会进入协议号池。无论来源如何，协议任务都会逐账号实时复检优惠资格，未再次命中的账号不会进入提链或支付。
+
+渠道目录包括 PayPal、GoPay、GCash、GrabPay、UPI、iDEAL、PIX、Kakao Pay、BLIK、TWINT、Direct Card Checkout 和 MoMo。BLIK 的上游协议不支持批量，因此在批量界面中明确禁用。除 PayPal 外，批量任务只生成支付链接或二维码；PayPal 可通过明确选择“批量协议支付”、勾选真实支付确认并再次确认弹窗后调用上游 `paypal_auto` 执行器。支付资料可仅在本次任务中录入，也可使用协议引擎已有的 `paypal_auto` 配置。任务输入文件以本机权限保护，子进程结束即删除；最终报告不保存 AT、Cookie、卡片、地址或接码 URL。
+
+协议执行复用本机的 GPT-Register-Tool 引擎。默认自动查找同级 `GPT-Register-Tool` 目录；发布包或其他目录可在 `.env` 中设置 `REG_FACTORY_PROTOCOL_PAYMENT_ROOT`。Plus 提链默认跟随 ChatGPT 的 Clash 出口；需要其他出口时，通过 `REG_FACTORY_PLUS_LINK_ROUTE`、`REG_FACTORY_PLUS_BIND_ROUTE` 或对应的显式 proxy override 配置。
+
 ## 号池状态扫描
 
-扫描任务在 WebUI 后台运行，不阻塞其他 API，也不是默认领取的前置条件。支持的平台是 `outlook`、`chatgpt`、`claude`、`grok`、`kiro`。安全扫描模式下，同一平台账号始终串行，每个账号请求前随机等待 3–6 秒，默认复用 6 小时内的结果；出现 429 会立即暂停该平台，连续两次 403/挑战页或网络异常也会暂停，剩余记录标记为 `unknown`。`concurrency` 只控制不同平台的并行数，默认 1、上限 2。扫描依据检测时的官方接口与 HTTP 响应作尽力判断：明确的成功、撤销或停用响应可信度较高，但普通 403、超时和连接失败可能来自出口、地区或目标服务风控，不能据此断言账号永久失效。
+扫描任务在 WebUI 后台运行，不阻塞其他 API，也不是默认领取的前置条件。支持的平台是 `outlook`、`chatgpt`、`claude`、`grok`、`kiro`。安全扫描模式按小批次并行同平台账号，`account_concurrency` 默认 4、上限 8；不同平台并行数由 `concurrency` 控制，默认 1、上限 2。WebUI 默认只做健康扫描，设置 `include_plus_trial=true` 才额外请求 ChatGPT Plus 资格接口。每个账号请求前仍随机等待 3–6 秒，默认复用 6 小时内的结果；出现 429 会暂停下一批，连续两次 403/挑战页或网络异常也会暂停，剩余记录标记为 `unknown`。扫描确认 `banned`、`expired` 或 `invalid` 时默认把源记录移动到 `runtime/assets/quarantine/`；隔离归档在线程中执行，不阻塞 WebUI。`restricted`、`error`、`unknown` 和 `unlock` 不会自动移动。
 
 ```bash
 # 读取当前号池明细、上次结果和正在运行的扫描进度
@@ -110,7 +143,7 @@ curl http://127.0.0.1:8799/api/assets/scan
 # 一键扫描全部号池
 curl -X POST http://127.0.0.1:8799/api/assets/scan \
   -H "Content-Type: application/json" \
-  -d '{"platforms":["outlook","chatgpt","claude","grok","kiro"],"concurrency":1,"timeout":15}'
+  -d '{"platforms":["outlook","chatgpt","claude","grok","kiro"],"concurrency":1,"account_concurrency":4,"quarantine_bad":true,"include_plus_trial":false,"timeout":15}'
 
 # 只扫描 Outlook 邮箱
 curl -X POST http://127.0.0.1:8799/api/assets/scan \

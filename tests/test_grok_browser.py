@@ -68,6 +68,42 @@ class GrokBrowserTests(unittest.TestCase):
 
 
 class GrokBrowserOAuthTests(unittest.IsolatedAsyncioTestCase):
+    def test_failed_import_persists_failed_authorization_status(self):
+        with patch.object(register_grok, "IMPORT_SUB2API", True), patch(
+            "common.session_export.save_grok_token", return_value=True
+        ) as save, patch(
+            "common.uploaders.upload_sub2api_grok",
+            return_value=(False, "authorization denied"),
+        ), patch.object(register_grok.email_pool, "mark_used") as mark_used:
+            result = register_grok.save_and_import_grok(
+                "sso-token", "failed@example.com", "password"
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(save.call_args_list[0].kwargs["authorization_status"], "pending")
+        self.assertEqual(save.call_args_list[1].kwargs["authorization_status"], "failed")
+        mark_used.assert_not_called()
+
+    def test_successful_import_persists_authorized_status(self):
+        with patch.object(register_grok, "IMPORT_SUB2API", True), patch(
+            "common.session_export.save_grok_token", return_value=True
+        ) as save, patch(
+            "common.uploaders.upload_sub2api_grok",
+            return_value=(True, "imported"),
+        ), patch(
+            "common.token_upload_state.mark_uploaded"
+        ) as mark_uploaded, patch.object(
+            register_grok.email_pool, "mark_used"
+        ) as mark_used:
+            result = register_grok.save_and_import_grok(
+                "sso-token", "ok@example.com", "password"
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(save.call_args_list[1].kwargs["authorization_status"], "authorized")
+        mark_uploaded.assert_called_once_with("grok", "sub2api", "ok@example.com")
+        mark_used.assert_called_once()
+
     async def test_http_sso_recovery_uses_existing_account_without_signup(self):
         client = MagicMock()
         client.fetch_sso_token.return_value = "recovered-sso"

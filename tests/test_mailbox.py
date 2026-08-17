@@ -71,6 +71,34 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(reader.call_args.kwargs["received_after"], 123.0)
         self.assertIn("microsoft.com", reader.call_args.kwargs["sender_contains"])
 
+    def test_graph_code_reader_excludes_a_previously_rejected_code(self):
+        messages = [
+            {
+                "subject": "Your OpenAI code is 111111",
+                "from": "noreply@tm.openai.com",
+                "body": "111111",
+                "received": "2026-08-16T14:00:02Z",
+            },
+            {
+                "subject": "Your OpenAI code is 222222",
+                "from": "noreply@tm.openai.com",
+                "body": "222222",
+                "received": "2026-08-16T14:00:01Z",
+            },
+        ]
+        with (
+            patch.object(mailbox, "_get_access_token", return_value="access"),
+            patch.object(mailbox, "fetch_messages", return_value=messages),
+        ):
+            code = mailbox.get_code_by_token(
+                "user@outlook.com",
+                "refresh-token",
+                max_wait=1,
+                exclude_codes=("111111",),
+            )
+
+        self.assertEqual(code, "222222")
+
     def test_refresh_token_classifies_service_abuse_without_echoing_response(self):
         response = MagicMock(status_code=400)
         response.json.return_value = {

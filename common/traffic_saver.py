@@ -130,6 +130,16 @@ def configured_mode(environ=None) -> str:
     return mode
 
 
+def _platform(environ=None) -> str:
+    try:
+        from common import proxy_switch
+
+        return proxy_switch.platform_name(environ)
+    except Exception:
+        env = task_environment(os.environ) if environ is None else environ
+        return str(env.get("REG_FACTORY_PLATFORM") or "").strip().lower()
+
+
 def should_block(url: str, resource_type: str, mode: str, headers=None) -> bool:
     """Decide whether a browser request is safe to omit."""
     normalized_mode = str(mode or "off").lower()
@@ -177,7 +187,9 @@ def bitbrowser_profile_defaults(environ=None) -> dict:
 def bitbrowser_open_payload(profile_id, environ=None) -> dict:
     """Suppress Chromium background traffic on metered BitBrowser profiles."""
     payload = {"id": profile_id}
-    if configured_mode(environ) == "extreme":
+    # ChatGPT's Cloudflare/Turnstile bootstrap relies on browser background
+    # networking; keep the request filter safe but omit these startup switches.
+    if configured_mode(environ) == "extreme" and _platform(environ) != "chatgpt":
         payload["args"] = list(_EXTREME_BITBROWSER_ARGS)
     return payload
 
@@ -197,6 +209,11 @@ async def install(context, environ=None) -> str:
         platform = proxy_switch.platform_name(env) or "global"
     except Exception:
         platform = str(env.get("REG_FACTORY_PLATFORM") or "global").strip().lower()
+    if mode == "extreme" and platform == "chatgpt":
+        # Keep heavy assets filtered, but do not abort prefetch/telemetry
+        # requests that are part of the auth bootstrap on this platform.
+        mode = "balanced"
+        print("  [traffic] chatgpt extreme -> balanced auth-safe filter")
     route_method = getattr(context, "route", None)
     if not callable(route_method) or not getattr(context, "_reg_factory_route_support", True):
         return "off"

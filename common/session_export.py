@@ -442,7 +442,7 @@ def save_chatgpt_tokens(session, email=""):
     return True
 
 
-def save_grok_token(sso, email=""):
+def save_grok_token(sso, email="", authorization_status="", announce=True):
     """落盘 Grok sso token。返回 True/False。"""
     sso = _s(sso)
     if not sso:
@@ -450,10 +450,16 @@ def save_grok_token(sso, email=""):
     pdir = _platform_dir("grok")
     name = _safe_email_name(email or "account")
     path = os.path.join(pdir, f"{name}.sso.json")
+    status = _s(authorization_status).lower()
+    if status not in {"authorized", "failed", "pending", "not_requested"}:
+        status = ""
+    payload = {"email": _s(email), "sso": sso, "ts": int(time.time())}
+    if status:
+        payload["authorization_status"] = status
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"email": _s(email), "sso": sso, "ts": int(time.time())},
-                  f, indent=2, ensure_ascii=False)
-    print(f"  [grok] sso token saved: {path}")
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    if announce:
+        print(f"  [grok] sso token saved: {path}")
     return True
 
 

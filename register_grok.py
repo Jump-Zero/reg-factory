@@ -540,7 +540,11 @@ def register_via_protocol_rt(email, refresh_token, client_id, password, attempts
 def save_and_import_grok(sso, email, password, mark_pool=True, oauth_credentials=None):
     from common.session_export import save_grok_token
 
-    save_grok_token(sso, email)
+    save_grok_token(
+        sso,
+        email,
+        authorization_status="pending" if IMPORT_SUB2API else "not_requested",
+    )
     print("  [OK] grok sso token 已保存")
     if IMPORT_SUB2API:
         from common.token_upload_state import mark_uploaded
@@ -557,6 +561,12 @@ def save_and_import_grok(sso, email, password, mark_pool=True, oauth_credentials
             oauth_credentials=oauth_credentials,
         )
         print(f"  [{'OK' if ok else 'FAIL'}] {msg}")
+        save_grok_token(
+            sso,
+            email,
+            authorization_status="authorized" if ok else "failed",
+            announce=False,
+        )
         if not ok:
             print("  [hint] SSO 已保存，可修复配置后运行: python tools/upload_tokens.py grok")
             return False

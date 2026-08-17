@@ -155,6 +155,37 @@ class EmailPoolTests(unittest.TestCase):
             self.assertIsNone(selected)
             self.assertFalse(os.path.exists(errors))
 
+    def test_retryable_chatgpt_mailbox_ignores_cross_platform_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.join(tmp, "emails.txt")
+            used = os.path.join(tmp, "used.txt")
+            errors = os.path.join(tmp, "errors.txt")
+            registration = os.path.join(tmp, "registration.txt")
+            with open(pool, "w", encoding="utf-8") as f:
+                f.write("retry@example.com----pw----rt----client\n")
+            with open(used, "w", encoding="utf-8") as f:
+                f.write("retry@example.com----pw----reserved\n")
+            with open(errors, "w", encoding="utf-8") as f:
+                f.write("retry@example.com----pw----email_verification_not_completed\n")
+            with open(registration, "w", encoding="utf-8") as f:
+                f.write("retry@example.com\n")
+            with (
+                patch.object(emails, "EMAILS_FILE", pool),
+                patch.object(emails, "_used_file", return_value=used),
+                patch.object(emails, "_error_file", return_value=errors),
+                patch.object(emails, "_outlook_sale_file", return_value=os.path.join(tmp, "sold.txt")),
+                patch.object(emails, "_outlook_registration_file", return_value=registration),
+                patch(
+                    "common.mailbox.check_mailbox_access",
+                    return_value={"ok": True, "permanent": False},
+                ),
+            ):
+                selected = emails.retryable_email(
+                    "chatgpt", require_token=True, validate_token=True
+                )
+
+        self.assertEqual(selected, ("retry@example.com", "pw", "rt", "client"))
+
 
 if __name__ == "__main__":
     unittest.main()

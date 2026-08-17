@@ -1,6 +1,11 @@
 ﻿(function () {
   'use strict';
 
+  const embeddedHost = document.getElementById('plus-workbench');
+  if (embeddedHost && !embeddedHost.firstChild) {
+    const template = document.getElementById('plus-workbench-template');
+    if (template) embeddedHost.appendChild(template.content.cloneNode(true));
+  }
   const $ = (id) => document.getElementById(id);
   if (window.location.pathname.startsWith('/chatgpt-plus')) document.body.classList.add('embedded');
   const WORKBENCH_PREFS_KEY = 'direct-bind:workbench-prefs:v1';
@@ -27,7 +32,9 @@
     'Riley Bennett',
     'Avery Collins',
   ];
-  const API_PREFIX = window.location.pathname.startsWith('/chatgpt-plus')
+  const API_PREFIX = embeddedHost
+    ? '/api/chatgpt-plus/workbench'
+    : window.location.pathname.startsWith('/chatgpt-plus')
     ? '/api/chatgpt-plus/workbench'
     : '/api';
   const apiUrl = (path) => `${API_PREFIX}${String(path || '').startsWith('/') ? path : `/${path}`}`;

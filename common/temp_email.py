@@ -592,7 +592,13 @@ def _icloud_fetch(mailbox_id, email, token, api_key, base_url, sess):
     # instead of the configurable /api/user/mail endpoint.  Preserve that URL
     # verbatim so its embedded secret is never reinterpreted as an API key.
     if raw_url and "/s/" in raw_path:
-        response = sess.get(raw_url, timeout=HTTP_TIMEOUT)
+        # Per-address pages are frequently CDN-cached; a resend must expose
+        # the newly delivered message instead of the prior HTML snapshot.
+        response = sess.get(
+            raw_url,
+            headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
+            timeout=HTTP_TIMEOUT,
+        )
         if response.status_code >= 400:
             raise _icloud_error(response, "fetch")
         if not response.content:
@@ -951,13 +957,20 @@ def _scan_once(mailbox_id, provider, email, token, api_key, base_url,
         if pat:
             # A caller-supplied pattern is a hard constraint. Do not fall back
             # to generic dashed-code extraction, which can match HTML/CSS text.
-            for text in (
-                str(m.get("subject") or ""),
-                _strip_html(str(m.get("html") or m.get("htmlBody") or "")),
-                str(m.get("text") or m.get("textBody") or m.get("content") or m.get("body") or ""),
-                str(m.get("verificationCode") or ""),
-                str(m.get("code") or ""),
-            ):
+            candidates = []
+            for field in ("subject", "html", "htmlBody", "text", "textBody", "content", "body"):
+                value = str(m.get(field) or "")
+                if "<" in value:
+                    value = re.sub(
+                        r"(?is)<(style|script|head|svg)\b[^>]*>.*?</\1\s*>",
+                        " ",
+                        value,
+                    )
+                    value = _strip_html(value)
+                candidates.append(value)
+            for field in ("verificationCode", "code"):
+                candidates.append(str(m.get(field) or ""))
+            for text in candidates:
                 for mm in pat.finditer(text):
                     code = next((g for g in mm.groups() if g), mm.group(0))
                     if str(code) not in excluded:
