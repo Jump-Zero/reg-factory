@@ -395,6 +395,12 @@ def get_report() -> dict:
             ):
                 if key in cached:
                     public[key] = cached[key]
+            if (
+                public.get("status") == "unknown"
+                and str(public.get("evidence") or "").startswith("safe_scan:circuit_breaker:")
+            ):
+                public["status"] = "error"
+                public["detail"] = "上次扫描因网络或风控熔断而未完成，账号仍保留待重试"
             public.setdefault("status", "unknown")
             public.setdefault("detail", "尚未扫描")
             public.setdefault("evidence", "none")
@@ -1559,7 +1565,7 @@ def _scan_platform_safely(
         if breaker_reason:
             for record in records[index:]:
                 result = _record_with_outcome(record, {
-                    "status": "unknown",
+                    "status": "error",
                     "detail": f"为降低风控，本次已暂停 {platform} 后续检测",
                     "evidence": f"safe_scan:circuit_breaker:{breaker_reason}",
                 })

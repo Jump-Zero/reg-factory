@@ -60,7 +60,11 @@ _PLATFORMS = {
 
 EMAIL_PROVIDERS = ("outlook", "icloud", "temporary", "other")
 LIFECYCLE_BUCKETS = ("exported", "quarantine")
-QUARANTINE_STATUSES = ("banned", "expired", "invalid")
+QUARANTINE_STATUSES = ("banned", "expired", "invalid", "unknown")
+DEFINITIVE_UNKNOWN_EVIDENCE = {
+    "local:missing_refresh_token",
+    "claude_account:no_membership",
+}
 _OUTLOOK_EMAIL_DOMAINS = {"outlook.com", "hotmail.com", "live.com", "msn.com"}
 _ICLOUD_EMAIL_DOMAINS = {"icloud.com", "me.com", "mac.com"}
 _TEMPORARY_EMAIL_MARKERS = (
@@ -528,13 +532,22 @@ def quarantine_scan_report(
     invalid = selected_statuses.difference(QUARANTINE_STATUSES)
     if invalid:
         raise AssetError(f"unsupported automatic quarantine status: {', '.join(sorted(invalid))}")
-    candidates = [
-        item for item in (report or {}).get("items", [])
-        if isinstance(item, dict) and str(item.get("status") or "").lower() in selected_statuses
-    ]
+    candidates = []
+    skipped_transient_unknown = 0
+    for item in (report or {}).get("items", []):
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").lower()
+        if status not in selected_statuses:
+            continue
+        if status == "unknown" and str(item.get("evidence") or "").lower() not in DEFINITIVE_UNKNOWN_EVIDENCE:
+            skipped_transient_unknown += 1
+            continue
+        candidates.append(item)
     result = archive_asset_results(candidates, bucket="quarantine", reason="asset_scan")
     result["statuses"] = sorted(selected_statuses)
     result["candidates"] = len(candidates)
+    result["skipped_transient_unknown"] = skipped_transient_unknown
     return result
 
 

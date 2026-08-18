@@ -197,7 +197,7 @@ class AssetScannerTests(unittest.TestCase):
             results = asset_scanner._scan_platform_safely("outlook", records, 15, 0, 0)
 
         scan_record.assert_called_once_with(records[0], 15)
-        self.assertEqual([item["status"] for item in results], ["restricted", "unknown", "unknown"])
+        self.assertEqual([item["status"] for item in results], ["restricted", "error", "error"])
         self.assertIn("circuit_breaker:rate_limited", results[1]["evidence"])
 
     def test_account_concurrency_scans_one_platform_in_bounded_batches(self):
@@ -248,6 +248,30 @@ class AssetScannerTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         inventory.assert_called_once()
+
+    def test_cached_network_circuit_breaker_is_reported_as_scan_error(self):
+        record = {
+            "id": "network-one",
+            "platform": "outlook",
+            "kind": "mailbox",
+            "email": "network@example.com",
+            "email_provider": "other",
+            "source": "emails.txt:1",
+        }
+        asset_scanner._write_cache({
+            "items": [{
+                **record,
+                "status": "unknown",
+                "detail": "paused",
+                "evidence": "safe_scan:circuit_breaker:network",
+            }],
+        })
+
+        with patch.object(asset_scanner, "_inventory_records", return_value=[record]):
+            report = asset_scanner.get_report()
+
+        self.assertEqual(report["items"][0]["status"], "error")
+        self.assertIn("待重试", report["items"][0]["detail"])
 
     def test_fast_health_scan_skips_optional_plus_request(self):
         record = {"id": "chat", "platform": "chatgpt", "email": "chat@example.com"}
