@@ -247,6 +247,51 @@ def mark_used(platform, email, password=""):
     _exclude_from_outlook_sale(platform, email)
 
 
+def used_password(platform, email):
+    """取该邮箱在某平台 ok 行记录的注册密码（已注册账号接管 L1 用），无则 None。"""
+    platform = str(platform or "").strip().lower()
+    if platform in {"", "email", "outlook"}:
+        return None
+    path = _used_file(platform)
+    key = str(email or "").strip().lower()
+    if not key or not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("----")
+            if len(parts) >= 3 and parts[0].strip().lower() == key and parts[-1] == "ok":
+                pw = parts[1].strip()
+                return pw or None
+    return None
+
+
+def clear_error(platform, email):
+    """移除该邮箱在平台 error 文件中的全部行（接管成功后清掉旧失败标记）。"""
+    platform = str(platform or "").strip().lower()
+    if platform in {"", "email", "outlook"}:
+        return
+    path = _error_file(platform)
+    key = str(email or "").strip().lower()
+    if not key or not os.path.exists(path):
+        return
+    with _lock:
+        with file_lock(path):
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            kept = [
+                l for l in lines
+                if not l.strip() or l.strip().startswith("#")
+                or l.split("----")[0].strip().lower() != key
+            ]
+            if len(kept) != len(lines):
+                with open(path, "w", encoding="utf-8") as f:
+                    if kept:
+                        f.write("\n".join(kept) + "\n")
+
+
 REGISTER_PLATFORMS = ("claude", "chatgpt", "grok", "kiro", "tri")
 
 

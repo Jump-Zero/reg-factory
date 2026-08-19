@@ -15,6 +15,7 @@ Grok (x.ai) 自动注册
 
 import argparse
 import asyncio
+import json
 import os
 import random
 import string
@@ -123,6 +124,19 @@ VERIFY_BTN = ["メールを確認", "確認", "确认", "验证邮件", "验证"
 COMPLETE_BTN = ["登録を完了", "アカウントを作成", "Complete registration", "Complete sign up",
                 "Create account", "Sign up", "完成注册", "完成註冊", "完成", "完了", "Done",
                 "登録", "サインアップ", "Continue", "続行", "继续", "Next", "次へ"]
+# 注册成功后 x.ai 不再自动登录，停在"使用邮箱登录"入口，需显式登录拿 cookie
+LOGIN_BTN = ["Login with email", "Sign in with email", "使用邮箱登录", "使用邮箱登入",
+             "メールでログイン", "登入邮箱", "Anmelden mit E-Mail", "Se connecter avec l'e-mail",
+             "Inicia sesión con correo electrónico", "Zaloguj się e-mailem"]
+LOGIN_SUBMIT_BTN = ["Sign in", "Login", "Log in", "登入", "登录", "ログイン", "Anmelden",
+                    "Iniciar sesión", "Zaloguj się", "Continue", "続行", "继续", "繼續", "次へ",
+                    "Next", "下一步", "Volgende", "Avanti", "Weiter", "Suivant"]
+FORGOT_BTN = ["Forgot password", "Forgot your password", "忘记密码", "忘記密碼", "忘记密码了吗",
+              "パスワードをお忘れ", "パスワードを忘れた", "パスワードをお忘れですか",
+              "Parolanızı mı unuttunuz", "Passwort vergessen", "Mot de passe oublié",
+              "Olvidaste tu contraseña", "Nie pamiętasz hasła"]
+RESET_SUBJECT = ("reset", "password", "パスワード", "重置", "重設", "code", "verify",
+                 "verification", "grok", "x.ai", "confirm")
 
 GROK_SENDER = ("x.ai", "grok", "noreply", "no-reply")
 GROK_SUBJECT = ("code", "verify", "verification", "grok", "x.ai", "confirm", "確認", "認証", "コード", "验证", "驗證")
@@ -537,18 +551,32 @@ def register_via_protocol_rt(email, refresh_token, client_id, password, attempts
     return None
 
 
-def save_and_import_grok(sso, email, password, mark_pool=True, oauth_credentials=None):
+def save_and_import_grok(sso, email, password, mark_pool=True, oauth_credentials=None,
+                         skip_if_uploaded=False):
     from common.session_export import save_grok_token
 
     save_grok_token(
         sso,
         email,
         authorization_status="pending" if IMPORT_SUB2API else "not_requested",
+        password=password,
     )
     print("  [OK] grok sso token 已保存")
     if IMPORT_SUB2API:
-        from common.token_upload_state import mark_uploaded
+        from common.token_upload_state import mark_uploaded, uploaded_set
         from common.uploaders import upload_sub2api_grok
+        if skip_if_uploaded and email.strip().lower() in uploaded_set("grok", "sub2api"):
+            print("  [OK] 该账号已在 Sub2API 导入名单中，跳过重复上传")
+            save_grok_token(
+                sso,
+                email,
+                authorization_status="authorized",
+                announce=False,
+                password=password,
+            )
+            if mark_pool:
+                email_pool.mark_used(PLATFORM, email, password)
+            return True
         ok, msg = upload_sub2api_grok(
             SUB2API_URL,
             SUB2API_EMAIL,
@@ -566,6 +594,7 @@ def save_and_import_grok(sso, email, password, mark_pool=True, oauth_credentials
             email,
             authorization_status="authorized" if ok else "failed",
             announce=False,
+            password=password,
         )
         if not ok:
             print("  [hint] SSO 已保存，可修复配置后运行: python tools/upload_tokens.py grok")
@@ -606,6 +635,227 @@ def _recover_grok_sso_http(email: str, password: str) -> str | None:
 
 async def recover_grok_sso_without_cookie(email: str, password: str) -> str | None:
     return await asyncio.to_thread(_recover_grok_sso_http, email, password)
+
+
+def _grok_sso_path(email):
+    try:
+        from config import TOKEN_OUTPUT_DIR
+    except Exception:
+        TOKEN_OUTPUT_DIR = "tokens"
+    from common.session_export import _safe_email_name
+    return os.path.join(TOKEN_OUTPUT_DIR, "grok", f"{_safe_email_name(email)}.sso.json")
+
+
+def _stored_grok_account(email):
+    """查本地是否已有该邮箱的 grok 账号记录（曾注册成功）。
+    返回 (has_sso, stored_pw)。stored_pw 取 sso.json 落盘密码（含注册中途
+    提前落盘的存根），供接管 L1 登录。"""
+    path = _grok_sso_path(email)
+    if not os.path.exists(path):
+        return False, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        pw = str(payload.get("password") or "").strip()
+        return bool(str(payload.get("sso") or "").strip()), pw or None
+    except Exception:
+        return True, None
+
+
+def _stash_early_password(email, pw):
+    """注册完成判定通过后立即把密码写入 sso.json 存根（sso 留空）。
+    若后续登录/收尾崩溃，下次接管 L1 仍可用该密码登录，无需走忘记密码重置。
+    已有非空 sso 或密码的文件不动；无密码字段的旧存根补写。"""
+    if not pw:
+        return
+    path = _grok_sso_path(email)
+    payload = None
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            payload = None
+        if payload and (
+            str(payload.get("sso") or "").strip()
+            or str(payload.get("password") or "").strip()
+        ):
+            return
+    payload = payload if isinstance(payload, dict) else {}
+    payload.update({
+        "email": email,
+        "sso": str(payload.get("sso") or ""),
+        "password": pw,
+        "ts": int(time.time()),
+        "authorization_status": "pending",
+    })
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        print("  [grok] 注册密码已提前落盘（防中断丢密码）")
+    except Exception as e:
+        print(f"  [grok] 提前落密码失败: {str(e)[:60]}")
+
+
+async def _grok_browser_login(page, email, pw):
+    """两步浏览器登录：邮箱→下一步→密码→提交。成功=离开 /sign-in（通常到 grok.com）。"""
+    try:
+        # 入口可能是登录方式选择页（含"使用邮箱登录"），先点掉
+        clicked_entry = await click_any(page, LOGIN_BTN, timeout=4000)
+        if clicked_entry:
+            await asyncio.sleep(1.5)
+        # Step 1: 邮箱
+        ei = page.locator('input[name="email"], input[type="email"]').first
+        if await ei.count() > 0:
+            try:
+                if await ei.is_visible():
+                    await ei.click()
+                    await ei.fill(email)
+                    await asyncio.sleep(0.4)
+                    await click_any(page, LOGIN_SUBMIT_BTN, timeout=6000)
+                    await asyncio.sleep(2)
+            except Exception as e:
+                print(f"  [login] 邮箱步异常: {str(e)[:60]}")
+        # Step 2: 密码（单独一页，等它出现）
+        pw_input = None
+        for _ in range(10):
+            loc = page.locator('input[type="password"]').first
+            try:
+                if await loc.count() > 0 and await loc.is_visible():
+                    pw_input = loc
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(1.5)
+        if not pw_input:
+            print("  [login] 未出现密码框")
+            return False
+        await pw_input.click()
+        await pw_input.type(pw, delay=40)
+        await asyncio.sleep(0.4)
+        await click_any(page, LOGIN_SUBMIT_BTN, timeout=6000)
+        # 结果：跳转离开 /sign-in = 成功
+        try:
+            await page.wait_for_url(lambda u: "/sign-in" not in u, timeout=15000)
+            print("  [login] 登录成功（已离开 sign-in）")
+            return True
+        except Exception:
+            pass
+        # 可能是 Turnstile 拦提交：过墙后补交一次
+        if await _has_turnstile_widget(page):
+            print("  [login] 登录页出现 Turnstile，过墙后重试提交")
+            await ensure_turnstile(page, page.url, passive_s=12)
+            await click_any(page, LOGIN_SUBMIT_BTN, timeout=6000)
+            try:
+                await page.wait_for_url(lambda u: "/sign-in" not in u, timeout=15000)
+                print("  [login] Turnstile 后登录成功")
+                return True
+            except Exception:
+                pass
+        try:
+            err = await page.evaluate("() => (document.body.innerText||'').slice(0, 300)")
+        except Exception:
+            err = ""
+        print(f"  [login] 登录未跳转（密码错/被拦）: {str(err)[:120]}")
+        return False
+    except Exception as e:
+        print(f"  [login] 异常: {str(e)[:80]}")
+        return False
+
+
+async def _grok_forgot_reset(page, email, fetch_code, new_pw):
+    """忘记密码重置：点忘记密码 → 触发重置码邮件 → 收码 → 设新密码。
+    fetch_code(requested_at) 为异步取码回调（Graph RT / 临时邮箱）。
+    成功返回 True（新密码已生效，可登录）。"""
+    try:
+        clicked = await click_any(page, FORGOT_BTN, timeout=5000)
+        if not clicked:
+            # 忘记密码入口通常在密码步：先走邮箱步推进到密码页再找
+            print("  [reset] 首屏无'忘记密码'入口，先推进到密码页")
+            entry = await click_any(page, LOGIN_BTN, timeout=4000)
+            if entry:
+                await asyncio.sleep(1.5)
+            ei0 = page.locator('input[name="email"], input[type="email"]').first
+            if await ei0.count() > 0:
+                try:
+                    if await ei0.is_visible():
+                        await ei0.click()
+                        await ei0.fill(email)
+                        await click_any(page, LOGIN_SUBMIT_BTN, timeout=6000)
+                        await asyncio.sleep(2)
+                except Exception:
+                    pass
+            clicked = await click_any(page, FORGOT_BTN, timeout=5000)
+            if not clicked:
+                print("  [reset] 未找到'忘记密码'入口")
+                return False
+        print(f"  [reset] clicked: {clicked}")
+        await asyncio.sleep(2)
+        # 邮箱可能需要确认一次（已带出则直接下一步）
+        ei = page.locator('input[name="email"], input[type="email"]').first
+        if await ei.count() > 0:
+            try:
+                if await ei.is_visible():
+                    cur = await ei.input_value()
+                    if cur.strip().lower() != email.lower():
+                        await ei.click()
+                        await ei.fill(email)
+                    await click_any(page, LOGIN_SUBMIT_BTN, timeout=6000)
+                    await asyncio.sleep(2)
+            except Exception:
+                pass
+        # 等验证码输入框
+        ci = None
+        for _ in range(10):
+            loc = page.locator('input[name="code"], input[inputmode="numeric"], input[autocomplete="one-time-code"]').first
+            try:
+                if await loc.count() > 0 and await loc.is_visible():
+                    ci = loc
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(1.5)
+        if not ci:
+            print("  [reset] 未出现重置码输入框")
+            return False
+        requested_at = time.time()
+        code = await fetch_code(requested_at)
+        if not code:
+            print("  [reset] 未收到重置码邮件")
+            return False
+        print(f"  [reset] got code: {code}")
+        await ci.click()
+        await ci.type(str(code).replace("-", "").replace(" ", ""), delay=60)
+        await asyncio.sleep(0.5)
+        await click_any(page, LOGIN_SUBMIT_BTN, timeout=6000)
+        await asyncio.sleep(2)
+        # 新密码页：可能有确认密码框 + Turnstile
+        pw_fields = page.locator('input[type="password"]')
+        if await pw_fields.count() == 0:
+            print("  [reset] 未出现新密码输入框")
+            return False
+        for i in range(await pw_fields.count()):
+            fld = pw_fields.nth(i)
+            try:
+                await fld.click()
+                await fld.type(new_pw, delay=40)
+            except Exception:
+                pass
+        await asyncio.sleep(0.5)
+        if await _has_turnstile_widget(page):
+            await ensure_turnstile(page, page.url, passive_s=12)
+        btn = await click_any(page, LOGIN_SUBMIT_BTN + COMPLETE_BTN, timeout=8000)
+        print(f"  [reset] new password submit: {btn}")
+        try:
+            await page.wait_for_url(lambda u: "/reset" not in u and "/forgot" not in u, timeout=15000)
+        except Exception:
+            await asyncio.sleep(3)
+        await dump_state(page, "after-reset")
+        return True
+    except Exception as e:
+        print(f"  [reset] 异常: {str(e)[:80]}")
+        return False
 
 
 async def wait_render(page, max_s=70):
@@ -1065,6 +1315,12 @@ async def register_one(index, total, p, node):
     password = rand_password()
     print(f"\n#{index}/{total} email={email}")
 
+    # 已注册账号接管预检：本地已有该邮箱的 grok 账号记录（曾注册成功但状态文件
+    # 被 recycle/崩溃清掉）时跳过注册，直接登录拿 SSO 导入 Sub2API。
+    stored_has_sso, sso_stored_pw = _stored_grok_account(email)
+    used_pw = email_pool.used_password(PLATFORM, email)
+    working_pw = password
+
     name = f"grok_{time.strftime('%m%d_%H%M%S')}_{index}"
     bb = BitBrowser()
     pid = None
@@ -1134,6 +1390,164 @@ async def register_one(index, total, p, node):
                 print(f"  [email-rpc] CreateEmailValidationCode HTTP {response.status}")
 
         page.on("response", _capture_email_rpc)
+
+        pre_mail = None  # Outlook 预登录句柄（Step 4 会复赋值；接管 L2 兜底用）
+
+        async def _fetch_reset_code(requested_at):
+            """接管 L2 的重置码取码：临时邮箱 / Graph RT / Outlook 网页三路。"""
+            if temp_mb:
+                return await poll_verification_code(
+                    temp_mb["id"], temp_mb["provider"], email=email, token=temp_mb.get("token"),
+                    max_wait=150, poll_interval=5,
+                    sender_hint=GROK_SENDER, subject_hint=RESET_SUBJECT,
+                    code_regex=GROK_CODE_REGEX,
+                )
+            if refresh_token:
+                return await asyncio.to_thread(
+                    get_code_by_token,
+                    email, refresh_token, client_id,
+                    GROK_SENDER, RESET_SUBJECT, GROK_CODE_REGEX,
+                    160, 5, requested_at,
+                )
+            return await get_code_via_direct_browser(email, email_pw, p, pre=pre_mail)
+
+        async def _takeover_ladder(page, exclude=()):
+            """已注册账号接管阶梯：L1 存档密码登录 → L2 忘记密码重置。返回 (ok, working_pw)。"""
+            seen = {pw for pw in exclude if pw}
+            for pw in (sso_stored_pw, used_pw):
+                if not pw or pw in seen:
+                    continue
+                seen.add(pw)
+                print("  [takeover] L1 用存档密码登录")
+                if await _grok_browser_login(page, email, pw):
+                    return True, pw
+                try:
+                    if "/sign-in" not in page.url:
+                        await page.goto(
+                            "https://accounts.x.ai/sign-in",
+                            timeout=45000, wait_until="domcontentloaded",
+                        )
+                        await wait_render(page)
+                except Exception:
+                    pass
+            print("  [takeover] L2 忘记密码重置")
+            try:
+                if "/sign-in" not in page.url:
+                    await page.goto(
+                        "https://accounts.x.ai/sign-in",
+                        timeout=45000, wait_until="domcontentloaded",
+                    )
+                    await wait_render(page)
+            except Exception:
+                pass
+            new_pw = rand_password()
+            if await _grok_forgot_reset(page, email, _fetch_reset_code, new_pw):
+                if "/sign-in" in page.url:
+                    if await _grok_browser_login(page, email, new_pw):
+                        return True, new_pw
+                else:
+                    return True, new_pw
+            return False, None
+
+        async def _finish_grok_session(login_pw, skip_if_uploaded=False):
+            """登录/注册完成后统一收尾：回 grok.com → 收 cookie/SSO → 保存+导入。返回 sso 或 None。"""
+            nonlocal success
+            if "grok.com" not in page.url:
+                try:
+                    await page.goto("https://grok.com/", timeout=45000, wait_until="domcontentloaded")
+                except Exception:
+                    pass
+            else:
+                await asyncio.sleep(2)
+            await dump_state(page, "final")
+            key_val = None
+            for cookie_attempt in range(1, 7):
+                try:
+                    cookies = await ctx.cookies()
+                    key_val = next(
+                        (
+                            item.get("value")
+                            for item in cookies
+                            if item.get("name") in KEY_COOKIES and item.get("value")
+                        ),
+                        None,
+                    )
+                except Exception:
+                    key_val = None
+                if key_val:
+                    break
+                if cookie_attempt < 6:
+                    print(f"  [grok] auth cookie pending ({cookie_attempt}/5), waiting...")
+                    await asyncio.sleep(2)
+            key_val, _ = await save_platform_cookies(
+                ctx, PLATFORM, pid, email=email, password=login_pw, key_cookie_names=KEY_COOKIES
+            )
+            if key_val:
+                try:
+                    oauth_credentials = await acquire_browser_grok_oauth(page, key_val, email)
+                    if not save_and_import_grok(
+                        key_val,
+                        email,
+                        login_pw,
+                        mark_pool=temp_mb is None,
+                        oauth_credentials=oauth_credentials,
+                        skip_if_uploaded=skip_if_uploaded,
+                    ):
+                        return None
+                except Exception as e:
+                    print(f"  [FAIL] 保存/导入 grok token 失败: {e}")
+                    return None
+                success = True
+                email_pool.clear_error(PLATFORM, email)
+                print("  [OK] session cookie saved")
+                return key_val
+            print("  [grok] browser redirect had no session cookie; trying HTTP SSO recovery")
+            try:
+                recovered_sso = await recover_grok_sso_without_cookie(email, login_pw)
+            except Exception as exc:
+                print(f"  [grok] HTTP SSO recovery error: {str(exc)[:120]}")
+                recovered_sso = None
+            if recovered_sso:
+                if not save_and_import_grok(
+                    recovered_sso,
+                    email,
+                    login_pw,
+                    mark_pool=temp_mb is None,
+                    skip_if_uploaded=skip_if_uploaded,
+                ):
+                    return None
+                success = True
+                email_pool.clear_error(PLATFORM, email)
+                print("  [OK] SSO recovered through xAI HTTP cookie chain")
+                return recovered_sso
+            return None
+
+        # --- 接管入口 B：该邮箱已有本地 grok 账号记录（sso.json 有 token/密码存根，
+        # 或 used 文件有 ok 行），跳过注册直接登录接管 ---
+        if stored_has_sso or used_pw or sso_stored_pw:
+            print("  [B] 检测到已有 grok 账号记录，跳过注册流程，直接登录接管")
+            try:
+                await page.goto(
+                    "https://accounts.x.ai/sign-in",
+                    timeout=60000, wait_until="domcontentloaded",
+                )
+            except Exception:
+                pass
+            await wait_render(page)
+            if await _on_page_challenge(page):
+                await pass_page_challenge(page)
+                await wait_render(page, max_s=40)
+            await asyncio.sleep(2)
+            await click_any(page, COOKIE_DISMISS, timeout=3000)
+            login_ok, takeover_pw = await _takeover_ladder(page)
+            if login_ok:
+                sso = await _finish_grok_session(takeover_pw, skip_if_uploaded=True)
+                if sso:
+                    return sso
+                _mark_error("takeover_no_session_cookie")
+                return None
+            _mark_error("already_registered_reset_failed")
+            return None
 
         # Step 1: 直接打开 xAI 注册页。经 grok.com 的 RSC 跨域跳转会产生 CORS/CF 噪音，
         # 且不提供注册所需状态；账号完成后再回 grok.com 落主域 cookie。
@@ -1456,6 +1870,26 @@ async def register_one(index, total, p, node):
         page_url = page.url
         completed = False
         for attempt in range(3):
+            # 已注册成功的页面会切换为"使用邮箱登录"入口，此时 Turnstile 元素
+            # 已不存在，继续 ensure_turnstile 只会空转打码。先检测是否已到
+            # 登录态，是则直接判定完成。
+            if attempt > 0:
+                try:
+                    switched = await page.evaluate(
+                        """() => {
+                            const btns = [...document.querySelectorAll('button,a')].map(el => (el.innerText||'').trim());
+                            const hasLogin = btns.some(t => /使用邮箱登录|Sign in with email|Login with email|メールでログイン|使用邮箱登入|登入邮箱|Email.*login|login.*email/i.test(t));
+                            const hasDone = btns.some(t => /完成注册|完成註冊|Complete registration|登録を完了|Complete sign up|Done|完了/i.test(t));
+                            const hasForm = !!document.querySelector('input[name="givenName"],input[name="familyName"],input[type="password"]');
+                            return hasLogin && !hasDone && !hasForm;
+                        }"""
+                    )
+                except Exception:
+                    switched = False
+                if switched:
+                    print("  [6] 页面已切换到登录入口，判定注册成功")
+                    completed = True
+                    break
             has_token = await ensure_turnstile(page, page_url, passive_s=18)
             done = await click_any(page, COMPLETE_BTN, timeout=8000)
             print(f"  [6] complete: btn={done} turnstile={has_token} (attempt {attempt+1}/3)")
@@ -1470,86 +1904,61 @@ async def register_one(index, total, p, node):
             if "/sign-up" not in cur:
                 completed = True
                 break
+            # x.ai 注册成功后有时 URL 不变，仅页面内容切换为登录入口
+            try:
+                switched = await page.evaluate(
+                    """() => {
+                        const btns = [...document.querySelectorAll('button,a')].map(el => (el.innerText||'').trim());
+                        const hasLogin = btns.some(t => /使用邮箱登录|Sign in with email|Login with email|メールでログイン|使用邮箱登入|登入邮箱|Email.*login|login.*email/i.test(t));
+                        const hasDone = btns.some(t => /完成注册|完成註冊|Complete registration|登録を完了|Complete sign up|Done|完了/i.test(t));
+                        const hasForm = !!document.querySelector('input[name="givenName"],input[name="familyName"],input[type="password"]');
+                        return hasLogin && !hasDone && !hasForm;
+                    }"""
+                )
+            except Exception:
+                switched = False
+            if switched:
+                print("  [6] 页面已切换到登录入口，判定注册成功")
+                completed = True
+                break
             await dump_state(page, f"after-complete-{attempt+1}")
             check_timeout()
         if not completed:
             print("  [6] 仍停在 sign-up 页（Turnstile 未过 / 提交被拦）")
         check_timeout()
 
-        # 回到 grok.com 确保 cookie 落到主域；xAI 会异步完成 auth cookie
-        # 写入，先给重定向链一小段时间，避免刚到首页就误判失败。
-        if "grok.com" not in page.url:
+        # x.ai 新流程：注册成功后不自动登录，停在"使用邮箱登录"入口。
+        # 两步登录拿 session；若本次随机密码登录失败而本地有存档密码，
+        # 说明是已注册账号（recycle 场景），转入接管阶梯。
+        if completed:
+            # 账号已在 x.ai 侧创建成功：立即落盘密码，后续 [7]/收尾若崩溃，
+            # 下次接管 L1 仍可登录（防"注册成功但密码丢失"复发）。
+            _stash_early_password(email, password)
             try:
-                await page.goto("https://grok.com/", timeout=45000, wait_until="domcontentloaded")
-            except Exception:
-                pass
-        else:
-            await asyncio.sleep(2)
-        await dump_state(page, "final")
-
-        key_val = None
-        for cookie_attempt in range(1, 7):
-            try:
-                cookies = await ctx.cookies()
-                key_val = next(
-                    (
-                        item.get("value")
-                        for item in cookies
-                        if item.get("name") in KEY_COOKIES and item.get("value")
-                    ),
-                    None,
+                has_login = await page.evaluate(
+                    """() => [...document.querySelectorAll('button,a')].some(
+                        el => /Login with email|Sign in with email|使用邮箱登录|使用邮箱登入|メールでログイン|登入邮箱|Email.*login|login.*email/i.test((el.innerText||'').trim())
+                    )"""
                 )
             except Exception:
-                key_val = None
-            if key_val:
-                break
-            if cookie_attempt < 6:
-                print(f"  [grok] auth cookie pending ({cookie_attempt}/5), waiting...")
-                await asyncio.sleep(2)
+                has_login = False
+            if has_login:
+                print("  [7] 注册后需显式登录，开始登录流程")
+                login_ok = await _grok_browser_login(page, email, working_pw)
+                if not login_ok and (sso_stored_pw or used_pw):
+                    print("  [7] 新密码登录失败，本地有存档密码，转入接管（可能为已注册账号）")
+                    login_ok, working_pw = await _takeover_ladder(page, exclude=(password,))
+                if login_ok:
+                    await dump_state(page, "after-login")
+                else:
+                    print("  [7] 登录未成功，继续走 cookie 轮询 / HTTP 恢复兜底")
 
-        key_val, _ = await save_platform_cookies(
-            ctx, PLATFORM, pid, email=email, password=password, key_cookie_names=KEY_COOKIES
-        )
-        if key_val:
-            try:
-                oauth_credentials = await acquire_browser_grok_oauth(
-                    page, key_val, email
-                )
-                if not save_and_import_grok(
-                    key_val,
-                    email,
-                    password,
-                    mark_pool=temp_mb is None,
-                    oauth_credentials=oauth_credentials,
-                ):
-                    return None
-            except Exception as e:
-                print(f"  [FAIL] 保存/导入 grok token 失败: {e}")
-                return None
-            success = True
-            print("  [OK] session cookie saved")
-            return key_val
-        else:
-            print("  [grok] browser redirect had no session cookie; trying HTTP SSO recovery")
-            try:
-                recovered_sso = await recover_grok_sso_without_cookie(email, password)
-            except Exception as exc:
-                print(f"  [grok] HTTP SSO recovery error: {str(exc)[:120]}")
-                recovered_sso = None
-            if recovered_sso:
-                if not save_and_import_grok(
-                    recovered_sso,
-                    email,
-                    password,
-                    mark_pool=temp_mb is None,
-                ):
-                    return None
-                success = True
-                print("  [OK] SSO recovered through xAI HTTP cookie chain")
-                return recovered_sso
-            print("  [FAIL] no session cookie or recoverable SSO")
-            _mark_error("no_session_cookie")
-            return None
+        final_sso = await _finish_grok_session(working_pw)
+        if final_sso:
+            return final_sso
+        print("  [FAIL] no session cookie or recoverable SSO")
+        _mark_error("no_session_cookie")
+        return None
 
     except Exception as e:
         print(f"  ERROR: {e}")

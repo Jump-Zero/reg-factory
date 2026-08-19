@@ -442,8 +442,8 @@ def save_chatgpt_tokens(session, email=""):
     return True
 
 
-def save_grok_token(sso, email="", authorization_status="", announce=True):
-    """落盘 Grok sso token。返回 True/False。"""
+def save_grok_token(sso, email="", authorization_status="", announce=True, password=""):
+    """落盘 Grok sso token。返回 True/False。password 一并落盘供已注册账号接管时复用。"""
     sso = _s(sso)
     if not sso:
         return False
@@ -456,6 +456,9 @@ def save_grok_token(sso, email="", authorization_status="", announce=True):
     payload = {"email": _s(email), "sso": sso, "ts": int(time.time())}
     if status:
         payload["authorization_status"] = status
+    pw = _s(password)
+    if pw:
+        payload["password"] = pw
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
     if announce:
