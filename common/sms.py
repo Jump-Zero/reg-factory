@@ -164,18 +164,96 @@ def release(pkey):
 
 
 # ---------------- hero-sms ----------------
+# getCountries 的 chn 字段实测混用简繁(法國/義大利)、美国带"(物理)"后缀、英国叫英格兰，
+# 故静态别名兜底常用简体叫法与 ISO 码，其余国家以 getCountries 动态精确匹配为准。
+_HERO_COUNTRY_ALIAS = {
+    "美国": 187, "美利坚": 187, "usa": 187, "us": 187, "unitedstates": 187, "america": 187,
+    "印尼": 6, "印度尼西亚": 6, "indonesia": 6, "id": 6,
+    "英国": 16, "英格兰": 16, "uk": 16, "gb": 16, "unitedkingdom": 16, "england": 16,
+    "法国": 78, "france": 78, "fr": 78,
+    "意大利": 86, "italy": 86, "it": 86,
+    "俄罗斯": 0, "russia": 0, "ru": 0,
+    "日本": 182, "japan": 182, "jp": 182,
+    "韩国": 402, "korea": 402, "kr": 402,
+    "越南": 10, "vietnam": 10, "vn": 10,
+    "印度": 22, "india": 22, "in": 22,
+    "菲律宾": 4, "philippines": 4, "ph": 4,
+    "马来西亚": 7, "malaysia": 7, "my": 7,
+    "泰国": 52, "thailand": 52, "th": 52,
+    "德国": 43, "germany": 43, "de": 43,
+    "波兰": 15, "poland": 15, "pl": 15,
+    "加拿大": 36, "canada": 36, "ca": 36,
+    "墨西哥": 54, "mexico": 54, "mx": 54,
+    "巴西": 73, "brazil": 73, "br": 73,
+    "阿根廷": 39, "argentina": 39, "ar": 39,
+    "西班牙": 56, "spain": 56, "es": 56,
+    "荷兰": 48, "netherlands": 48, "nl": 48,
+    "尼日利亚": 19, "nigeria": 19, "ng": 19,
+    "乌克兰": 1, "ukraine": 1, "ua": 1,
+    "爱沙尼亚": 34, "estonia": 34, "ee": 34,
+}
+
+_HERO_COUNTRIES_CACHE = {}
+
+
+def _hero_norm_country(s):
+    return re.sub(r"[\s()（）\[\]【】\-–—·。.]", "", str(s).lower())
+
+
+def _hero_country_lookup():
+    """别名(中文/英文/ISO)->国家ID 映射。静态别名打底，getCountries 动态补充(含 chn/eng/rus)。"""
+    if _HERO_COUNTRIES_CACHE.get("_ready"):
+        return _HERO_COUNTRIES_CACHE
+    m = {_hero_norm_country(k): v for k, v in _HERO_COUNTRY_ALIAS.items()}
+    try:
+        r = requests.get(HERO_SMS_API_BASE, params={"api_key": HERO_SMS_API_KEY, "action": "getCountries"}, timeout=10)
+        data = r.json()
+        if isinstance(data, dict):
+            for cid, info in data.items():
+                try:
+                    cid = int(cid)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(info, dict):
+                    continue
+                for k in ("chn", "eng", "rus"):
+                    name = _hero_norm_country(info.get(k, ""))
+                    if name:
+                        m.setdefault(name, cid)
+    except Exception:
+        pass
+    m["_ready"] = True
+    _HERO_COUNTRIES_CACHE.clear()
+    _HERO_COUNTRIES_CACHE.update(m)
+    return _HERO_COUNTRIES_CACHE
+
+
 def _hero_selected_countries():
-    """解析 HERO_SMS_COUNTRY_OPENAI：空/auto/all=自动优选(返回None)；否则返回国家ID列表(按配置顺序去重)。"""
+    """解析 HERO_SMS_COUNTRY_OPENAI：空/auto/all=自动优选(返回None)；
+    否则返回国家ID列表。支持国家ID、中文名、英文名/ISO码，逗号分隔多国，按配置顺序去重。"""
     raw = str(HERO_SMS_COUNTRY_OPENAI or "").strip()
     if not raw or raw.lower() in {"auto", "all", "*"}:
         return None
-    ids = []
+    lookup = _hero_country_lookup()
+    ids, unknown, named = [], [], []
     for tok in raw.replace("，", ",").split(","):
         tok = tok.strip()
+        if not tok:
+            continue
         if tok.isdigit():
             v = int(tok)
-            if v not in ids:
-                ids.append(v)
+        else:
+            v = lookup.get(_hero_norm_country(tok))
+            if v is not None:
+                named.append(f"{tok}->{v}")
+        if v is None:
+            unknown.append(tok)
+        elif v not in ids:
+            ids.append(v)
+    if named:
+        print(f"  [hero-sms] 国家解析: {', '.join(named)}")
+    if unknown:
+        print(f"  [hero-sms] 无法识别的国家(已忽略): {', '.join(unknown)}")
     return ids or None
 
 
