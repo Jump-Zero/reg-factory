@@ -3530,6 +3530,7 @@ def api_env_get():
                 "default": it.get("default", ""),
                 "type": it.get("type", "str"),
                 "choices": it.get("choices", []),
+                "datalist": it.get("datalist", []),
                 "advanced": it.get("advanced", False),
                 "smart": it.get("smart", False),
             })

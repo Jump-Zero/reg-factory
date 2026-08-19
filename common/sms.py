@@ -33,7 +33,7 @@ import requests
 from config import (
     SMS_API_BASE, SMS_TOKEN,
     HERO_SMS_API_BASE, HERO_SMS_API_KEY, HERO_SMS_COUNTRY_PREFER,
-    HERO_SMS_MAXPRICE_OPENAI, HERO_SMS_MINPRICE_OPENAI,
+    HERO_SMS_MAXPRICE_OPENAI, HERO_SMS_MINPRICE_OPENAI, HERO_SMS_COUNTRY_OPENAI,
     SMSMAN_API_BASE, SMSMAN_TOKEN,
 )
 
@@ -164,10 +164,26 @@ def release(pkey):
 
 
 # ---------------- hero-sms ----------------
+def _hero_selected_countries():
+    """解析 HERO_SMS_COUNTRY_OPENAI：空/auto/all=自动优选(返回None)；否则返回国家ID列表(按配置顺序去重)。"""
+    raw = str(HERO_SMS_COUNTRY_OPENAI or "").strip()
+    if not raw or raw.lower() in {"auto", "all", "*"}:
+        return None
+    ids = []
+    for tok in raw.replace("，", ",").split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            v = int(tok)
+            if v not in ids:
+                ids.append(v)
+    return ids or None
+
+
 def _hero_get_phone(service):
     if not (HERO_SMS_API_KEY and service):
         return None
-    countries = HERO_SMS_COUNTRY_PREFER
+    selected = _hero_selected_countries()
+    countries = selected or HERO_SMS_COUNTRY_PREFER
     # 解析价格上限：留空或0=不限，否则按配置值过滤
     try:
         _mp = float(HERO_SMS_MAXPRICE_OPENAI)
@@ -190,10 +206,25 @@ def _hero_get_phone(service):
             if info.get("count", 0) > 0 and min_cost <= cost < max_cost:
                 ranked.append((cost, -info["count"], int(cid)))
         ranked.sort()
-        if ranked:
+        if selected:
+            # 限定国家模式：只保留指定国家(按价格升序)；getPrices 不可用或全部无货/超价即失败，不回退自动优选
+            allowed = [c for _, _, c in ranked if c in selected]
+            if not allowed:
+                detail = []
+                for cid in selected:
+                    info = prices.get(str(cid), {}).get(service, {})
+                    detail.append(f"id={cid}(count={info.get('count', 0)},${info.get('cost', '?')})")
+                print(f"  [hero-sms] locked countries no stock/out-of-range ${min_cost}-${max_cost}: {' '.join(detail)}")
+                return None
+            countries = allowed
+            print(f"  [hero-sms] locked {len(allowed)} countries (cheapest ${ranked[0][0]} id={allowed[0]})")
+        elif ranked:
             countries = [c for _, _, c in ranked]
             print(f"  [hero-sms] {len(countries)} countries (cheapest ${ranked[0][0]} id={ranked[0][2]}, range=${min_cost}-${max_cost})")
     except Exception as e:
+        if selected:
+            print(f"  [hero-sms] getPrices failed with locked countries: {e}")
+            return None
         print(f"  [hero-sms] getPrices failed: {e}")
     for country in countries:
         try:

@@ -2035,8 +2035,10 @@ async function loadEnv(){
       }else if(it.type === 'choice'){
         control = `<select data-env="${it.key}">${(it.choices||[]).map(c=>`<option value="${c}" ${c===value?'selected':''}>${c}</option>`).join('')}</select>`;
       }else{
+        const dl = it.datalist && it.datalist.length ? `dl-${it.key}` : '';
         control = `<input type="${type}" data-env="${it.key}" value="${(it.value||'').replace(/"/g,'&quot;')}"
-                 placeholder="${it.default? '默认 '+it.default : ''}">`;
+                 ${dl?`list="${dl}"`:''} placeholder="${it.default? '默认 '+it.default : ''}">`
+               + (dl?`<datalist id="${dl}">${it.datalist.map(o=>`<option value="${o.value}">${o.label||o.value}</option>`).join('')}</datalist>`:'');
       }
       row.innerHTML = `
         <div class="k"><span class="env-label">${it.label||it.key}${it.required?'<span class="req">*</span>':''}</span><code class="env-key">${it.key}</code></div>

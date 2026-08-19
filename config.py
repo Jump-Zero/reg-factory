@@ -298,6 +298,9 @@ HERO_SMS_SERVICE_OPENAI = _env("HERO_SMS_SERVICE_OPENAI", "dr")  # hero-sms/sms-
 HERO_SMS_MAXPRICE_OPENAI = _env("HERO_SMS_MAXPRICE_OPENAI", "1.0")
 # hero-sms 价格下限(USD)，留空或0=不限，过滤掉太便宜的垃圾号段
 HERO_SMS_MINPRICE_OPENAI = _env("HERO_SMS_MINPRICE_OPENAI", "0")
+# hero-sms 国家(OpenAI)：空=自动按价格优选全部国家；可填 sms-activate 国家ID或逗号分隔多国(如 54,16)。
+# 指定后仅在这些国家取号(仍按价格升序)，无库存或超价时直接失败不回退。常用: 54美国 6印尼 4菲律宾 10越南 22印度 7马来西亚 53巴西 16波兰 86尼日利亚 43德国
+HERO_SMS_COUNTRY_OPENAI = _env("HERO_SMS_COUNTRY_OPENAI", "")
 # firefox.fun 价格上限：'0' 只取最便宜(垃圾号易被 OpenAI 拒)，给够才摸得到智利等好号
 SMS_MAXPRICE_OPENAI = _env("SMS_MAXPRICE_OPENAI", "20")
 # OpenAI add-phone 拉黑的号段(dialing code)：261 马达加斯加、63 菲律宾 等 OpenAI 常拒的
