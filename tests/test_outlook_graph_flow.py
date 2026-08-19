@@ -4,6 +4,7 @@ import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import outlook_reg_loop
+from common import browser as browser_helpers
 from tools import extract_graph_tokens
 import register_outlook_standalone
 from webui import scripts as webui_scripts
@@ -552,6 +553,33 @@ class OutlookGraphFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(domains, ["outlook.com"])
         self.assertEqual(value, "sampleuser")
+
+    async def test_react_fill_can_skip_native_validity_for_inline_email_suffix(self):
+        email_input = MagicMock()
+        email_input.count = AsyncMock(return_value=1)
+        email_input.click = AsyncMock()
+        email_input.press = AsyncMock()
+        email_input.input_value = AsyncMock(return_value="sampleuser")
+        email_input.evaluate = AsyncMock(return_value=False)
+        page = MagicMock()
+        page.locator.return_value.first = email_input
+        page.keyboard.type = AsyncMock()
+
+        with patch.object(browser_helpers.asyncio, "sleep", AsyncMock()):
+            strict = await browser_helpers.react_fill(
+                page, "input[type=email]", "sampleuser", tries=1, verbose=False
+            )
+            composite = await browser_helpers.react_fill(
+                page,
+                "input[type=email]",
+                "sampleuser",
+                tries=1,
+                verbose=False,
+                check_validity=False,
+            )
+
+        self.assertFalse(strict)
+        self.assertTrue(composite)
 
     async def test_signup_dynamic_suffix_is_detected_after_blur(self):
         email_input = MagicMock()

@@ -113,6 +113,8 @@ def build_command(platform, args, account):
                 cmd += ["--codex-group", args.codex_group]
             if getattr(args, "codex_manual_phone", False):
                 cmd.append("--codex-manual-phone")
+            if getattr(args, "codex_phone", ""):
+                cmd += ["--codex-phone", args.codex_phone]
             cmd += [
                 "--codex-sms-provider", getattr(args, "codex_sms_provider", "auto"),
                 "--codex-timeout", str(max(1, getattr(args, "codex_timeout", 120))),
@@ -373,6 +375,8 @@ async def main():
                         help="SUB2API 目标分组名（透传给 register_chatgpt.py，默认取 config.SUB2API_GROUP）")
     parser.add_argument("--codex-manual-phone", action="store_true",
                         help="Codex add-phone 手动模式（透传给 register_chatgpt.py）")
+    parser.add_argument("--codex-phone", default="",
+                        help="自定义手机号(E.164)：自动填写并等待手动输入验证码")
     parser.add_argument("--codex-sms-provider",
                         choices=["auto", "custom", "hero", "smsman", "firefox"],
                         default="auto")

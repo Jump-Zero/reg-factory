@@ -48,6 +48,12 @@ class BitBrowser:
         if cls is BitBrowser and _selected_provider() in {"custom_api", "api"}:
             from common.custom_browser_api import CustomBrowserAPI
             return CustomBrowserAPI(api_base=api_base)
+        # CloakBrowser is selected and launched by common.browser inside the
+        # active async Playwright loop.  Keep direct legacy BitBrowser callers
+        # on the BitBrowser contract instead of returning an async-only handle.
+        if cls is BitBrowser and _selected_provider() in {"roxy", "roxybrowser"}:
+            from common.roxy_browser import RoxyBrowser
+            return RoxyBrowser(api_base=api_base)
         if cls is BitBrowser and _use_adspower():
             from adspower import AdsPower
             return AdsPower(api_base=api_base)

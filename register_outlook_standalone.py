@@ -2171,6 +2171,7 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
                     _SIGNUP_EMAIL_SELECTOR,
                     entry_value,
                     tries=3,
+                    check_validity=False,
                 )
                 selected = await _select_signup_domain(domain_dropdown, selected_domain)
                 email = f"{prefix}@{selected_domain}"
@@ -2186,6 +2187,7 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
                     _SIGNUP_EMAIL_SELECTOR,
                     entry_value,
                     tries=3,
+                    check_validity=False,
                 )
                 print(f"  {tag} filled prefix: {prefix} ({selected_domain}, inline suffix)")
             else:
@@ -2220,6 +2222,7 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
                         _SIGNUP_EMAIL_SELECTOR,
                         entry_value,
                         tries=3,
+                        check_validity=False,
                     )
                     print(
                         f"  {tag} normalized dynamic suffix: "

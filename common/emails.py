@@ -26,7 +26,6 @@ _CHATGPT_RETRYABLE_ERROR_MARKERS = (
     "email_verification_not_completed",
     "email_verification_",
     "email_submit_stuck",
-    "no_session_cookie",
     "entry_",
 )
 
@@ -37,6 +36,11 @@ def _used_file(platform):
 
 def _error_file(platform):
     return f"emails_error_{platform}.txt"
+
+
+def _retry_claim_status():
+    run_id = os.environ.get("REG_FACTORY_RUN_ID", "").strip()
+    return f"retrying:{run_id or f'pid:{os.getpid()}'}".lower()
 
 
 def _outlook_sale_file():
@@ -190,7 +194,7 @@ def retryable_email(platform, require_token=False, validate_token=False):
                             parts[2].strip().lower() if len(parts) >= 3 else ""
                         )
         error_path = _error_file(platform)
-        retry_candidates = []
+        latest_errors = {}
         if os.path.exists(error_path):
             with open(error_path, "r", encoding="utf-8") as handle:
                 for line in handle:
@@ -199,8 +203,15 @@ def retryable_email(platform, require_token=False, validate_token=False):
                         continue
                     email = parts[0].strip().lower()
                     reason = "----".join(parts[2:]).strip().lower()
-                    if any(marker in reason for marker in _CHATGPT_RETRYABLE_ERROR_MARKERS):
-                        retry_candidates.append(email)
+                    # Reinsert so dictionary order also follows the latest
+                    # observation for each mailbox.
+                    latest_errors.pop(email, None)
+                    latest_errors[email] = reason
+        retry_candidates = [
+            email
+            for email, reason in latest_errors.items()
+            if any(marker in reason for marker in _CHATGPT_RETRYABLE_ERROR_MARKERS)
+        ]
         if not retry_candidates:
             return None
         records = {}
@@ -212,8 +223,9 @@ def retryable_email(platform, require_token=False, validate_token=False):
                 parts = raw.split("----")
                 records[parts[0].strip().lower()] = (parts, raw)
         from common.mailbox import check_mailbox_access
+        retry_claim = _retry_claim_status()
         for email in reversed(retry_candidates):
-            if email in sold or latest_status.get(email) == "ok":
+            if email in sold or latest_status.get(email) in {"ok", retry_claim}:
                 continue
             record = records.get(email)
             if not record:
@@ -235,7 +247,7 @@ def retryable_email(platform, require_token=False, validate_token=False):
                             f"{email}----{password}----{validation.get('reason') or 'refresh_token_unusable'}",
                         )
                     continue
-            append_line(used_path, f"{email}----{password}----reserved")
+            append_line(used_path, f"{email}----{password}----{retry_claim}")
             _exclude_from_outlook_sale(platform, email)
             print(f"  [email] retrying failed ChatGPT mailbox: {email}")
             return email, password, token, client_id

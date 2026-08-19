@@ -174,6 +174,7 @@ class RegistrationSchemaTests(unittest.TestCase):
         self.assertIn("SUB2API", args["--codex"]["help"])
         self.assertIn("--codex-group", args)
         self.assertIn("custom", args["--codex-sms-provider"]["choices"])
+        self.assertIn("--codex-phone", args)
 
         oauth_args = {item["flag"]: item for item in _script("oauth_codex")["args"]}
         self.assertIn("custom", oauth_args["--sms-provider"]["choices"])

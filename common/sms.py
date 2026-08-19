@@ -40,13 +40,15 @@ from config import (
 
 def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=(), max_retries=5, max_price="0",
               smsman_app=None, smsman_country="0", smsman_maxprice="", smsman_blacklist=(), provider="auto"):
-    """返回 (phone, country_code, pkey)。sms-man.com 优先(若配 token+app)，再 firefox.fun，最后 hero-sms。
+    """返回 (phone, country_code, pkey)。auto 模式轮换已配置的平台并即时切换失败渠道。
     hero-sms 与 sms-man 的 phone 已含国家码、country_code 返回 ''。
     max_price: firefox.fun 价格上限，'0' 只取最便宜(常是垃圾号段)，给够才摸得到好国家。
     smsman_app: sms-man 的 application_id(数字)或 code/名(自动解析)；None=不启用 sms-man。
     smsman_country: sms-man country_id，'0'=自动按价格升序逐国试；smsman_maxprice: 价格上限(USD)，''=不限。
     smsman_blacklist: sms-man country_id 黑名单(自动逐国时跳过)。
     provider: auto / smsman / firefox / hero；非 auto 时只使用指定平台。"""
+    # Auto rotates the configured vendors and falls through immediately on
+    # no-stock/configuration errors. Explicit providers remain single-vendor.
     provider = str(provider or "auto").strip().lower().replace("-", "")
     aliases = {"smsman": "smsman", "firefoxfun": "firefox", "hero": "hero", "herosms": "hero", "custom": "custom", "auto": "auto"}
     provider = aliases.get(provider, provider)
@@ -63,8 +65,37 @@ def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=
         print(f"  [custom-sms] phone: +{phone}")
         return phone, country_code, pkey
 
+    if provider == "auto":
+        providers = _auto_provider_order(project_id, smsman_app, hero_service)
+        if not providers:
+            raise RuntimeError("get phone failed: no SMS provider is configured")
+        print(f"  [sms] auto provider order: {' -> '.join(providers)}")
+        errors = []
+        for candidate in providers:
+            try:
+                return get_phone(
+                    project_id,
+                    hero_service,
+                    country_prefer=country_prefer,
+                    country_blacklist=country_blacklist,
+                    max_retries=max_retries,
+                    max_price=max_price,
+                    smsman_app=smsman_app,
+                    smsman_country=smsman_country,
+                    smsman_maxprice=smsman_maxprice,
+                    smsman_blacklist=smsman_blacklist,
+                    provider=candidate,
+                )
+            except Exception as exc:
+                message = str(exc)[:120]
+                errors.append(f"{candidate}: {message}")
+                print(f"  [sms] auto {candidate} unavailable, switching: {message}")
+        raise RuntimeError("get phone failed: " + "; ".join(errors))
+
     # —— sms-man.com 优先(Codex add-phone 主用)。配了 token + app 才尝试，否则跳过 ——
-    if provider in {"auto", "smsman"} and SMSMAN_TOKEN and smsman_app not in (None, ""):
+    # Explicit provider branches below are single-vendor only. Auto mode has
+    # already selected and invoked each candidate through the rotating router.
+    if provider == "smsman" and SMSMAN_TOKEN and smsman_app not in (None, ""):
         res = _smsman_get_phone(smsman_app, smsman_country, smsman_maxprice, smsman_blacklist)
         if res:
             full_phone, pkey = res
@@ -75,7 +106,7 @@ def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=
     elif provider == "smsman":
         raise RuntimeError("get phone failed: sms-man 未配置")
 
-    if provider in {"auto", "firefox"} and SMS_TOKEN and project_id:
+    if provider == "firefox" and SMS_TOKEN and project_id:
         for country in country_prefer:
             attempts = max_retries if country == "" else 1
             for attempt in range(attempts):
@@ -110,9 +141,7 @@ def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=
     if provider == "firefox":
         raise RuntimeError("get phone failed: firefox.fun 无号/未配置")
 
-    if provider == "auto":
-        print("  [sms] firefox.fun 无号/未配，转 hero-sms...")
-    if provider in {"auto", "hero"}:
+    if provider == "hero":
         res = _hero_get_phone(hero_service)
         if res:
             full_phone, pkey = res
@@ -355,6 +384,24 @@ def _hero_release(pkey):
 # ---------------- sms-man.com (API v2.0) ----------------
 _SMSMAN_APP_CACHE = {}  # 原始 app 值(str) -> 解析出的数字 application_id
 _SMSMAN_FALLBACK_CURSOR = 0
+_AUTO_PROVIDER_CURSOR = 0
+
+
+def _auto_provider_order(project_id, smsman_app, hero_service):
+    """Return configured providers in a rotating order for ``provider=auto``."""
+    configured = []
+    if SMS_TOKEN and project_id:
+        configured.append("firefox")
+    if SMSMAN_TOKEN and smsman_app not in (None, ""):
+        configured.append("smsman")
+    if HERO_SMS_API_KEY and hero_service:
+        configured.append("hero")
+    if not configured:
+        return []
+    global _AUTO_PROVIDER_CURSOR
+    start = _AUTO_PROVIDER_CURSOR % len(configured)
+    _AUTO_PROVIDER_CURSOR += 1
+    return configured[start:] + configured[:start]
 
 
 def _smsman_url(path):

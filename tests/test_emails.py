@@ -186,6 +186,60 @@ class EmailPoolTests(unittest.TestCase):
 
         self.assertEqual(selected, ("retry@example.com", "pw", "rt", "client"))
 
+    def test_retryable_chatgpt_mailbox_honors_latest_terminal_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.join(tmp, "emails.txt")
+            errors = os.path.join(tmp, "errors.txt")
+            with open(pool, "w", encoding="utf-8") as f:
+                f.write("existing@example.com----pw----rt----client\n")
+            with open(errors, "w", encoding="utf-8") as f:
+                f.write("existing@example.com----pw----email_submit_stuck\n")
+                f.write("existing@example.com----pw----mfa_required\n")
+            with (
+                patch.object(emails, "EMAILS_FILE", pool),
+                patch.object(emails, "_used_file", return_value=os.path.join(tmp, "used.txt")),
+                patch.object(emails, "_error_file", return_value=errors),
+                patch.object(emails, "_outlook_sale_file", return_value=os.path.join(tmp, "sold.txt")),
+            ):
+                selected = emails.retryable_email("chatgpt")
+
+        self.assertIsNone(selected)
+
+    def test_retryable_chatgpt_mailbox_is_claimed_once_per_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.join(tmp, "emails.txt")
+            used = os.path.join(tmp, "used.txt")
+            errors = os.path.join(tmp, "errors.txt")
+            with open(pool, "w", encoding="utf-8") as f:
+                f.write("retry@example.com----pw----rt----client\n")
+            with open(errors, "w", encoding="utf-8") as f:
+                f.write("retry@example.com----pw----email_submit_stuck\n")
+            with (
+                patch.object(emails, "EMAILS_FILE", pool),
+                patch.object(emails, "_used_file", return_value=used),
+                patch.object(emails, "_error_file", return_value=errors),
+                patch.object(emails, "_outlook_sale_file", return_value=os.path.join(tmp, "sold.txt")),
+                patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")),
+                patch.dict(os.environ, {"REG_FACTORY_RUN_ID": "batch-one"}, clear=False),
+            ):
+                first = emails.retryable_email("chatgpt")
+                duplicate = emails.retryable_email("chatgpt")
+
+            with (
+                patch.object(emails, "EMAILS_FILE", pool),
+                patch.object(emails, "_used_file", return_value=used),
+                patch.object(emails, "_error_file", return_value=errors),
+                patch.object(emails, "_outlook_sale_file", return_value=os.path.join(tmp, "sold.txt")),
+                patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")),
+                patch.dict(os.environ, {"REG_FACTORY_RUN_ID": "batch-two"}, clear=False),
+            ):
+                next_batch = emails.retryable_email("chatgpt")
+
+        expected = ("retry@example.com", "pw", "rt", "client")
+        self.assertEqual(first, expected)
+        self.assertIsNone(duplicate)
+        self.assertEqual(next_batch, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

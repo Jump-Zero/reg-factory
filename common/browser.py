@@ -22,7 +22,7 @@ from playwright.async_api import async_playwright
 import os
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bitbrowser import BitBrowser
+from bitbrowser import BitBrowser, selected_browser_provider
 from common.fingerprint import browser_fingerprint
 from common.playwright_runtime import install_shutdown_guard
 from common.task_context import active_worker
@@ -213,6 +213,34 @@ async def open_and_connect(name, p=None, browser_options=None):
     返回 (bb, profile_id, browser, context, page)。
     注意：调用方需自行管理 async_playwright 生命周期，或传入 p。"""
     browser_options = _prepare_browser_options(browser_options)
+    provider = selected_browser_provider()
+    if provider in {"cloak", "cloakbrowser"}:
+        from common.cloak_browser import CloakBrowserHandle
+
+        handle = CloakBrowserHandle(None, profile_id="", name=name)
+        try:
+            handle, pid, context = await handle.launch(name, browser_options)
+            await install_traffic_saver(context)
+            startup_pages = list(context.pages)
+            page = await asyncio.wait_for(context.new_page(), timeout=20)
+            for startup_page in startup_pages:
+                try:
+                    await asyncio.wait_for(startup_page.close(), timeout=5)
+                except Exception:
+                    pass
+            try:
+                await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+            except Exception:
+                pass
+            await inject_stealth(context, page)
+            return handle, pid, handle.browser, context, page
+        except BaseException:
+            try:
+                if handle and getattr(handle, "context", None):
+                    await handle.close_browser_async()
+            except Exception:
+                pass
+            raise
     bb = BitBrowser()
     pid = create_browser_with_retry(bb, name, **(browser_options or {}))
     if not pid:
@@ -310,7 +338,16 @@ async def human_type(page, selector, text, delay_range=(0.05, 0.18)):
     await asyncio.sleep(random.uniform(0.2, 0.5))
 
 
-async def react_fill(page, selector, text, tries=3, delay=55, verbose=True, settle=0.6):
+async def react_fill(
+    page,
+    selector,
+    text,
+    tries=3,
+    delay=55,
+    verbose=True,
+    settle=0.6,
+    check_validity=True,
+):
     """填 React 受控输入，确保框架 state 真正更新。
 
     坑：page.fill()/locator.fill() 只写 DOM 的 .value，不触发 React 的合成
@@ -323,7 +360,9 @@ async def react_fill(page, selector, text, tries=3, delay=55, verbose=True, sett
     每轮回读 input_value() 校验。返回是否成功写入。
 
     settle: 键入后等 React 同步再回读的秒数。邮箱等关键字段用默认 0.6 求稳；
-            onboarding 本地字段可传小值（如 0.15）消除"输完名字停顿很久才输年龄"的卡顿。"""
+            onboarding 本地字段可传小值（如 0.15）消除"输完名字停顿很久才输年龄"的卡顿。
+    check_validity: 是否要求原生 HTML validity 通过。组合控件可能只在 input 中
+                    保存邮箱前缀、在相邻元素渲染域名，此时应关闭该检查。"""
     el = page.locator(selector).first
     try:
         if await el.count() == 0:
@@ -336,6 +375,19 @@ async def react_fill(page, selector, text, tries=3, delay=55, verbose=True, sett
             return (await el.input_value()).strip()
         except Exception:
             return ""
+
+    async def _is_valid():
+        """Check native HTML validity when the target exposes it."""
+        if not check_validity:
+            return True
+        try:
+            return bool(await el.evaluate(
+                "node => typeof node.checkValidity !== 'function' || node.checkValidity()"
+            ))
+        except Exception:
+            # Detached controls can disappear between the value read and this
+            # check. The caller will retry and verify the value again.
+            return False
 
     for i in range(tries):
         # 1) 键盘逐字输入（清空后真实键入，触发 React onChange）
@@ -350,7 +402,7 @@ async def react_fill(page, selector, text, tries=3, delay=55, verbose=True, sett
             if verbose:
                 print(f"  [react_fill] keyboard path skipped: {str(e)[:50]}")
         await asyncio.sleep(settle)
-        if await _readback() == text:
+        if await _readback() == text and await _is_valid():
             return True
 
         # 2) JS 原生 setter 兜底（绕过 React 重写的 value setter，再派发事件让 React 同步）
@@ -361,14 +413,21 @@ async def react_fill(page, selector, text, tries=3, delay=55, verbose=True, sett
                         ? window.HTMLTextAreaElement.prototype
                         : window.HTMLInputElement.prototype;
                     const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                    if (node._valueTracker) node._valueTracker.setValue('');
                     setter.call(node, v);
+                    node.dispatchEvent(new InputEvent('beforeinput', {
+                        bubbles: true,
+                        cancelable: true,
+                        data: v,
+                        inputType: 'insertText'
+                    }));
                     node.dispatchEvent(new Event('input', {bubbles: true}));
                     node.dispatchEvent(new Event('change', {bubbles: true}));
                 }""", text)
         except Exception:
             pass
         await asyncio.sleep(settle)
-        if await _readback() == text:
+        if await _readback() == text and await _is_valid():
             return True
 
         if verbose:

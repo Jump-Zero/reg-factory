@@ -623,6 +623,8 @@ async def handle_add_phone(
             # 常成分钟级干涸，默认 4 次(~32s)轮询太短，调大让本步骤耐心等补货。
             import os as _os
             _retries = int(_os.environ.get("SMS_GETPHONE_RETRIES", "4") or "4")
+            # provider=auto rotates configured SMS vendors between phone attempts;
+            # it does not spend every attempt on SMS-Man.
             phone, cc, pkey = sms.get_phone(SMS_PROJECT_ID_OPENAI, HERO_SMS_SERVICE_OPENAI,
                                             country_prefer=[""], country_blacklist=SMS_COUNTRY_BLACKLIST_OPENAI,
                                             max_retries=_retries, max_price=SMS_MAXPRICE_OPENAI,

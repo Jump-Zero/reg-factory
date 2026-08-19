@@ -859,7 +859,18 @@ def _apply_saved_env(updates):
             os.environ[key] = value
 
     import importlib
-    for name in ("config", "common.direct_proxy", "common.proxy_switch", "common.sms", "common.temp_email"):
+    # Provider adapters cache environment-backed defaults at import time. They
+    # must be reloaded together with config so changing the fingerprint browser
+    # in the WebUI takes effect for the next connectivity check/worker.
+    for name in (
+        "config",
+        "common.direct_proxy",
+        "common.proxy_switch",
+        "common.sms",
+        "common.temp_email",
+        "common.cloak_browser",
+        "common.roxy_browser",
+    ):
         module = sys.modules.get(name)
         if module is not None:
             importlib.reload(module)
@@ -934,6 +945,24 @@ def _test_bitbrowser():
     provider = _fingerprint_provider()
     headers = {}
     verify_tls = True
+    if provider in {"cloak", "cloakbrowser"}:
+        try:
+            import importlib.util
+
+            if importlib.util.find_spec("cloakbrowser") is None:
+                return False, "未安装 CloakBrowser，请执行 pip install \"cloakbrowser[geoip]>=0.4.10\""
+            return True, "CloakBrowser 已安装，可启动原生指纹环境"
+        except Exception as exc:
+            return False, f"CloakBrowser 检测失败: {str(exc)[:120]}"
+    if provider in {"roxy", "roxybrowser"}:
+        api = _read_config_val("ROXY_API_BASE", "http://127.0.0.1:50100").rstrip("/")
+        token = _read_config_val("ROXY_API_TOKEN", "").strip()
+        if token:
+            headers = {"token": token, "Authorization": f"Bearer {token}"}
+        for path in ("/status", "/", "/browser/workspace"):
+            if _http_alive(api + path, timeout=5, headers=headers):
+                return True, f"RoxyBrowser API 连通: {api}"
+        return False, f"RoxyBrowser API 不可达: {api}"
     if provider in {"bundled", "embedded", "local", "custom", "chrome", "chromium"}:
         from common.bundled_browser import find_browser_path
 
@@ -3203,6 +3232,15 @@ def api_status():
 
         bb = find_browser_path()
         provider_label = "custom" if provider in {"custom", "chrome", "chromium"} else "bundled"
+    elif provider in {"cloak", "cloakbrowser"}:
+        provider_label = "cloak"
+        bb = "cloakbrowser"
+    elif provider in {"roxy", "roxybrowser"}:
+        bb = _read_config_val("ROXY_API_BASE", "http://127.0.0.1:50100")
+        provider_label = "roxy"
+        token = _read_config_val("ROXY_API_TOKEN", "").strip()
+        if token:
+            browser_headers = {"token": token, "Authorization": f"Bearer {token}"}
     elif provider in {"adspower", "ads_power", "ads"}:
         bb = _read_config_val("ADSPOWER_API", "http://127.0.0.1:50325")
         provider_label = "adspower"
@@ -3230,6 +3268,17 @@ def api_status():
     else:
         bb = _read_config_val("BITBROWSER_API", "http://127.0.0.1:54345")
         provider_label = "bitbrowser"
+    if provider_label == "cloak":
+        try:
+            import importlib.util
+
+            browser_ready = importlib.util.find_spec("cloakbrowser") is not None
+        except Exception:
+            browser_ready = False
+    elif provider_label in {"bundled", "custom"}:
+        browser_ready = os.path.isfile(bb)
+    else:
+        browser_ready = _http_alive(bb, headers=browser_headers, verify_tls=browser_verify_tls)
     mode = "clash_auto"
     proxy = ""
     network = False
@@ -3247,9 +3296,7 @@ def api_status():
         "version": WEBUI_VERSION,
         "root": ROOT,
         "data_root": os.environ.get("REG_FACTORY_DATA_DIR") or ROOT,
-        "bitbrowser": os.path.isfile(bb) if provider_label in {"bundled", "custom"} else _http_alive(
-            bb, headers=browser_headers, verify_tls=browser_verify_tls
-        ),
+        "bitbrowser": browser_ready,
         "browser_provider": provider_label,
         "clash": network,
         "network": network,

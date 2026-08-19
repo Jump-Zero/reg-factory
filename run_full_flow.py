@@ -318,6 +318,8 @@ def stage_platforms(args, env, email, password, token="", client_id=""):
             cmd += ["--codex-group", args.codex_group]
         if args.codex_manual_phone:
             cmd.append("--codex-manual-phone")
+        if getattr(args, "codex_phone", ""):
+            cmd += ["--codex-phone", args.codex_phone]
     if args.grok_sub2api:
         cmd.append("--grok-sub2api")
         if args.grok_sub2api_group:
@@ -494,6 +496,8 @@ def main():
                     help="SUB2API 目标分组名（透传，默认取 config.SUB2API_GROUP）")
     ap.add_argument("--codex-manual-phone", action="store_true",
                     help="Codex add-phone 手动模式：不接码，自己在浏览器填号收码（透传）")
+    ap.add_argument("--codex-phone", default="",
+                    help="自定义手机号(E.164)：自动填写并等待手动输入验证码")
     ap.add_argument("--codex-sms-provider",
                     choices=["auto", "custom", "hero", "smsman", "firefox"],
                     default="auto", help="Codex add-phone 接码平台")
