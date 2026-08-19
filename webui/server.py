@@ -21,6 +21,7 @@ import re
 import signal
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -92,10 +93,37 @@ _PROXY_ENV_KEYS = (
     "CHATGPT_RESIDENTIAL_ROTATE_RETRIES",
 )
 
+_CUSTOM_BROWSER_ENV_KEYS = {
+    "FINGERPRINT_BROWSER",
+    "CUSTOM_BROWSER_API",
+    "CUSTOM_BROWSER_API_MODE",
+    "CUSTOM_BROWSER_API_KEY",
+    "CUSTOM_BROWSER_API_AUTH_HEADER",
+    "CUSTOM_BROWSER_API_AUTH_PREFIX",
+    "CUSTOM_BROWSER_API_HEADERS",
+    "CUSTOM_BROWSER_API_TIMEOUT",
+    "CUSTOM_BROWSER_API_VERIFY_TLS",
+    "CUSTOM_BROWSER_API_ID_FIELD",
+    "CUSTOM_BROWSER_API_HEALTH_PATH",
+    "CUSTOM_BROWSER_API_CREATE_PATH",
+    "CUSTOM_BROWSER_API_LIST_PATH",
+    "CUSTOM_BROWSER_API_OPEN_PATH",
+    "CUSTOM_BROWSER_API_CLOSE_PATH",
+    "CUSTOM_BROWSER_API_DELETE_PATH",
+    "CUSTOM_BROWSER_API_UPDATE_PATH",
+    "CUSTOM_BROWSER_API_CREATE_METHOD",
+    "CUSTOM_BROWSER_API_LIST_METHOD",
+    "CUSTOM_BROWSER_API_OPEN_METHOD",
+    "CUSTOM_BROWSER_API_CLOSE_METHOD",
+    "CUSTOM_BROWSER_API_DELETE_METHOD",
+    "CUSTOM_BROWSER_API_UPDATE_METHOD",
+    "CUSTOM_BROWSER_API_FORWARD_FIELDS",
+}
+
 # The same updater inheritance problem affects provider credentials after they
 # are edited in the WebUI.  Keep this list narrow so unrelated explicit system
 # environment overrides retain their existing precedence.
-_LIVE_ENV_KEYS = frozenset(_PROXY_ENV_KEYS) | {
+_LIVE_ENV_KEYS = frozenset(_PROXY_ENV_KEYS) | _CUSTOM_BROWSER_ENV_KEYS | {
     "ICLOUD_MAIL_API_BASE",
     "ICLOUD_MAIL_API_KEY",
     "ICLOUD_MAIL_TYPE",
@@ -247,10 +275,10 @@ except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
 
 
 # ============================================================ 配置/状态读取
-def _read_config_val(key, default=""):
+def _read_config_val(key, default="", allow_empty=False):
     """从环境/.env 读一个值(用于探测 Clash/BitBrowser 地址)。"""
     val = os.environ.get(key)
-    if val:
+    if val or (allow_empty and key in os.environ):
         return val
     try:
         with open(ENV_PATH, encoding="utf-8") as handle:
@@ -259,19 +287,25 @@ def _read_config_val(key, default=""):
                 if line and not line.startswith("#") and "=" in line:
                     k, _, v = line.partition("=")
                     if k.strip() == key:
-                        return v.strip().strip('"').strip("'") or default
+                        value = v.strip().strip('"').strip("'")
+                        return value if allow_empty else (value or default)
     except Exception:
         pass
     return default
 
 
-def _http_alive(url, timeout=3):
+def _http_alive(url, timeout=3, headers=None, verify_tls=True):
     try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        req = urllib.request.Request(url, headers=headers or {})
+        handlers = [urllib.request.ProxyHandler({})]
+        if not verify_tls:
+            handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+        with urllib.request.build_opener(*handlers).open(req, timeout=timeout) as r:
             return r.status < 500
-    except urllib.error.HTTPError:
-        return True  # 4xx = 服务活着(拒绝裸请求)
+    except urllib.error.HTTPError as exc:
+        if headers and exc.code in {401, 403}:
+            return False
+        return True  # 其他 4xx = 服务活着(拒绝裸请求)
     except Exception:
         return False
 
@@ -846,11 +880,13 @@ def _apply_saved_env(updates):
 
 
 # ============================================================ 连通测试
-def _direct_get(url, headers=None, timeout=8):
+def _direct_get(url, headers=None, timeout=8, verify_tls=True):
     """直连 GET(显式绕过代理——Clash 控制器/BitBrowser 都是 localhost)。
     返回 (status_code, body_text)。连不上抛异常。"""
-    handler = urllib.request.ProxyHandler({})  # 空 = 不走任何代理
-    opener = urllib.request.build_opener(handler)
+    handlers = [urllib.request.ProxyHandler({})]  # 空 = 不走任何代理
+    if not verify_tls:
+        handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    opener = urllib.request.build_opener(*handlers)
     req = urllib.request.Request(url, headers=headers or {})
     with opener.open(req, timeout=timeout) as r:
         return r.status, r.read(8192).decode("utf-8", "replace")
@@ -896,6 +932,8 @@ def _fingerprint_provider():
 def _test_bitbrowser():
     """Test selected fingerprint browser local API."""
     provider = _fingerprint_provider()
+    headers = {}
+    verify_tls = True
     if provider in {"bundled", "embedded", "local", "custom", "chrome", "chromium"}:
         from common.bundled_browser import find_browser_path
 
@@ -912,16 +950,49 @@ def _test_bitbrowser():
         if not api:
             return False, "CUSTOM_BROWSER_API 未配置"
         name = "Custom Browser"
-        paths = ("/health", "/")
+        health = _read_config_val("CUSTOM_BROWSER_API_HEALTH_PATH", "/health").strip() or "/health"
+        paths = (health, "/status", "/")
+        key = (_read_config_val("CUSTOM_BROWSER_API_KEY", "") or _read_config_val("CUSTOM_BROWSER_API_TOKEN", "")).strip()
+        header = _read_config_val("CUSTOM_BROWSER_API_AUTH_HEADER", "Authorization").strip() or "Authorization"
+        prefix = _read_config_val("CUSTOM_BROWSER_API_AUTH_PREFIX", "Bearer ", allow_empty=True)
+        if prefix.strip().lower() in {"bearer", "token", "basic", "apikey", "api-key"}:
+            prefix = prefix.strip() + " "
+        headers = {header: f"{prefix}{key}"} if key else {}
+        extra_headers = _read_config_val("CUSTOM_BROWSER_API_HEADERS", "").strip()
+        if extra_headers:
+            try:
+                value = json.loads(extra_headers)
+                if not isinstance(value, dict):
+                    raise ValueError("must be a JSON object")
+                headers.update({str(item_key): str(item_value) for item_key, item_value in value.items()})
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                return False, f"CUSTOM_BROWSER_API_HEADERS JSON 无效: {exc}"
+        verify_tls = _read_config_val("CUSTOM_BROWSER_API_VERIFY_TLS", "true").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
     else:
         api = _read_config_val("BITBROWSER_API", "http://127.0.0.1:54345").rstrip("/")
         name = "BitBrowser"
         paths = ("/health", "/")
+        headers = {}
     for path in paths:
         try:
-            code, _ = _direct_get(api + path, timeout=5)
+            target = path if path.startswith(("http://", "https://")) else api + (
+                path if path.startswith("/") else "/" + path
+            )
+            code, _ = _direct_get(
+                target,
+                headers=headers,
+                timeout=5,
+                verify_tls=verify_tls,
+            )
             return True, f"{name} API 连通 ✓ (HTTP {code})"
-        except urllib.error.HTTPError:
+        except urllib.error.HTTPError as exc:
+            if provider in {"custom_api", "api"} and exc.code in {401, 403}:
+                return False, f"{name} API 鉴权失败 (HTTP {exc.code})，请检查 Key、请求头和前缀"
+            if provider in {"custom_api", "api"} and exc.code in {404, 405}:
+                last = f"HTTP {exc.code}"
+                continue
             return True, f"{name} API 在线 ✓ (服务响应)"
         except Exception as e:
             last = str(e)[:60]
@@ -1056,7 +1127,7 @@ async def api_test(target: str, request: Request):
     saved = {}
     allowed = set(schema.env_keys()) | {"SMSMAN_API_BASE", "SMS_API_BASE"}
     for k, v in overrides.items():
-        if k in allowed and v not in (None, ""):
+        if k in allowed and v is not None and (v != "" or k in _CUSTOM_BROWSER_ENV_KEYS):
             saved[k] = os.environ.get(k)
             os.environ[k] = str(v)
     try:
@@ -3125,6 +3196,8 @@ def api_update():
 @app.get("/api/status")
 def api_status():
     provider = _fingerprint_provider()
+    browser_headers = {}
+    browser_verify_tls = True
     if provider in {"bundled", "embedded", "local", "custom", "chrome", "chromium"}:
         from common.bundled_browser import find_browser_path
 
@@ -3136,6 +3209,24 @@ def api_status():
     elif provider in {"custom_api", "api"}:
         bb = _read_config_val("CUSTOM_BROWSER_API", "")
         provider_label = "custom_api"
+        key = (_read_config_val("CUSTOM_BROWSER_API_KEY", "") or _read_config_val("CUSTOM_BROWSER_API_TOKEN", "")).strip()
+        if key:
+            header = _read_config_val("CUSTOM_BROWSER_API_AUTH_HEADER", "Authorization").strip() or "Authorization"
+            prefix = _read_config_val("CUSTOM_BROWSER_API_AUTH_PREFIX", "Bearer ", allow_empty=True)
+            if prefix.strip().lower() in {"bearer", "token", "basic", "apikey", "api-key"}:
+                prefix = prefix.strip() + " "
+            browser_headers = {header: f"{prefix}{key}"}
+        extra_headers = _read_config_val("CUSTOM_BROWSER_API_HEADERS", "").strip()
+        if extra_headers:
+            try:
+                value = json.loads(extra_headers)
+                if isinstance(value, dict):
+                    browser_headers.update({str(item_key): str(item_value) for item_key, item_value in value.items()})
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        browser_verify_tls = _read_config_val("CUSTOM_BROWSER_API_VERIFY_TLS", "true").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
     else:
         bb = _read_config_val("BITBROWSER_API", "http://127.0.0.1:54345")
         provider_label = "bitbrowser"
@@ -3156,7 +3247,9 @@ def api_status():
         "version": WEBUI_VERSION,
         "root": ROOT,
         "data_root": os.environ.get("REG_FACTORY_DATA_DIR") or ROOT,
-        "bitbrowser": os.path.isfile(bb) if provider_label in {"bundled", "custom"} else _http_alive(bb),
+        "bitbrowser": os.path.isfile(bb) if provider_label in {"bundled", "custom"} else _http_alive(
+            bb, headers=browser_headers, verify_tls=browser_verify_tls
+        ),
         "browser_provider": provider_label,
         "clash": network,
         "network": network,
@@ -3429,6 +3522,7 @@ def api_env_get():
         for it in g["items"]:
             items.append({
                 "key": it["key"],
+                "label": it.get("label", it["key"]),
                 "value": cur.get(it["key"], ""),
                 "required": it.get("required", False),
                 "secret": it.get("secret", False),
@@ -3436,6 +3530,8 @@ def api_env_get():
                 "default": it.get("default", ""),
                 "type": it.get("type", "str"),
                 "choices": it.get("choices", []),
+                "advanced": it.get("advanced", False),
+                "smart": it.get("smart", False),
             })
         groups.append({
             "group": g["group"],

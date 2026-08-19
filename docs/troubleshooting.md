@@ -6,7 +6,7 @@
 
 ## 指纹浏览器显示离线
 
-确认客户端已启动并开启本地 API，再检查 `.env` 中的 `FINGERPRINT_BROWSER` 与对应 API 地址。`custom` 模式填写 `CUSTOM_BROWSER_PATH`；`custom_api` 仅适用于兼容 BitBrowser `/browser/*` 接口的指纹浏览器。AdsPower 开启鉴权时还要填写 `ADSPOWER_API_KEY`。
+确认客户端已启动并开启本地 API，再检查 `.env` 中的 `FINGERPRINT_BROWSER` 与对应 API 地址。`custom` 模式填写 `CUSTOM_BROWSER_PATH`；`custom_api` 默认兼容 BitBrowser 协议，也可设置 `CUSTOM_BROWSER_API_MODE=generic` 对接 REST API，并在 WebUI 配置 API Key、鉴权头和各操作路径。启动接口必须能返回 `ws`、`cdp`、`endpoint` 或 `debugPort` 之一。AdsPower 开启鉴权时还要填写 `ADSPOWER_API_KEY`。
 
 ## Clash 控制器连接失败
 

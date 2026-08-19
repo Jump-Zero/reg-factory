@@ -45,6 +45,9 @@ class BitBrowser:
         }:
             from common.bundled_browser import BundledBrowser
             return BundledBrowser(api_base=api_base)
+        if cls is BitBrowser and _selected_provider() in {"custom_api", "api"}:
+            from common.custom_browser_api import CustomBrowserAPI
+            return CustomBrowserAPI(api_base=api_base)
         if cls is BitBrowser and _use_adspower():
             from adspower import AdsPower
             return AdsPower(api_base=api_base)

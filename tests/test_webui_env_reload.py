@@ -138,6 +138,14 @@ class WebUIEnvReloadTests(unittest.TestCase):
             server._apply_saved_env({"ICLOUD_MAIL_API_KEY": "current-key"})
             self.assertEqual(os.environ["ICLOUD_MAIL_API_KEY"], "current-key")
 
+    def test_saved_custom_browser_api_overrides_stale_updater_value_immediately(self):
+        stale = {"CUSTOM_BROWSER_API": "http://stale-browser.local"}
+        with patch.object(server, "BOOT_ENV", stale), patch.dict(
+            os.environ, stale, clear=False
+        ):
+            server._apply_saved_env({"CUSTOM_BROWSER_API": "http://current-browser.local"})
+            self.assertEqual(os.environ["CUSTOM_BROWSER_API"], "http://current-browser.local")
+
     def test_status_exposes_loaded_version_and_process_id(self):
         with patch.object(server, "_fingerprint_provider", return_value="bitbrowser"):
             with patch.object(server, "_read_config_val", side_effect=lambda _key, default="": default):

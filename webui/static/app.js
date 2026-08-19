@@ -2008,12 +2008,21 @@ async function loadEnv(){
     const notice = g.notice
       ? `<div class="env-notice ${g.notice_level==='warning'?'warning':''}" role="alert">${g.notice}</div>`
       : '';
-    box.innerHTML = `<div class="env-group-title">
-        <span>${g.group}</span>
-        <span class="test-area">${tests}<span class="test-result" data-result-for="${g.group}"></span></span>
-      </div>${notice}`;
+    const isBrowserGroup = itemKeys.has('FINGERPRINT_BROWSER');
+    const configuredCount = (g.items||[]).filter(it=>{
+      const current = String(it.value ?? '').trim();
+      return current !== '' && current !== String(it.default ?? '').trim();
+    }).length;
+    box.innerHTML = `<div class="env-group-title" role="button" tabindex="0" aria-expanded="false">
+        <span class="env-group-name">${g.group}<small>${configuredCount?`已配置 ${configuredCount} 项`:'使用默认配置'}</small></span>
+        <span class="test-area"><button type="button" class="btn-env-all" hidden>显示全部</button>${tests}<span class="test-result" data-result-for="${g.group}"></span><button type="button" class="btn-env-toggle" aria-expanded="false">智能配置</button></span>
+      </div>${notice}<div class="env-smart-empty" hidden>当前没有需要填写的项目；可使用默认配置，或点击“显示全部”调整。</div>`;
     g.items.forEach(it=>{
       const row = document.createElement('div'); row.className='env-item';
+      row.dataset.envKey = it.key;
+      const current = String(it.value ?? '').trim();
+      const customized = current !== '' && current !== String(it.default ?? '').trim();
+      row.dataset.smart = (it.smart || it.required || customized) ? 'true' : 'false';
       const type = it.secret ? 'password':'text';
       const value = it.value || it.default || '';
       let control;
@@ -2030,13 +2039,88 @@ async function loadEnv(){
                  placeholder="${it.default? '默认 '+it.default : ''}">`;
       }
       row.innerHTML = `
-        <div class="k">${it.key}${it.required?'<span class="req">*</span>':''}</div>
+        <div class="k"><span class="env-label">${it.label||it.key}${it.required?'<span class="req">*</span>':''}</span><code class="env-key">${it.key}</code></div>
         <div class="v">
           ${control}
           ${it.help?`<div class="ehelp">${it.help}</div>`:''}
         </div>`;
       box.appendChild(row);
     });
+    const state = {open:false, all:false};
+    const toggleButton = box.querySelector('.btn-env-toggle');
+    const title = box.querySelector('.env-group-title');
+    const allButton = box.querySelector('.btn-env-all');
+    const noticeBox = box.querySelector('.env-notice');
+    const emptyBox = box.querySelector('.env-smart-empty');
+    const selectedValue = key=>String(box.querySelector(`[data-env="${key}"]`)?.value || '').toLowerCase();
+    const visibleForProvider = key=>{
+      if(isBrowserGroup){
+        const selected = selectedValue('FINGERPRINT_BROWSER') || 'bitbrowser';
+        if(key === 'FINGERPRINT_BROWSER') return true;
+        if(key === 'CUSTOM_BROWSER_PATH' || key === 'REG_FACTORY_BROWSER_PATH' || key === 'REG_FACTORY_BROWSER_HELPER')
+          return ['bundled','embedded','local','custom','chrome','chromium'].includes(selected);
+        if(key === 'CUSTOM_BROWSER_API' || key.startsWith('CUSTOM_BROWSER_API_')) return ['custom_api','api'].includes(selected);
+        if(key === 'BITBROWSER_API' || key.startsWith('BB_') || key.startsWith('CHATGPT_BROWSER_CORE_VERSION') || key.startsWith('OUTLOOK_BROWSER_') || key.startsWith('GROK_BROWSER_'))
+          return !['bundled','embedded','local','custom','chrome','chromium','adspower','ads_power','ads','custom_api','api'].includes(selected);
+        if(key.startsWith('ADSPOWER_')) return ['adspower','ads_power','ads'].includes(selected);
+      }
+      if(itemKeys.has('TEMP_EMAIL_PROVIDER')){
+        const selected = selectedValue('TEMP_EMAIL_PROVIDER') || 'gptmail';
+        const prefixes = {yyds:'YYDS_',gptmail:'GPTMAIL_',moemail:'MOEMAIL_',cfmail:'CFMAIL_',remail:'REMAIL_'};
+        const providerPrefix = Object.values(prefixes).find(prefix=>key.startsWith(prefix));
+        if(providerPrefix) return providerPrefix === prefixes[selected];
+      }
+      if(itemKeys.has('CHATGPT_EMAIL_PROVIDER') && key.startsWith('ICLOUD_'))
+        return selectedValue('CHATGPT_EMAIL_PROVIDER') === 'icloud';
+      if(itemKeys.has('PROXY_MODE')){
+        const selected = selectedValue('PROXY_MODE') || 'clash_auto';
+        if(key.startsWith('CLASH_')) return ['clash_auto','clash_fixed'].includes(selected);
+        if(key.startsWith('REG_FACTORY_PROXY')) return selected === 'residential';
+      }
+      if(itemKeys.has('OUTLOOK_GRAPH_RECOVERY_PROVIDER') && key === 'OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX')
+        return selectedValue('OUTLOOK_GRAPH_RECOVERY_PROVIDER') === 'outlook';
+      return true;
+    };
+    const refreshGroup = ()=>{
+      let eligible = 0;
+      let shown = 0;
+      box.querySelectorAll('.env-item').forEach(row=>{
+        const providerVisible = visibleForProvider(row.dataset.envKey);
+        if(providerVisible) eligible += 1;
+        const visible = state.open && providerVisible && (state.all || row.dataset.smart === 'true');
+        row.hidden = !visible;
+        if(visible) shown += 1;
+      });
+      if(noticeBox) noticeBox.hidden = !state.open;
+      emptyBox.hidden = !state.open || shown > 0;
+      allButton.hidden = !state.open || eligible <= shown;
+      allButton.textContent = state.all ? '智能显示' : '显示全部';
+      toggleButton.textContent = state.open ? '收起' : '智能配置';
+      toggleButton.setAttribute('aria-expanded', state.open ? 'true' : 'false');
+      title.setAttribute('aria-expanded', state.open ? 'true' : 'false');
+      box.classList.toggle('env-group-open', state.open);
+    };
+    box.querySelectorAll('select[data-env]').forEach(control=>control.addEventListener('change', refreshGroup));
+    toggleButton.addEventListener('click', ()=>{
+      state.open = !state.open;
+      if(!state.open) state.all = false;
+      refreshGroup();
+    });
+    allButton.addEventListener('click', ()=>{ state.all = !state.all; refreshGroup(); });
+    const toggleFromTitle = event=>{
+      if(event.target.closest('button, input, select, a')) return;
+      state.open = !state.open;
+      if(!state.open) state.all = false;
+      refreshGroup();
+    };
+    title.addEventListener('click', toggleFromTitle);
+    title.addEventListener('keydown', event=>{
+      if((event.key === 'Enter' || event.key === ' ') && !event.target.closest('button, input, select, a')){
+        event.preventDefault();
+        toggleFromTitle(event);
+      }
+    });
+    refreshGroup();
     // 绑定该组的测试按钮
     box.querySelectorAll('.btn-test').forEach(btn=>{
       btn.onclick = ()=> runTest(btn.dataset.test, btn);
@@ -2256,6 +2340,7 @@ const GUIDE_STEPS = [
     body:`<p><strong>bitbrowser</strong> 是默认值，需要先启动比特浏览器，并确认本地 API 通常为 <code>http://127.0.0.1:54345</code>。它为每个账号提供独立 Profile、Cookie 和指纹。</p>
       <p><strong>bundled</strong> 使用程序自带或系统可用的 Chromium。</p>
       <p><strong>custom</strong> 使用普通 Chrome，填写 <code>CUSTOM_BROWSER_PATH</code>。Windows 常见路径是 <code>C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe</code>。</p>
+      <p><strong>custom_api</strong> 用于接入自己的指纹浏览器。填写 API 根地址和可选 Key；兼容 BitBrowser 时保持 <code>auto</code>，常见 REST API 选择 <code>generic</code>，再填写启动接口路径。启动响应返回 <code>ws</code>、<code>cdp</code>、<code>endpoint</code> 或 <code>debugPort</code> 即可。</p>
       <p>填写后使用本组的连通测试确认浏览器可用。</p>`,
   },
   {

@@ -91,6 +91,17 @@ class ChatGPTFlowTests(unittest.TestCase):
         self.assertEqual(mailbox["email"], "code@example.com")
         create.assert_called_once_with(provider="icloud", mail_type="icloud")
 
+    def test_chatgpt_remail_mailbox_uses_generic_provider(self):
+        with patch.object(
+            register_chatgpt,
+            "create_mailbox",
+            return_value={"email": "code@outlook.com", "provider": "remail"},
+        ) as create:
+            mailbox = register_chatgpt.create_chatgpt_remail_mailbox()
+
+        self.assertEqual(mailbox["provider"], "remail")
+        create.assert_called_once_with(provider="remail")
+
     def test_icloud_allocation_skips_mother_mailbox_rejected_by_openai(self):
         with tempfile.TemporaryDirectory() as root:
             with open(
@@ -788,6 +799,49 @@ class ChatGPTFlowTests(unittest.TestCase):
         self.assertIn("Annehmen", register_chatgpt._COOKIE_BTNS)
         self.assertIn("Alle akzeptieren", register_chatgpt._COOKIE_BTNS)
         self.assertNotIn("Ablehnen", register_chatgpt._COOKIE_BTNS)
+
+    def test_cookie_consent_is_preseeded_before_signup(self):
+        context = MagicMock()
+        context.add_cookies = AsyncMock()
+
+        seeded = asyncio.run(
+            register_chatgpt.seed_chatgpt_cookie_consent(context)
+        )
+
+        self.assertTrue(seeded)
+        cookies = context.add_cookies.await_args.args[0]
+        self.assertEqual(
+            {cookie["name"] for cookie in cookies},
+            {"oai_consent_analytics", "oai_consent_marketing"},
+        )
+        self.assertTrue(all(cookie["value"] == "true" for cookie in cookies))
+        self.assertTrue(all(cookie["domain"] == ".chatgpt.com" for cookie in cookies))
+
+    def test_cookie_banner_settle_waits_for_late_mount_and_rerender(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(side_effect=[False, None, True])
+        with patch.object(
+            register_chatgpt,
+            "dismiss_cookie_banner",
+            AsyncMock(side_effect=[False, True, False, False, False]),
+        ) as dismiss, patch.object(
+            register_chatgpt.asyncio, "sleep", AsyncMock()
+        ):
+            first = asyncio.run(
+                register_chatgpt.wait_for_cookie_banner_settle(
+                    page, timeout=5000
+                )
+            )
+            second = asyncio.run(
+                register_chatgpt.wait_for_cookie_banner_settle(
+                    page, timeout=5000
+                )
+            )
+
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertEqual(dismiss.await_count, 5)
+        self.assertEqual(page.evaluate.await_count, 3)
 
     def test_browser_profile_uses_configured_clash_proxy(self):
         with patch.dict(

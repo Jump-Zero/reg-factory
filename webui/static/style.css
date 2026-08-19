@@ -254,8 +254,10 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .env-group{margin-top:18px;border-top:1px solid var(--line)}
 .env-group-title{
   min-height:44px;padding:8px 10px;display:flex;align-items:center;justify-content:space-between;gap:12px;
-  background:var(--surface-raised);font-size:12px;font-weight:650
+  background:var(--surface-raised);font-size:12px;font-weight:650;cursor:pointer
 }
+.env-group-title:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.env-group-title .test-area,.env-group-title button{cursor:pointer}
 .env-notice{
   margin:10px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;
   color:var(--muted);font-size:11.5px;line-height:1.5
@@ -271,11 +273,22 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 }
 .btn-test:hover{border-color:var(--accent);color:#fff;background:var(--accent-soft)}
 .btn-test:disabled{opacity:.5;cursor:wait}
+.btn-env-toggle,.btn-env-all{
+  min-height:27px;padding:4px 9px;border:1px solid var(--line);border-radius:5px;
+  background:transparent;color:var(--muted);font-size:10.5px;white-space:nowrap;cursor:pointer
+}
+.btn-env-toggle:hover,.btn-env-all:hover{border-color:var(--accent);color:var(--text);background:var(--accent-soft)}
+.env-group-name{display:flex;align-items:baseline;gap:8px;min-width:0}
+.env-group-name small{color:var(--quiet);font-size:10px;font-weight:450}
+.env-smart-empty{margin:10px;padding:11px 12px;border:1px dashed var(--line);border-radius:6px;color:var(--quiet);font-size:11px}
+.env-item[hidden]{display:none}
 .test-result{font-family:var(--mono);font-size:10px;overflow-wrap:anywhere}
 .test-result.ok{color:var(--green)}
 .test-result.bad{color:var(--red)}
 .env-item{display:grid;grid-template-columns:minmax(180px,230px) minmax(0,1fr);gap:16px;padding:10px;border-bottom:1px solid var(--line)}
-.env-item .k{padding-top:8px;font-family:var(--mono);font-size:10.5px;overflow-wrap:anywhere}
+.env-item .k{padding-top:5px;overflow-wrap:anywhere}
+.env-item .env-label{display:block;color:var(--text);font-size:11.5px;font-weight:600;line-height:1.35}
+.env-item .env-key{display:block;margin-top:3px;padding:0;background:transparent;color:var(--quiet);font-family:var(--mono);font-size:9.5px;line-height:1.3}
 .env-item .req,.req{color:var(--red);margin-left:3px}
 .env-item input,.env-item select{
   width:100%;height:34px;padding:6px 9px;border:1px solid var(--line);border-radius:6px;

@@ -10,9 +10,11 @@
 - 普通 Chrome/Chromium：`FINGERPRINT_BROWSER=custom`，通过 `CUSTOM_BROWSER_PATH` 指定可执行文件；留空时会尝试查找系统 Chrome。
 - [BitBrowser 官方下载页](https://www.bitbrowser.cn/download)：默认 API 为 `http://127.0.0.1:54345`。
 - AdsPower：默认 API 为 `http://127.0.0.1:50325`，启用鉴权时还需 API Key。
-- 其他指纹浏览器：`FINGERPRINT_BROWSER=custom_api` 并设置 `CUSTOM_BROWSER_API`；当前要求兼容 BitBrowser 的 `/browser/update|open|close|delete|list` 协议。
+- 其他指纹浏览器：`FINGERPRINT_BROWSER=custom_api` 并设置 `CUSTOM_BROWSER_API`。默认 `CUSTOM_BROWSER_API_MODE=auto` 保持 BitBrowser 兼容；对接自己的 REST API 时改为 `generic`，在 WebUI 填写 API Key、鉴权请求头以及创建/列表/启动/关闭/删除/更新路径即可。启动接口返回 `ws`、`cdp`、`endpoint` 或 `debugPort` 任一字段即可。
 
 在 `.env` 中用 `FINGERPRINT_BROWSER=bitbrowser|bundled|custom|adspower|custom_api` 切换。默认使用 BitBrowser；所有网页注册流程统一通过 Chromium CDP 自动化。
+
+`generic` 模式的最小约定：创建接口接收 `{name, remark, fingerprint, proxy}` 并返回 profile ID；列表接口返回数组或 `data.items`/`data.profiles`；启动、关闭、删除、更新接口接收配置的 `CUSTOM_BROWSER_API_ID_FIELD`（默认 `id`）。路径支持 `{id}` 和 `{profile_id}` 占位符，方法可分别配置为 GET/POST/DELETE。
 
 ### 网络出口
 

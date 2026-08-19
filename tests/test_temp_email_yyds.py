@@ -362,6 +362,52 @@ class ICloudMailTests(unittest.TestCase):
             self.assertEqual(temp_email._scan_once(*args), "654321")
 
 
+class RemailMailTests(unittest.TestCase):
+    def test_create_uses_code_order_contract_and_normalizes_token(self):
+        sess = FakeSession([
+            FakeResponse(data={"id": 3365715, "deliveryEmail": "a@outlook.com", "serviceToken": "service-token"}),
+        ])
+        with patch.object(temp_email, "REMAIL_PROJECT_ID", 58), patch.object(
+            temp_email, "REMAIL_EMAIL_SUFFIX", "outlook.com"
+        ):
+            mailbox = temp_email._remail_create(
+                None, None, None, "rk-test", "https://remail.aishop6.com", sess
+            )
+
+        self.assertEqual(mailbox["email"], "a@outlook.com")
+        self.assertEqual(mailbox["token"], "service-token")
+        method, url, kwargs = sess.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(
+            url,
+            "https://remail.aishop6.com/v1/open/orders?serviceMode=code&supply=private_first",
+        )
+        self.assertEqual(kwargs["json"], {"projectId": 58, "emailSuffix": "outlook.com"})
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer rk-test")
+        self.assertTrue(kwargs["headers"]["Idempotency-Key"])
+
+    def test_fetch_maps_items_and_verification_code(self):
+        sess = FakeSession([
+            FakeResponse(data={"items": [{
+                "sender": "noreply@openai.com",
+                "subject": "Your ChatGPT code",
+                "bodyPreview": "Use 829104 to continue",
+                "verificationCode": "829104",
+            }]}),
+        ])
+        with patch.object(temp_email, "_session", return_value=sess):
+            messages = temp_email.fetch_messages(
+                "3365715", "remail", email="a@outlook.com", token="service-token",
+                api_key="rk-test", base_url="https://remail.aishop6.com",
+            )
+        self.assertEqual(messages[0]["verificationCode"], "829104")
+        self.assertEqual(messages[0]["extracted"]["codes"], ["829104"])
+        self.assertEqual(sess.calls[0][1], "https://remail.aishop6.com/v1/pickup")
+        self.assertEqual(sess.calls[0][2]["params"], {
+            "email": "a@outlook.com", "token": "service-token"
+        })
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -51,11 +51,17 @@ python register_grok.py --count 1
 python register_grok.py --count 1 --sub2api --sub2api-group grok
 python register_grok.py --count 1 --node auto --latest-rt
 
+# Grok 使用 Remail（需配置 GROK_USE_TEMP_EMAIL=true 和 Remail 项目）
+python register_grok.py --count 1
+
 # Claude 使用最新 Outlook refresh token
 python register.py --count 1 --node auto --latest-rt
 
 # Claude 使用 YYDS 临时邮箱
 python register.py --count 1 --node auto --provider yyds
+
+# Claude 使用 Remail
+python register.py --count 1 --node auto --provider remail
 
 # Claude 指定 Outlook；refresh token 与 client_id 必须配套
 python register.py --email a@outlook.com --password xxx --token <refresh_token> --client-id <client_id> --node auto
@@ -63,6 +69,15 @@ python register.py --email a@outlook.com --password xxx --token <refresh_token> 
 # Kiro Builder ID；默认从 Outlook 资产池读取 Graph refresh token
 python register_kiro.py --count 1
 python register_kiro.py --email a@outlook.com --refresh-token <refresh_token> --client-id <client_id>
+
+# 使用 Remail 等配置的临时邮箱（TEMP_EMAIL_PROVIDER=remail）
+python register_kiro.py --count 1 --email-provider temp
+
+# 使用自建 REST 邮箱（CUSTOM_MAIL_*）
+python register_kiro.py --count 1 --email-provider custom
+
+# ChatGPT 使用 Remail
+python register_chatgpt.py --count 1 --email-provider remail
 ```
 
 ## Outlook

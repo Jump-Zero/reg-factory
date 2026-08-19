@@ -2013,6 +2013,7 @@ async def get_magic_link_by_temp_email(mailbox, max_wait=90, poll_interval=5):
                 fetch_messages,
                 mailbox["id"], mailbox["provider"],
                 email=mailbox["email"], token=mailbox.get("token", ""),
+                api_key=mailbox.get("api_key"), base_url=mailbox.get("base_url"),
             )
         except Exception as e:
             print(f"  [temp-email] fetch error: {str(e)[:80]}")
@@ -6489,7 +6490,7 @@ async def main():
     )
     parser.add_argument(
         "--provider",
-        choices=("yyds", "gptmail", "cfmail", "moemail", "custom"),
+        choices=("yyds", "gptmail", "cfmail", "moemail", "icloud", "remail", "custom"),
         default=None,
         help="temporary email provider; yyds uses YYDS_API_KEY",
     )

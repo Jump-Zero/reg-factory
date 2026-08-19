@@ -1720,6 +1720,7 @@ async def register_one(index, total, p, node):
             print(f"  [5] get code via temp-email API ({temp_mb['provider']}: {email})")
             code = await poll_verification_code(
                 temp_mb["id"], temp_mb["provider"], email=email, token=temp_mb.get("token"),
+                api_key=temp_mb.get("api_key"), base_url=temp_mb.get("base_url"),
                 max_wait=150, poll_interval=5,
                 sender_hint=GROK_SENDER, subject_hint=GROK_SUBJECT,
                 code_regex=GROK_CODE_REGEX,

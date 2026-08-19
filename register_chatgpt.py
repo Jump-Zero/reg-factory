@@ -1336,9 +1336,7 @@ async def _submit_chatgpt_email_form_once(page):
     # The consent banner can mount after the email field is filled and
     # intercept the first Continue click. Clear it immediately before every
     # attempt, then ensure React still has a non-empty value.
-    await dismiss_cookie_banner(page)
-    await asyncio.sleep(0.15)
-    await dismiss_cookie_banner(page)
+    await wait_for_cookie_banner_settle(page, timeout=2500)
     try:
         current_input = page.locator('input[type="email"], input[name="email"]').first
         if await current_input.count() > 0 and await current_input.is_visible():
@@ -1447,6 +1445,34 @@ async def dismiss_cookie_banner(page):
         except Exception:
             pass
     return False
+
+
+async def seed_chatgpt_cookie_consent(context):
+    """Preseed the same consent state as the existing Accept all action."""
+    try:
+        expires = int(time.time()) + 365 * 24 * 60 * 60
+        await context.add_cookies([
+            {
+                "name": "oai_consent_analytics",
+                "value": "true",
+                "domain": ".chatgpt.com",
+                "path": "/",
+                "expires": expires,
+                "sameSite": "Lax",
+            },
+            {
+                "name": "oai_consent_marketing",
+                "value": "true",
+                "domain": ".chatgpt.com",
+                "path": "/",
+                "expires": expires,
+                "sameSite": "Lax",
+            },
+        ])
+        return True
+    except Exception as error:
+        print(f"  [cookie] consent preseed failed: {str(error)[:100]}")
+        return False
 
 
 async def fill_email_verified(page, email_input, email, tries=4):
@@ -1587,6 +1613,49 @@ async def ensure_chatgpt_email_entry(page, retries=2):
     return False
 
 
+async def wait_for_cookie_banner_settle(page, timeout=5000):
+    """Wait for a late consent banner, accept it, and finish its rerender."""
+    # The marker lives in the document, so a real navigation automatically
+    # resets it while repeated submit helpers on the same page stay fast.
+    try:
+        already_settled = bool(await page.evaluate(
+            "() => window.__regFactoryCookieConsentSettled === true"
+        ))
+    except Exception:
+        already_settled = False
+    if already_settled:
+        if await dismiss_cookie_banner(page):
+            await asyncio.sleep(0.8)
+        return True
+
+    async def mark_settled():
+        try:
+            await page.evaluate(
+                "() => { window.__regFactoryCookieConsentSettled = true; }"
+            )
+        except Exception:
+            pass
+
+    deadline = time.monotonic() + max(0, timeout) / 1000
+    clicked = False
+    while time.monotonic() < deadline:
+        if await dismiss_cookie_banner(page):
+            clicked = True
+            # Accepting consent updates storage and remounts part of the SPA.
+            await asyncio.sleep(0.8)
+            continue
+        if clicked:
+            # Catch a second banner mount before declaring the page stable.
+            await asyncio.sleep(0.25)
+            if not await dismiss_cookie_banner(page):
+                await mark_settled()
+                return True
+        else:
+            await asyncio.sleep(0.15)
+    await mark_settled()
+    return clicked
+
+
 async def recover_stuck_chatgpt_email_submit(page, email):
     """Reopen a clean auth document when the SPA leaves ``?email=`` in place."""
     for attempt in range(1, 3):
@@ -1617,6 +1686,11 @@ async def recover_stuck_chatgpt_email_submit(page, email):
 def create_chatgpt_icloud_mailbox():
     """Allocate a low-cost iCloud submail for registration and code polling."""
     return create_mailbox(provider="icloud", mail_type="icloud")
+
+
+def create_chatgpt_remail_mailbox():
+    """Allocate the configured Remail project/suffix for registration and polling."""
+    return create_mailbox(provider="remail")
 
 
 def _icloud_registration_root(email):
@@ -1669,10 +1743,15 @@ def allocate_chatgpt_registration_mailbox():
             "mailbox": None,
         }
 
-    if EMAIL_PROVIDER == "icloud":
+    if EMAIL_PROVIDER in {"icloud", "remail"}:
         try:
-            mailbox = _allocate_untainted_chatgpt_icloud_mailbox()
-            print(f"  [email] iCloud submail allocated: {mailbox['email']}")
+            if EMAIL_PROVIDER == "icloud":
+                mailbox = _allocate_untainted_chatgpt_icloud_mailbox()
+                label = "iCloud submail"
+            else:
+                mailbox = create_chatgpt_remail_mailbox()
+                label = f"Remail ({mailbox.get('email', '').split('@')[-1]})"
+            print(f"  [email] {label} allocated: {mailbox['email']}")
             return {
                 "email": mailbox["email"],
                 "password": "",
@@ -1681,7 +1760,7 @@ def allocate_chatgpt_registration_mailbox():
                 "mailbox": mailbox,
             }
         except Exception as exc:
-            print(f"  [email] iCloud mailbox unavailable: {str(exc)[:160]}")
+            print(f"  [email] {EMAIL_PROVIDER} mailbox unavailable: {str(exc)[:160]}")
             return None
 
     # Prefer a mailbox whose Graph token and inbox were verified just now.
@@ -1980,6 +2059,7 @@ async def register_one(index, total, p):
         profile_ready = False
         profile_error = "goto_failed"
         auth_monitor = None
+        consent_preseeded = False
 
         for profile_attempt in range(1, profile_attempts + 1):
             profile_name = (
@@ -1994,6 +2074,7 @@ async def register_one(index, total, p):
                     browser_options=chatgpt_browser_proxy_fields(),
                 )
                 await ctx.clear_cookies()
+                consent_preseeded = await seed_chatgpt_cookie_consent(ctx)
                 auth_monitor = AuthResponseMonitor()
                 asset_monitor = ChatGPTAuthAssetMonitor()
                 page.on("response", auth_monitor.observe)
@@ -2077,12 +2158,15 @@ async def register_one(index, total, p):
 
         assert_chatgpt_node("before_email")
 
-        # Step 1.5: 先关 cookie 同意横幅（弹出时会挡住/抢焦点，导致邮箱填不进去 -> "邮箱必填"）
+        # Step 1.5: 先快速处理已经出现的横幅。延迟挂载的横幅在邮箱填好后
+        # 统一等待一次，避免启动阶段和每次提交都重复空等。
         await dismiss_cookie_banner(page)
-        # 关横幅后等页面稳定：横幅消失会触发重排/下拉渲染，等它落定再填，避免填到一半被重排打断
-        await asyncio.sleep(1.2)
-        await dismiss_cookie_banner(page)   # 横幅有时分两次弹，再补关一次
-        await asyncio.sleep(0.6)
+        # Preseeded consent normally settles in under a second; on routes that
+        # reject the cookie write, keep the longer late-mount fallback here so
+        # the email field is never written during a consent remount.
+        await wait_for_cookie_banner_settle(
+            page, timeout=750 if consent_preseeded else 6000
+        )
 
         # Step 2: 填邮箱 -> Continue
         print("  [2] fill email")
@@ -2098,8 +2182,11 @@ async def register_one(index, total, p):
             await page.screenshot(path=f"screenshots/chatgpt_email_not_committed_{index}.png")
             email_pool.mark_error(PLATFORM, email, email_pw, "email_not_committed")
             return None
-        # 提交前最后一道：关横幅（可能此刻才弹），并回读确认邮箱真在框里，否则再补填一次
-        await dismiss_cookie_banner(page)
+        # 提交前等待一次延迟挂载的 consent manager。确认后页面可能重渲染，
+        # 所以必须重新读取 React 输入值，必要时补填后才能 Continue。
+        await wait_for_cookie_banner_settle(
+            page, timeout=750 if consent_preseeded else 6000
+        )
         current_email = page.locator(
             'input[type="email"], input[name="email"]'
         ).first
@@ -2271,10 +2358,12 @@ async def register_one(index, total, p):
                 浏览器兜底只是去查同一个收件箱、纯浪费；取不到码该靠上层 resend 重发，而非开窗口。
                 received_after: resend 后传重发时刻，只收该时刻后到的邮件(旧码已被 OpenAI 作废)。"""
                 nonlocal mail_bb, mail_pid, mail_page, mail_logged_in
-                if mailbox and mailbox.get("provider") == "icloud":
+                if mailbox and mailbox.get("provider") in {"icloud", "remail"}:
+                    mailbox_provider = mailbox.get("provider")
                     c = await poll_verification_code(
-                        mailbox["id"], "icloud", email=mailbox["email"],
-                        base_url=mailbox.get("mail_api_url") or None,
+                        mailbox["id"], mailbox_provider, email=mailbox["email"],
+                        token=mailbox.get("token"), api_key=mailbox.get("api_key"),
+                        base_url=mailbox.get("mail_api_url") or mailbox.get("base_url") or None,
                         max_wait=120, poll_interval=4,
                         sender_hint=(), subject_hint=(), code_regex=r"\b(\d{6})\b",
                         exclude_codes=tuple(verification_seen_codes),
@@ -2497,7 +2586,7 @@ async def register_one(index, total, p):
                     sess["two_factor"] = totp_secret
                     sess["totp_secret"] = totp_secret
                 if isinstance(mailbox, dict):
-                    sess["email_provider"] = "icloud"
+                    sess["email_provider"] = mailbox.get("provider") or "icloud"
                     share_url = str(
                         mailbox.get("mail_api_url") or mailbox.get("share_url") or ""
                     ).strip()
@@ -2591,7 +2680,7 @@ async def register_one(index, total, p):
 async def register_one_with_mailbox_retries(index, total, p):
     """Retry iCloud allocation failures without changing the requested count."""
     attempts = 1
-    if EMAIL_PROVIDER == "icloud" and not FIXED_EMAIL:
+    if EMAIL_PROVIDER in {"icloud", "remail"} and not FIXED_EMAIL:
         attempts = max(
             1,
             min(20, _env_int("CHATGPT_ICLOUD_MAILBOX_ATTEMPTS", 8)),
@@ -3395,7 +3484,7 @@ async def main():
     parser.add_argument("--password", default=None, help="指定邮箱密码")
     parser.add_argument("--refresh-token", default=None, help="指定 Outlook refresh_token")
     parser.add_argument("--client-id", default=None, help="指定 Outlook OAuth client_id")
-    parser.add_argument("--email-provider", choices=["pool", "icloud"], default=None,
+    parser.add_argument("--email-provider", choices=["pool", "icloud", "remail"], default=None,
                         help="邮箱来源：pool=emails.txt，icloud=API 自动申请并取码")
     two_factor = parser.add_mutually_exclusive_group()
     two_factor.add_argument("--enable-2fa", dest="enable_2fa", action="store_true",
@@ -3431,7 +3520,7 @@ async def main():
     FIXED_REFRESH_TOKEN = args.refresh_token
     FIXED_CLIENT_ID = args.client_id
     EMAIL_PROVIDER = args.email_provider or CHATGPT_EMAIL_PROVIDER or "pool"
-    if EMAIL_PROVIDER not in {"pool", "icloud"}:
+    if EMAIL_PROVIDER not in {"pool", "icloud", "remail"}:
         print(f"  [config] CHATGPT_EMAIL_PROVIDER={EMAIL_PROVIDER!r} 无效，回退 pool")
         EMAIL_PROVIDER = "pool"
     IMPORT_C2A = args.import_c2a

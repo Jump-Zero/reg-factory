@@ -591,7 +591,40 @@ class KiroClient:
             return {}
 
 
-def register_one(email, mailbox_password, mailbox_token, mailbox_client_id, args):
+def _get_kiro_verification_code(
+    email, mailbox_token, mailbox_client_id, args, *, mailbox=None, sent_at=None
+):
+    """Read the Kiro OTP from Graph or a configured HTTP mailbox provider."""
+    if mailbox:
+        from common.temp_email import poll_verification_code_blocking
+
+        return poll_verification_code_blocking(
+            mailbox.get("id") or mailbox.get("email") or email,
+            mailbox.get("provider") or "custom",
+            email=email,
+            token=mailbox.get("token") or "",
+            api_key=mailbox.get("api_key") or None,
+            base_url=mailbox.get("base_url") or None,
+            max_wait=min(180, args.timeout),
+            poll_interval=5,
+            sender_hint=("amazon", "aws", "signin"),
+            subject_hint=("verification", "confirm", "code", "验证码"),
+        )
+    if not mailbox_token or not mailbox_client_id:
+        raise KiroError("Kiro 注册需要 Outlook refresh token 和 client id 读取验证码")
+    return get_code_by_token(
+        email,
+        mailbox_token,
+        mailbox_client_id,
+        sender_contains=("amazon", "aws", "signin"),
+        subject_contains=("verification", "confirm", "code", "验证码"),
+        max_wait=min(180, args.timeout),
+        poll=5,
+        received_after=sent_at,
+    )
+
+
+def register_one(email, mailbox_password, mailbox_token, mailbox_client_id, args, mailbox=None):
     target_password = args.account_password or _random_password()
     proxy = proxy_switch.effective_proxy_url()
     client = KiroClient(proxy=proxy, timeout=args.timeout)
@@ -615,13 +648,15 @@ def register_one(email, mailbox_password, mailbox_token, mailbox_client_id, args
         client.signup(email); client.signup_init(email); client.profile_init(); client.profile_start()
         time.sleep(random.uniform(0.5, 1.0))
         sent_at = client.send_otp(email)
-        if not mailbox_token or not mailbox_client_id:
-            raise KiroError("Kiro 注册需要 Outlook refresh token 和 client id 读取验证码")
         print("  [kiro] waiting for verification code")
-        otp = get_code_by_token(email, mailbox_token, mailbox_client_id,
-                                sender_contains=("amazon", "aws", "signin"),
-                                subject_contains=("verification", "confirm", "code", "验证码"),
-                                max_wait=min(180, args.timeout), poll=5, received_after=sent_at)
+        otp = _get_kiro_verification_code(
+            email,
+            mailbox_token,
+            mailbox_client_id,
+            args,
+            mailbox=mailbox,
+            sent_at=sent_at,
+        )
         if not otp:
             raise KiroError("等待验证码超时")
         registration_code, sign_state = client.create_identity(email, args.full_name, otp)
@@ -653,6 +688,17 @@ def main():
     parser.add_argument("--password", default="", help="Outlook mailbox password")
     parser.add_argument("--refresh-token", default="")
     parser.add_argument("--client-id", default="")
+    parser.add_argument(
+        "--email-provider",
+        choices=("pool", "temp", "custom"),
+        default="pool",
+        help="邮箱来源：pool=Outlook/自有 Graph 邮箱，temp=TEMP_EMAIL_PROVIDER，custom=自建 REST 邮箱 API",
+    )
+    parser.add_argument(
+        "--temp-provider",
+        default="",
+        help="--email-provider temp 时覆盖 TEMP_EMAIL_PROVIDER（如 yyds、gptmail、remail、custom）",
+    )
     parser.add_argument("--account-password", default="", help="Kiro account password; empty generates one")
     parser.add_argument("--full-name", default="Test User")
     parser.add_argument("--node", default="auto", help="Compatibility option; proxy is selected from WebUI settings")
@@ -660,7 +706,23 @@ def main():
     args = parser.parse_args()
     proxy_switch.apply_platform_environment("kiro")
     if args.email:
+        if args.email_provider != "pool":
+            print("[kiro] --email 仅支持 pool；临时/自建邮箱请省略 --email，由 API 自动分配")
+            return 1
         accounts = [(args.email.strip(), args.password.strip(), args.refresh_token.strip(), args.client_id.strip())]
+    elif args.email_provider in {"temp", "custom"}:
+        from common.temp_email import create_mailbox
+
+        accounts = []
+        provider = "custom" if args.email_provider == "custom" else (args.temp_provider.strip() or None)
+        for _ in range(max(1, args.count)):
+            try:
+                mailbox = create_mailbox(provider=provider)
+                accounts.append((mailbox["email"], "", "", "", mailbox))
+                print(f"[kiro] mailbox allocated provider={mailbox.get('provider')}: {mailbox['email']}")
+            except Exception as exc:
+                print(f"[kiro] mailbox allocation failed: {str(exc)[:220]}")
+                break
     else:
         accounts = []
         for _ in range(max(1, args.count)):
@@ -691,7 +753,8 @@ def main():
                     f"worker={worker.worker_id} slot={worker.slot} "
                     f"proxy={proxy_switch.current_node()}"
                 )
-                output.append((index, account, register_one(*account, args)))
+                mailbox = account[4] if len(account) > 4 else None
+                output.append((index, account, register_one(*account[:4], args, mailbox=mailbox)))
         return output
 
     success = 0
@@ -704,12 +767,14 @@ def main():
             for _index, account, result in future.result():
                 if result["status"] == "success":
                     success += 1
-                    email_pool.mark_used("kiro", account[0], account[1])
+                    if len(account) == 4:
+                        email_pool.mark_used("kiro", account[0], account[1])
                     print(f"[kiro] success: {success}/{len(accounts)}")
                 else:
-                    email_pool.mark_error(
-                        "kiro", account[0], account[1], result.get("error", "failed")
-                    )
+                    if len(account) == 4:
+                        email_pool.mark_error(
+                            "kiro", account[0], account[1], result.get("error", "failed")
+                        )
                     print(f"[kiro] failed: {result.get('error', 'unknown')}")
     return 0 if success == len(accounts) else 1
 

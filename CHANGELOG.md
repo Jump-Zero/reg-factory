@@ -1,5 +1,37 @@
 ﻿# 更新日志
 
+## 2026-08-19 - 2.0.5
+
+**自定义指纹浏览器 API**
+- 新增独立 `custom_api` 适配器，保留 BitBrowser 兼容模式，并支持常见 REST API 响应结构。
+- WebUI 浏览器配置改为按所选 provider 动态显示，custom_api 的高级路径和请求方法默认折叠，普通接入只需填写地址、模式和 Key。
+- 环境配置页改为智能配置：分组默认收起，只展示常用项、必填项、密钥和已修改项；每个变量补充中文名称，完整参数可按需展开。
+- 环境配置组支持直接点击标题栏展开和收起，也支持键盘 Enter/空格操作。
+- 更新静态资源版本号，避免浏览器缓存旧版脚本导致折叠交互不生效。
+- WebUI 可直接配置 API Key、鉴权请求头、额外 JSON 请求头、TLS 校验，以及创建、列表、启动、关闭、删除和更新指纹的路径与方法。
+- generic 模式自动映射 profile 名称、指纹和代理，支持路径 `{id}` / `{profile_id}` 占位符；启动响应可识别 `ws`、`cdp`、`endpoint`、`debugPort`、Selenium/Puppeteer 调试地址等常见字段。
+- 自定义浏览器配置保存后立即对当前服务和后续注册任务生效；连通性测试同步使用鉴权头与 TLS 设置，并明确提示鉴权失败。
+
+**验证**
+- 新增自定义浏览器创建、鉴权、启动地址归一化、列表兼容测试。
+- Python 全量测试 `594 passed`，WebUI JavaScript 语法检查通过。
+
+---
+
+## 2026-08-19 - 2.0.4
+
+**Remail 与多平台邮箱接入**
+- 新增 Remail Open API 临时邮箱 provider，支持短期邮箱订单、服务令牌轮询和验证码提取。
+- ChatGPT 支持 `--email-provider remail`；Grok、Claude、Kiro 可通过 `TEMP_EMAIL_PROVIDER=remail` 使用同一邮箱适配层。
+- Remail 的邮箱后缀和项目 ID 可配置；若使用 iCloud，所选 Remail 项目必须启用 iCloud 短期接码，公开项目仅支持购买时不会被误用为自动收码。
+- WebUI、CLI 示例和配置模板补充 Remail 参数，保存的 ChatGPT session 记录实际邮箱 provider。
+
+**验证**
+- Remail 创建订单、服务令牌取件和验证码提取单元测试通过。
+- ChatGPT 流程回归测试通过。
+
+---
+
 ## 2026-08-18 - 2.0.3
 
 **ChatGPT 与 Codex 注册**
@@ -15,10 +47,11 @@
 - 修复 WebUI 自更新后继承旧 iCloud API 配置、覆盖当前 `.env` 并误报 `402 insufficient quota` 的问题。
 - iCloud `+` 子邮箱被 OpenAI 按母邮箱识别为已有账号后，持久化跳过该母邮箱并自动换号重试，确保 `--count` 按成功账号目标执行。
 - Cloudflare/Turnstile 风控节点加入 30 分钟持久化污点，自动探测和轮换期间暂时跳过。
+- 修复 Cookie 同意管理器延迟挂载时重渲染登录表单、导致邮箱提交被清空的问题；新窗口预置同意状态，并把兜底等待收敛到提交前一次，减少重复空等。
 
 **验证**
 - 完成 ChatGPT iCloud 实际注册、邮箱验证码、Codex OAuth 和 SUB2API 导入验证。
-- Python 全量测试：584 passed。
+- Python 全量测试：586 passed。
 
 ---
 

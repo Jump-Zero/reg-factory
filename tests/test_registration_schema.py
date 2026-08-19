@@ -11,6 +11,13 @@ def _script(script_id):
 
 
 class RegistrationSchemaTests(unittest.TestCase):
+    def test_every_environment_variable_has_chinese_label_and_help(self):
+        for group in ENV_SCHEMA:
+            for item in group["items"]:
+                self.assertTrue(item.get("label"), item["key"])
+                self.assertTrue(item.get("help"), item["key"])
+                self.assertRegex(item["label"], r"[\u4e00-\u9fff]", item["key"])
+
     def test_claude_validator_reuses_clash_and_modern_fingerprint(self):
         with patch.dict(
             validate_keys.os.environ,
@@ -178,6 +185,11 @@ class RegistrationSchemaTests(unittest.TestCase):
         items = {item["key"]: item for item in browser_group["items"]}
 
         self.assertEqual(items["FINGERPRINT_BROWSER"]["default"], "bitbrowser")
+        self.assertNotIn("advanced", items["CUSTOM_BROWSER_API"])
+        self.assertNotIn("advanced", items["CUSTOM_BROWSER_API_MODE"])
+        self.assertNotIn("advanced", items["CUSTOM_BROWSER_API_KEY"])
+        self.assertTrue(items["CUSTOM_BROWSER_API_CREATE_PATH"]["advanced"])
+        self.assertTrue(items["CUSTOM_BROWSER_API_OPEN_METHOD"]["advanced"])
         self.assertEqual(
             items["FINGERPRINT_BROWSER"]["choices"][0], "bitbrowser"
         )

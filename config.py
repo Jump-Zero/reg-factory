@@ -61,6 +61,36 @@ ADSPOWER_API = _env("ADSPOWER_API", "http://127.0.0.1:50325")
 ADSPOWER_API_KEY = _env("ADSPOWER_API_KEY", "")
 ADSPOWER_GROUP_ID = _env("ADSPOWER_GROUP_ID", "0")
 
+# Custom fingerprint-browser API. `auto` preserves the legacy BitBrowser
+# payload; `generic` supports common REST APIs with configurable paths.
+CUSTOM_BROWSER_API = _env("CUSTOM_BROWSER_API", "")
+CUSTOM_BROWSER_API_MODE = _env("CUSTOM_BROWSER_API_MODE", "auto").strip().lower() or "auto"
+CUSTOM_BROWSER_API_KEY = _env("CUSTOM_BROWSER_API_KEY", "")
+CUSTOM_BROWSER_API_AUTH_HEADER = _env("CUSTOM_BROWSER_API_AUTH_HEADER", "Authorization")
+CUSTOM_BROWSER_API_AUTH_PREFIX = _env("CUSTOM_BROWSER_API_AUTH_PREFIX", "Bearer ")
+CUSTOM_BROWSER_API_HEADERS = _env("CUSTOM_BROWSER_API_HEADERS", "")
+CUSTOM_BROWSER_API_TIMEOUT = _env_int("CUSTOM_BROWSER_API_TIMEOUT", 60)
+CUSTOM_BROWSER_API_VERIFY_TLS = _env("CUSTOM_BROWSER_API_VERIFY_TLS", "true").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+CUSTOM_BROWSER_API_ID_FIELD = _env("CUSTOM_BROWSER_API_ID_FIELD", "id")
+CUSTOM_BROWSER_API_HEALTH_PATH = _env("CUSTOM_BROWSER_API_HEALTH_PATH", "/health")
+CUSTOM_BROWSER_API_CREATE_PATH = _env("CUSTOM_BROWSER_API_CREATE_PATH", "/browser/update")
+CUSTOM_BROWSER_API_LIST_PATH = _env("CUSTOM_BROWSER_API_LIST_PATH", "/browser/list")
+CUSTOM_BROWSER_API_OPEN_PATH = _env("CUSTOM_BROWSER_API_OPEN_PATH", "/browser/open")
+CUSTOM_BROWSER_API_CLOSE_PATH = _env("CUSTOM_BROWSER_API_CLOSE_PATH", "/browser/close")
+CUSTOM_BROWSER_API_DELETE_PATH = _env("CUSTOM_BROWSER_API_DELETE_PATH", "/browser/delete")
+CUSTOM_BROWSER_API_UPDATE_PATH = _env("CUSTOM_BROWSER_API_UPDATE_PATH", "/browser/update/partial")
+CUSTOM_BROWSER_API_CREATE_METHOD = _env("CUSTOM_BROWSER_API_CREATE_METHOD", "POST").upper()
+CUSTOM_BROWSER_API_LIST_METHOD = _env("CUSTOM_BROWSER_API_LIST_METHOD", "POST").upper()
+CUSTOM_BROWSER_API_OPEN_METHOD = _env("CUSTOM_BROWSER_API_OPEN_METHOD", "POST").upper()
+CUSTOM_BROWSER_API_CLOSE_METHOD = _env("CUSTOM_BROWSER_API_CLOSE_METHOD", "POST").upper()
+CUSTOM_BROWSER_API_DELETE_METHOD = _env("CUSTOM_BROWSER_API_DELETE_METHOD", "POST").upper()
+CUSTOM_BROWSER_API_UPDATE_METHOD = _env("CUSTOM_BROWSER_API_UPDATE_METHOD", "POST").upper()
+CUSTOM_BROWSER_API_FORWARD_FIELDS = _env("CUSTOM_BROWSER_API_FORWARD_FIELDS", "false").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+
 # Claude.ai 注册相关 URL
 CLAUDE_LOGIN_URL = "https://claude.ai/login"
 CLAUDE_CHALLENGE_WAIT_SECONDS = _env_int("CLAUDE_CHALLENGE_WAIT_SECONDS", 45)
@@ -92,7 +122,7 @@ MAIL_NEW_PASS = _env("MAIL_NEW_PASS", "")
 GROK_USE_TEMP_EMAIL = _env("GROK_USE_TEMP_EMAIL", "false").strip().lower() in ("1", "true", "yes", "on")
 # CLAUDE_USE_TEMP_EMAIL=true 时 register.py 走临时邮箱取 magic link，免去 Outlook 注册/轮询。
 CLAUDE_USE_TEMP_EMAIL = _env("CLAUDE_USE_TEMP_EMAIL", "false").strip().lower() in ("1", "true", "yes", "on")
-# provider: moemail | yyds | gptmail | cfmail | icloud（默认 gptmail，带公共测试 key 开箱即用）
+# provider: moemail | yyds | gptmail | cfmail | icloud | remail（默认 gptmail）
 TEMP_EMAIL_PROVIDER = _env("TEMP_EMAIL_PROVIDER", "gptmail").strip().lower() or "gptmail"
 
 # Outlook Graph OAuth 遇到安全信息页时，绑定临时辅助邮箱并自动轮询验证码。
@@ -115,7 +145,7 @@ OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL = _env_int(
     "OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL", 5
 )
 
-# ChatGPT 邮箱来源：pool=emails.txt Outlook 池；icloud=自动申请 iCloud 地址并通过 API 取码。
+# ChatGPT 邮箱来源：pool=emails.txt Outlook 池；icloud/Remail=自动申请邮箱并通过 API 取码。
 CHATGPT_EMAIL_PROVIDER = _env("CHATGPT_EMAIL_PROVIDER", "pool").strip().lower() or "pool"
 CHATGPT_ENABLE_2FA = _env("CHATGPT_ENABLE_2FA", "true").strip().lower() in (
     "1", "true", "yes", "on"
@@ -134,6 +164,13 @@ YYDS_API_KEY = _env("YYDS_API_KEY", "")  # AC-... 格式，profile 页获取
 # GPTMail（mail.chatgpt.org.uk），支持公共测试 key "gpt-test"
 GPTMAIL_BASE_URL = _env("GPTMAIL_BASE_URL", "https://mail.chatgpt.org.uk")
 GPTMAIL_API_KEY = _env("GPTMAIL_API_KEY", "gpt-test")
+
+# Remail 开放 API（Bearer rk-...；短效验证码订单）
+REMAIL_BASE_URL = _env("REMAIL_BASE_URL", "https://remail.aishop6.com")
+REMAIL_API_KEY = _env("REMAIL_API_KEY", "")
+REMAIL_PROJECT_ID = _env_int("REMAIL_PROJECT_ID", 0)
+REMAIL_EMAIL_SUFFIX = _env("REMAIL_EMAIL_SUFFIX", "outlook.com")
+REMAIL_SUPPLY = _env("REMAIL_SUPPLY", "private_first")
 
 # iCloud Mail API（API 主机，不是文档站 email.manageh.shop）
 ICLOUD_MAIL_API_BASE = _env("ICLOUD_MAIL_API_BASE", "https://mail.no-replyca.xyz")
