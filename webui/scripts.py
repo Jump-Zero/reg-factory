@@ -882,7 +882,11 @@ _ENV_LABELS = {
     # SMS and captcha
     "SMS_API_NAME": "firefox.fun API 账号名",
     "SMS_TOKEN": "firefox.fun 接码令牌",
+    "SMS_MAXPRICE_OPENAI": "firefox.fun 价格上限",
     "HERO_SMS_API_KEY": "Hero SMS API 密钥",
+    "HERO_SMS_SERVICE_OPENAI": "Hero SMS OpenAI 服务码",
+    "HERO_SMS_MAXPRICE_OPENAI": "Hero SMS 价格上限(USD)",
+    "HERO_SMS_MINPRICE_OPENAI": "Hero SMS 价格下限(USD)",
     "SMSMAN_TOKEN": "SMS-Man 接码令牌",
     "SMSMAN_APP_ID_OPENAI": "SMS-Man OpenAI 项目",
     "SMSMAN_APP_ID_GMAIL": "SMS-Man Google 项目",
@@ -937,6 +941,8 @@ _ENV_LABELS = {
     "CODEX_CPA_CALLBACK_RETRY_DELAY": "CPA 回调重试间隔",
     "CHATGPT2API_URL": "chatgpt2api 地址",
     "CHATGPT2API_KEY": "chatgpt2api 管理密钥",
+    "OMNIROUTE_URL": "OmniRoute 管理地址",
+    "OMNIROUTE_PASSWORD": "OmniRoute 管理密码",
     "WEBCHAT2API_URL": "webchat2api 地址",
     "WEBCHAT2API_KEY": "webchat2api 管理密钥",
     # Codex phone and vision
