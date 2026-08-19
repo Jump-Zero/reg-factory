@@ -111,6 +111,9 @@ python oauth_codex.py
 # 手动填写手机号并保留浏览器
 python oauth_codex.py --manual-phone --keep
 
+# 使用 CPA 生成授权地址并接收 OAuth callback（无需 SUB2API 登录）
+python oauth_codex.py --auth-url-source cpa
+
 # 注册后直接授权
 python run_full_flow.py --platforms chatgpt --codex
 ```
@@ -149,6 +152,8 @@ python tools/validate_keys.py cookies/accounts.txt
 ```
 
 普通 ChatGPT 网页 session 没有可续期的 `refresh_token`；正式 Codex 凭据应使用 `oauth_codex.py` 获取。
+
+`oauth_codex.py` 默认使用 SUB2API 生成授权地址。使用 CPA 模式前配置 `CPA_URL`、`CPA_MGMT_KEY`；CPA 会负责 PKCE、换码和凭据落盘。
 
 ## Gmail Android
 

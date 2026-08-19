@@ -30,6 +30,7 @@ class ChatGPTPlusTests(unittest.TestCase):
                 "user": {"email": "one@example.com"},
                 "registration_country": "JP",
                 "network_node": "Japan 01",
+                "mail_api_url": "https://mail.no-replyca.xyz/api/share/share-token",
             }
             with patch.object(session_export, "TOKEN_OUTPUT_DIR", str(token_root)), patch.object(
                 chatgpt_plus, "chatgpt_session_path", session_export.chatgpt_session_path
@@ -47,6 +48,10 @@ class ChatGPTPlusTests(unittest.TestCase):
             )
             self.assertEqual(saved_session["registration_country"], "JP")
             self.assertEqual(saved_session["network_node"], "Japan 01")
+            self.assertEqual(
+                saved_session["mail_api_url"],
+                "https://mail.no-replyca.xyz/api/share/share-token",
+            )
 
     def test_codex_oauth_credentials_persist_phone_status(self):
         with tempfile.TemporaryDirectory() as temp:

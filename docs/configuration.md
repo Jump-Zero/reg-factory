@@ -130,12 +130,13 @@ cp .env.example .env
 | 临时邮箱 | `YYDS_API_KEY` 等 provider 配置 | Claude/Grok 不使用 Outlook 池时 |
 | 接码 | `SMSMAN_*`、`SMS_API_NAME`、`SMS_TOKEN`、`HERO_SMS_*` | 手机验证；firefox.fun 使用 APIName 标识账号，token + 项目 ID 调用接口 |
 | SUB2API | `SUB2API_*` | Codex / Grok 下游导入 |
-| CPA | `CPA_URL`、`CPA_MGMT_KEY` | Codex 凭据导入 |
+| CPA | `CPA_URL`、`CPA_MGMT_KEY`、`CODEX_AUTH_URL_SOURCE` | Codex 授权地址与凭据导入 |
 | chatgpt2api | `CHATGPT2API_URL`、`CHATGPT2API_KEY` | 普通 ChatGPT 网页号导入 |
 
 密钥必须留在 `.env` 或进程环境变量中。不要把真实值写进 `.env.example`、README、测试和截图。
 
 ChatGPT 使用 iCloud 邮箱时，将 `CHATGPT_EMAIL_PROVIDER=icloud`，并填写 `ICLOUD_MAIL_API_KEY`。默认接口地址为 `https://mail.no-replyca.xyz`；`email.manageh.shop` 仅是接口文档站。`ICLOUD_MAIL_TYPE=icloud-code`、`ICLOUD_MAIL_SERVICE=openai` 用于申请 ChatGPT 接码邮箱；需要普通 iCloud 子邮箱时改用 `ICLOUD_MAIL_TYPE=icloud`，对应 `/api/user/email?type=icloud&apikey=...`。程序随后轮询 `/api/user/mail` 获取验证码。`ICLOUD_MAIL_API_BASE` 也兼容直接填写完整的 `/api/user/email?...` 地址。
+创建 iCloud 邮箱时程序会自动请求 `share=1`，并将返回的 `/api/share/{share_token}` 保存到 ChatGPT session JSON 的 `mail_api_url` 字段。该链接免 API Key，可直接查看邮箱 HTML，适合后续手动登录取码；分享链接等同于邮箱读取权限，请按敏感凭据保管。
 
 > **重要：提取 Graph RT 必须配置可接收验证码的辅助邮箱。**
 >

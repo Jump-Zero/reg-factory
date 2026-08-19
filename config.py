@@ -117,6 +117,9 @@ OUTLOOK_GRAPH_RECOVERY_POLL_INTERVAL = _env_int(
 
 # ChatGPT 邮箱来源：pool=emails.txt Outlook 池；icloud=自动申请 iCloud 地址并通过 API 取码。
 CHATGPT_EMAIL_PROVIDER = _env("CHATGPT_EMAIL_PROVIDER", "pool").strip().lower() or "pool"
+CHATGPT_ENABLE_2FA = _env("CHATGPT_ENABLE_2FA", "true").strip().lower() in (
+    "1", "true", "yes", "on"
+)
 
 # MoeMail（beilunyang/moemail，需自部署）
 MOEMAIL_BASE_URL = _env("MOEMAIL_BASE_URL", "https://moemail.example.com")
@@ -220,6 +223,10 @@ TOKEN_OUTPUT_DIR = _env("TOKEN_OUTPUT_DIR", "tokens")
 # CPA 管理接口（ChatGPT codex 授权文件导入）
 CPA_URL = _env("CPA_URL", "")
 CPA_MGMT_KEY = _env("CPA_MGMT_KEY", "")
+# Codex 授权地址来源：sub2 保持旧流程；cpa 由 CPA 生成 PKCE 并接收 callback。
+CODEX_AUTH_URL_SOURCE = _env("CODEX_AUTH_URL_SOURCE", "sub2").strip().lower() or "sub2"
+CODEX_CPA_CALLBACK_RETRIES = int(_env("CODEX_CPA_CALLBACK_RETRIES", "5") or "5")
+CODEX_CPA_CALLBACK_RETRY_DELAY = float(_env("CODEX_CPA_CALLBACK_RETRY_DELAY", "3") or "3")
 
 # SUB2API 管理接口（ChatGPT codex-session / Grok SSO 转 OAuth 导入）
 SUB2API_URL = _env("SUB2API_URL", "")

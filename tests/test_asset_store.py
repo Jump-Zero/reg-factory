@@ -249,6 +249,37 @@ class AssetStoreTests(unittest.TestCase):
         self.assertEqual(cpa["data"]["access_token"], "access-token")
         self.assertEqual(chatgpt2api["data"]["source_type"], "web")
 
+    def test_chatgpt_icloud_formats_include_the_mailbox_access_url(self):
+        email = "mailbox@icloud.com"
+        access_url = "https://mail.example.test/api/share/opaque-token"
+        cookie_value = "icloud-cookie-secret"
+        cookie_dir = self.root / "cookies" / "chatgpt"
+        cookie_dir.mkdir(parents=True)
+        (cookie_dir / "accounts.txt").write_text(
+            f"{email}|password|{cookie_value}\n", encoding="utf-8"
+        )
+        (cookie_dir / "full_icloud.json").write_text(json.dumps([{
+            "name": "__Secure-next-auth.session-token",
+            "value": cookie_value,
+            "domain": ".chatgpt.com",
+            "path": "/",
+        }]), encoding="utf-8")
+        token_dir = self.root / "tokens" / "chatgpt"
+        token_dir.mkdir(parents=True)
+        (token_dir / f"{email}.session.json").write_text(json.dumps({
+            "user": {"email": email},
+            "accessToken": "access-token",
+            "mail_api_url": access_url,
+        }), encoding="utf-8")
+
+        for output_format in ("cookies", "session", "sub2api", "cpa"):
+            result = asset_store.get_platform_asset(
+                "chatgpt", output_format, index=0, email_provider="icloud"
+            )
+            self.assertEqual(result["email"], email)
+            self.assertEqual(result["email_provider"], "icloud")
+            self.assertEqual(result["mail_api_url"], access_url)
+
     def test_verified_only_returns_normal_assets_and_blocks_unhealthy_pool(self):
         self._write_chatgpt_assets()
         from common import asset_scanner
@@ -531,6 +562,7 @@ class AssetStoreTests(unittest.TestCase):
         (token_dir / "icloud@icloud.com.session.json").write_text(json.dumps({
             "email": "icloud@icloud.com",
             "accessToken": "access-token",
+            "two_factor": "TOTP-SECRET",
         }), encoding="utf-8")
 
         result = asset_store.get_platform_asset(
@@ -538,6 +570,7 @@ class AssetStoreTests(unittest.TestCase):
         )
 
         self.assertEqual(result["data"], "icloud@icloud.com------------")
+        self.assertEqual(result["two_factor"], "TOTP-SECRET")
 
     def test_consuming_batch_can_include_previously_claimed_active_account(self):
         self._write_chatgpt_assets()

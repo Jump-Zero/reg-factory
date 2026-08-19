@@ -1,6 +1,26 @@
 ﻿# 更新日志
 
-## 2026-08-17 - 2.0.2
+## 2026-08-18 - 2.0.3
+
+**ChatGPT 与 Codex 注册**
+- iCloud 邮箱创建自动请求 `share=1`，生成免 API Key 的 `/api/share/{share_token}` 链接，并随 ChatGPT session 保存到 `mail_api_url`，方便后续手动取码。
+- ChatGPT 注册支持明确区分注册密码页和已有账号登录密码页，避免误填随机密码。
+- BitBrowser 临时返回“正在打开/启动中”时自动重试；ChatGPT 调试模式可记录脱敏的认证请求状态，便于定位 Cloudflare 和授权跳转问题。
+- Codex 授权支持 SUB2API 或 CPA 授权地址来源，并保留 refresh token 导入流程。
+- 修复 WebUI 保存代理配置后，注册子进程仍继承旧代理环境，导致 ChatGPT 邮箱提交页面被重置的问题。
+- ChatGPT 注册改用低成本 iCloud 子邮箱，继续保留分享链接和验证码轮询。
+- 修复邮箱提交后 SPA 仍处于 `?email=` 过渡态时重复提交空邮箱的问题。
+- 修正 `?email=` 仅代表前端路由提示、不能代表发码成功的误判；邮箱表单仍可见时会重新确认 React 输入值并再次提交。
+- ChatGPT 注册完成后默认执行二次邮箱 OTP 重认证，启用验证器 TOTP；2FA secret 随网页 session 和 Codex 本地凭据保存，Codex OAuth 登录也会自动提交动态码。
+- 修复 WebUI 自更新后继承旧 iCloud API 配置、覆盖当前 `.env` 并误报 `402 insufficient quota` 的问题。
+- iCloud `+` 子邮箱被 OpenAI 按母邮箱识别为已有账号后，持久化跳过该母邮箱并自动换号重试，确保 `--count` 按成功账号目标执行。
+- Cloudflare/Turnstile 风控节点加入 30 分钟持久化污点，自动探测和轮换期间暂时跳过。
+
+**验证**
+- 完成 ChatGPT iCloud 实际注册、邮箱验证码、Codex OAuth 和 SUB2API 导入验证。
+- Python 全量测试：584 passed。
+
+---
 
 **资产池与导出**
 - 资产扫描、正常状态筛选和批量导出流程支持 Outlook/iCloud 四段式账号，并在手动导出后移出号池。

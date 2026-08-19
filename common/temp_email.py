@@ -29,7 +29,7 @@ import re
 import string
 import sys
 import time
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -555,7 +555,9 @@ def _icloud_create(
     ).strip().lower()
     if kind not in {"icloud", "icloud-code"}:
         raise ValueError("ICLOUD_MAIL_TYPE 只能是 icloud 或 icloud-code")
-    params = {"type": kind, "apikey": key}
+    # Ask the provider for a keyless share URL so the mailbox can be reused
+    # for later manual login or account imports.
+    params = {"type": kind, "apikey": key, "share": "1"}
     if kind == "icloud-code":
         code_service = (
             service or pasted_query.get("service") or ICLOUD_MAIL_SERVICE or "openai"
@@ -573,6 +575,27 @@ def _icloud_create(
     address = (body.get("email") or body.get("address")) if isinstance(body, dict) else None
     if not address or "@" not in str(address):
         raise RuntimeError(f"iCloud Mail create 返回异常: {str(data)[:220]}")
+    share_token = ""
+    share_url = ""
+    for source in (body, data):
+        if not isinstance(source, dict):
+            continue
+        if not share_token:
+            share_token = str(
+                source.get("share_token") or source.get("shareToken") or ""
+            ).strip()
+        if not share_url:
+            share_url = str(
+                source.get("share_url")
+                or source.get("shareUrl")
+                or source.get("share_link")
+                or source.get("shareLink")
+                or ""
+            ).strip()
+    if share_token:
+        share_url = f"{base}/api/share/{quote(share_token, safe='')}"
+    elif share_url.startswith("/"):
+        share_url = f"{base}{share_url}"
     return {
         "id": str(address),
         "email": str(address),
@@ -580,6 +603,10 @@ def _icloud_create(
         "provider": "icloud",
         "mail_type": kind,
         "service": code_service,
+        "share_token": share_token,
+        "share_url": share_url,
+        # Existing account importers use this canonical field for iCloud URLs.
+        "mail_api_url": share_url,
         "raw": data,
     }
 
@@ -589,9 +616,10 @@ def _icloud_fetch(mailbox_id, email, token, api_key, base_url, sess):
     raw_url = _norm_base(base_url, "") if base_url else ""
     raw_path = urlsplit(raw_url).path.lower() if raw_url else ""
     # Some mailbox vendors issue a per-address read URL (/s/<secret>/<email>)
-    # instead of the configurable /api/user/mail endpoint.  Preserve that URL
-    # verbatim so its embedded secret is never reinterpreted as an API key.
-    if raw_url and "/s/" in raw_path:
+    # or a keyless share URL (/api/share/<share_token>) instead of the
+    # configurable /api/user/mail endpoint. Preserve that URL verbatim so its
+    # embedded secret is never reinterpreted as an API key.
+    if raw_url and ("/s/" in raw_path or "/api/share/" in raw_path):
         # Per-address pages are frequently CDN-cached; a resend must expose
         # the newly delivered message instead of the prior HTML snapshot.
         response = sess.get(

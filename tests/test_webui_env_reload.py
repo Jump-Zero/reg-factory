@@ -86,6 +86,58 @@ class WebUIEnvReloadTests(unittest.TestCase):
         self.assertEqual(claude["HTTPS_PROXY"], "http://home.test:9000")
         self.assertEqual(claude["REG_FACTORY_PLATFORM"], "claude")
 
+    def test_child_env_uses_saved_chatgpt_proxy_over_stale_boot_value(self):
+        path = self._env_file("unused")
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(
+                "PROXY_MODE=residential\n"
+                "CHATGPT_PROXY_MODE=clash_auto\n"
+                "CLASH_PROXY=http://127.0.0.1:7897\n"
+                "REG_FACTORY_PROXY=http://stale-home.test:9000\n"
+            )
+        stale = {
+            "PROXY_MODE": "residential",
+            "CHATGPT_PROXY_MODE": "residential",
+            "REG_FACTORY_PROXY": "http://stale-home.test:9000",
+        }
+        with patch.object(server, "ENV_PATH", path), patch.object(
+            server, "BOOT_ENV", stale
+        ), patch.dict(os.environ, stale, clear=False):
+            child = server._child_env("chatgpt")
+
+        self.assertEqual(child["CHATGPT_PROXY_MODE"], "clash_auto")
+        self.assertEqual(child["HTTPS_PROXY"], "http://127.0.0.1:7897")
+        self.assertEqual(child["REG_FACTORY_PLATFORM"], "chatgpt")
+
+    def test_saved_proxy_update_overrides_stale_boot_value_immediately(self):
+        with patch.object(
+            server, "BOOT_ENV", {"CHATGPT_PROXY_MODE": "residential"}
+        ), patch.dict(
+            os.environ, {"CHATGPT_PROXY_MODE": "residential"}, clear=False
+        ):
+            server._apply_saved_env({"CHATGPT_PROXY_MODE": "clash_auto"})
+            self.assertEqual(os.environ["CHATGPT_PROXY_MODE"], "clash_auto")
+
+    def test_child_env_uses_saved_icloud_key_over_stale_updater_value(self):
+        path = self._env_file("unused")
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("ICLOUD_MAIL_API_KEY=current-key\n")
+        stale = {"ICLOUD_MAIL_API_KEY": "stale-key"}
+        with patch.object(server, "ENV_PATH", path), patch.object(
+            server, "BOOT_ENV", stale
+        ), patch.dict(os.environ, stale, clear=False):
+            child = server._child_env("chatgpt")
+
+        self.assertEqual(child["ICLOUD_MAIL_API_KEY"], "current-key")
+
+    def test_saved_icloud_key_update_overrides_stale_updater_value_immediately(self):
+        stale = {"ICLOUD_MAIL_API_KEY": "stale-key"}
+        with patch.object(server, "BOOT_ENV", stale), patch.dict(
+            os.environ, stale, clear=False
+        ):
+            server._apply_saved_env({"ICLOUD_MAIL_API_KEY": "current-key"})
+            self.assertEqual(os.environ["ICLOUD_MAIL_API_KEY"], "current-key")
+
     def test_status_exposes_loaded_version_and_process_id(self):
         with patch.object(server, "_fingerprint_provider", return_value="bitbrowser"):
             with patch.object(server, "_read_config_val", side_effect=lambda _key, default="": default):

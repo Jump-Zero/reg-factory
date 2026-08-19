@@ -59,6 +59,50 @@ sys.path.insert(0, ROOT)
 from webui import scripts as schema  # noqa: E402
 
 
+# The updater inherits the current service environment.  Values originally
+# loaded from .env can therefore look like explicit boot-time overrides after
+# a restart and mask newer settings saved from the WebUI.  The network panel
+# is the runtime control plane for these keys, so its saved values must remain
+# authoritative for both this process and newly spawned registration tasks.
+_PROXY_ENV_KEYS = (
+    "PROXY_MODE",
+    "REG_FACTORY_PROXY_MODE",
+    "OUTLOOK_PROXY_MODE",
+    "CLAUDE_PROXY_MODE",
+    "CHATGPT_PROXY_MODE",
+    "GROK_PROXY_MODE",
+    "KIRO_PROXY_MODE",
+    "GITHUB_PROXY_MODE",
+    "CLASH_API",
+    "CLASH_SECRET",
+    "CLASH_PROXY",
+    "CLASH_GROUP",
+    "CLASH_FIXED_NODE",
+    "REG_FACTORY_PLUS_LINK_ROUTE",
+    "REG_FACTORY_PLUS_BIND_ROUTE",
+    "REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE",
+    "REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE",
+    "REG_FACTORY_PROXY",
+    "REG_FACTORY_PROXY_POOL",
+    "REG_FACTORY_PROXY_ROTATE_URL",
+    "REG_FACTORY_PROXY_ROTATE_METHOD",
+    "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE",
+    "REG_FACTORY_MAX_CONCURRENCY",
+    "REG_FACTORY_ALLOW_SHARED_EGRESS",
+    "CHATGPT_RESIDENTIAL_ROTATE_RETRIES",
+)
+
+# The same updater inheritance problem affects provider credentials after they
+# are edited in the WebUI.  Keep this list narrow so unrelated explicit system
+# environment overrides retain their existing precedence.
+_LIVE_ENV_KEYS = frozenset(_PROXY_ENV_KEYS) | {
+    "ICLOUD_MAIL_API_BASE",
+    "ICLOUD_MAIL_API_KEY",
+    "ICLOUD_MAIL_TYPE",
+    "ICLOUD_MAIL_SERVICE",
+}
+
+
 def _asset_api_denied(request: Request):
     configured = _read_config_val("REG_FACTORY_ASSET_API_KEY", "").strip()
     if configured:
@@ -773,7 +817,7 @@ def _write_env_file(path, updates):
 def _apply_saved_env(updates):
     """让当前 WebUI 与后续子进程看到新配置，同时保留启动前系统变量的优先级。"""
     for key, value in updates.items():
-        if key in BOOT_ENV:
+        if key in BOOT_ENV and key not in _LIVE_ENV_KEYS:
             continue
         if value == "":
             os.environ.pop(key, None)
@@ -3126,33 +3170,6 @@ def api_status():
     }
 
 
-_PROXY_ENV_KEYS = (
-    "PROXY_MODE",
-    "OUTLOOK_PROXY_MODE",
-    "CLAUDE_PROXY_MODE",
-    "CHATGPT_PROXY_MODE",
-    "GROK_PROXY_MODE",
-    "KIRO_PROXY_MODE",
-    "CLASH_API",
-    "CLASH_SECRET",
-    "CLASH_PROXY",
-    "CLASH_GROUP",
-    "CLASH_FIXED_NODE",
-    "REG_FACTORY_PLUS_LINK_ROUTE",
-    "REG_FACTORY_PLUS_BIND_ROUTE",
-    "REG_FACTORY_PLUS_LINK_PROXY_OVERRIDE",
-    "REG_FACTORY_PLUS_BIND_PROXY_OVERRIDE",
-    "REG_FACTORY_PROXY",
-    "REG_FACTORY_PROXY_POOL",
-    "REG_FACTORY_PROXY_ROTATE_URL",
-    "REG_FACTORY_PROXY_ROTATE_METHOD",
-    "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE",
-    "REG_FACTORY_MAX_CONCURRENCY",
-    "REG_FACTORY_ALLOW_SHARED_EGRESS",
-    "CHATGPT_RESIDENTIAL_ROTATE_RETRIES",
-)
-
-
 def _proxy_panel_data(include_nodes=False):
     from common import proxy_switch as ps
 
@@ -3489,7 +3506,7 @@ def _child_env(platform: str = ""):
     # Do not leak values loaded from an earlier .env after the active file
     # changes or removes them. Explicit startup values keep precedence.
     for key in managed_keys:
-        if key not in BOOT_ENV:
+        if key not in BOOT_ENV or key in _LIVE_ENV_KEYS:
             if key in saved_env:
                 env[key] = saved_env[key]
             else:

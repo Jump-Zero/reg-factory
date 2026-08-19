@@ -13,6 +13,34 @@ import oauth_codex
 
 
 class ChatGPTFlowTests(unittest.TestCase):
+    def test_password_step_classifies_existing_account_before_signup_fallback(self):
+        self.assertEqual(
+            register_chatgpt._classify_chatgpt_password_step(
+                "https://auth.openai.com/log-in/password",
+                "Enter your password",
+                "current-password",
+                "password",
+            ),
+            "login",
+        )
+        self.assertEqual(
+            register_chatgpt._classify_chatgpt_password_step(
+                "https://auth.openai.com/create-account/password",
+                "Create a password",
+                "new-password",
+                "password",
+            ),
+            "create",
+        )
+
+    def test_password_step_does_not_treat_hidden_or_missing_fields_as_password_page(self):
+        field = MagicMock()
+        field.count = AsyncMock(return_value=1)
+        field.nth.return_value.is_visible = AsyncMock(return_value=False)
+        page = MagicMock()
+        page.locator.return_value = field
+        self.assertEqual(asyncio.run(register_chatgpt.detect_chatgpt_password_step(page)), "none")
+
     def test_chatgpt_registration_prefers_a_verified_graph_mailbox(self):
         async def exercise():
             mailbox = ("good@outlook.com", "pw", "rt", "client")
@@ -52,7 +80,7 @@ class ChatGPTFlowTests(unittest.TestCase):
         )
         fallback.assert_not_called()
 
-    def test_chatgpt_icloud_mailbox_is_service_filtered(self):
+    def test_chatgpt_icloud_mailbox_uses_cheap_submail(self):
         with patch.object(
             register_chatgpt,
             "create_mailbox",
@@ -61,9 +89,54 @@ class ChatGPTFlowTests(unittest.TestCase):
             mailbox = register_chatgpt.create_chatgpt_icloud_mailbox()
 
         self.assertEqual(mailbox["email"], "code@example.com")
-        create.assert_called_once_with(
-            provider="icloud", mail_type="icloud-code", service="openai"
-        )
+        create.assert_called_once_with(provider="icloud", mail_type="icloud")
+
+    def test_icloud_allocation_skips_mother_mailbox_rejected_by_openai(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(
+                os.path.join(root, "emails_error_chatgpt.txt"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write(
+                    "used+old@icloud.com--------user_already_exists: existing\n"
+                )
+            mailboxes = [
+                {"email": "used+new@icloud.com"},
+                {"email": "fresh+new@icloud.com"},
+            ]
+            with patch.dict(
+                os.environ, {"REG_FACTORY_DATA_DIR": root}, clear=False
+            ), patch.object(
+                register_chatgpt,
+                "create_chatgpt_icloud_mailbox",
+                side_effect=mailboxes,
+            ) as create:
+                mailbox = register_chatgpt._allocate_untainted_chatgpt_icloud_mailbox()
+
+        self.assertEqual(mailbox["email"], "fresh+new@icloud.com")
+        self.assertEqual(create.call_count, 2)
+
+    def test_icloud_registration_retries_until_requested_account_succeeds(self):
+        with patch.object(
+            register_chatgpt, "EMAIL_PROVIDER", "icloud"
+        ), patch.object(
+            register_chatgpt, "FIXED_EMAIL", None
+        ), patch.dict(
+            os.environ, {"CHATGPT_ICLOUD_MAILBOX_ATTEMPTS": "3"}, clear=False
+        ), patch.object(
+            register_chatgpt,
+            "register_one",
+            AsyncMock(side_effect=[None, "session-cookie"]),
+        ) as register:
+            result = asyncio.run(
+                register_chatgpt.register_one_with_mailbox_retries(
+                    1, 1, MagicMock()
+                )
+            )
+
+        self.assertEqual(result, "session-cookie")
+        self.assertEqual(register.await_count, 2)
 
     def test_exhausted_outlook_pool_falls_back_to_icloud(self):
         mailbox = {
@@ -355,6 +428,18 @@ class ChatGPTFlowTests(unittest.TestCase):
                 )
 
         self.assertFalse(asyncio.run(exercise()))
+
+    def test_email_query_hint_does_not_override_a_visible_email_form(self):
+        email_input = MagicMock()
+        email_input.count = AsyncMock(return_value=1)
+        email_input.is_visible = AsyncMock(return_value=True)
+        page = MagicMock()
+        page.url = "https://chatgpt.com/auth/login?email=speedlol8%2Babc%40icloud.com"
+        page.locator.return_value.first = email_input
+
+        self.assertFalse(
+            asyncio.run(register_chatgpt.chatgpt_email_submission_advanced(page))
+        )
 
     def test_birthday_part_handles_camel_case_without_misreading_birthday(self):
         self.assertIsNone(register_chatgpt._birthday_part("birthday"))

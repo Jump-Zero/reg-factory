@@ -1077,6 +1077,45 @@ def _email_provider_from_session(session: dict, fallback: str = "") -> str:
     return classify_email_provider(_email_from_session(session, fallback))
 
 
+def _mail_api_url_from_session(session: dict) -> str:
+    if not isinstance(session, dict):
+        return ""
+    value = str(
+        session.get("mail_api_url")
+        or session.get("icloud_api_url")
+        or session.get("mailbox_api_url")
+        or ""
+    ).strip()
+    return value if re.match(r"^https://[^\s]+$", value, re.IGNORECASE) else ""
+
+
+def _two_factor_from_session(session: dict) -> str:
+    if not isinstance(session, dict):
+        return ""
+    return str(
+        session.get("two_factor")
+        or session.get("totp_secret")
+        or session.get("otp_secret")
+        or ""
+    ).strip()
+
+
+def _chatgpt_mail_api_url(email: str, session: dict | None = None) -> str:
+    direct = _mail_api_url_from_session(session or {})
+    if direct:
+        return direct
+    normalized = str(email or "").strip().lower()
+    if not normalized:
+        return ""
+    for record in _token_records("chatgpt"):
+        candidate = record.get("data") if isinstance(record, dict) else None
+        fallback = record["path"].stem.replace(".session", "") if isinstance(record, dict) else ""
+        if _email_from_session(candidate or {}, fallback).strip().lower() != normalized:
+            continue
+        return _mail_api_url_from_session(candidate or {})
+    return ""
+
+
 def _chatgpt_registration_mailbox_map(records: list[dict]) -> dict[str, dict]:
     """Merge static Outlook mailboxes with dynamic iCloud registrations."""
     mailboxes = _mailbox_map()
@@ -1104,6 +1143,8 @@ def _chatgpt_registration_mailbox_map(records: list[dict]) -> dict[str, dict]:
             "password": account_passwords.get(normalized, ""),
             "refresh_token": "",
             "client_id": "",
+            "mail_api_url": _mail_api_url_from_session(session),
+            "two_factor": _two_factor_from_session(session),
         }
     return mailboxes
 
@@ -1236,12 +1277,17 @@ def get_platform_asset(
         extra = {
             "codex_phone_status": str(session.get("codex_phone_status") or "not_verified").strip().lower(),
         }
+        two_factor = _two_factor_from_session(session)
+        if two_factor:
+            extra["two_factor"] = two_factor
         if output_format == "session":
             data = session
         elif output_format == "email_four":
             mailbox = mailbox_records[email.strip().lower()]
             data = _mailbox_four_line(mailbox)
             extra["email_provider"] = mailbox.get("email_provider") or classify_email_provider(email)
+            if mailbox.get("two_factor"):
+                extra["two_factor"] = mailbox["two_factor"]
         elif platform == "grok":
             data = {"sso_tokens": [str(session.get("sso") or "")], "name": email}
         elif platform == "kiro":
@@ -1274,6 +1320,13 @@ def get_platform_asset(
         "data": data,
         **extra,
     }
+    if platform == "chatgpt" and result["email_provider"] == "icloud":
+        mail_api_url = _chatgpt_mail_api_url(
+            email,
+            session if output_format in token_formats else None,
+        )
+        if mail_api_url:
+            result["mail_api_url"] = mail_api_url
     if verified_only:
         result["verification"] = record["_verification"]
     if should_claim:

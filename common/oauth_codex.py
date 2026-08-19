@@ -23,7 +23,9 @@ import re
 import struct
 import sys
 import time
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
+
+import requests
 
 from common.uploaders import _origin, _sub2api_request, DEFAULT_TIMEOUT
 
@@ -105,6 +107,112 @@ def generate_auth_url(origin, token, redirect_uri=REDIRECT_URI, timeout=DEFAULT_
     if not auth_url or not session_id:
         raise RuntimeError("SUB2API 未返回完整 auth_url / session_id")
     return auth_url, session_id, state
+
+
+def _cpa_headers(mgmt_key: str) -> dict:
+    key = str(mgmt_key or "").strip()
+    if not key:
+        raise ValueError("CPA 管理密钥为空")
+    return {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+        "X-Management-Key": key,
+    }
+
+
+def _cpa_origin(base_url: str) -> str:
+    origin = _origin(base_url)
+    return origin.rstrip("/")
+
+
+def generate_cpa_auth_url(base_url, mgmt_key, timeout=DEFAULT_TIMEOUT):
+    """Ask CPA to create a Codex URL, keeping PKCE/state ownership in CPA."""
+    url = f"{_cpa_origin(base_url)}/v0/management/codex-auth-url"
+    try:
+        response = requests.get(url, headers=_cpa_headers(mgmt_key), timeout=timeout)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        if not response.ok:
+            detail = payload.get("error") or payload.get("message") if isinstance(payload, dict) else ""
+            raise RuntimeError(f"CPA 生成授权地址失败 HTTP {response.status_code}: {detail or response.text[:240]}")
+    except requests.RequestException as exc:
+        raise RuntimeError(f"CPA 生成授权地址请求异常: {exc}") from exc
+    data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else {}
+    auth_url = str(
+        (payload.get("url") if isinstance(payload, dict) else "")
+        or (payload.get("auth_url") if isinstance(payload, dict) else "")
+        or data.get("url")
+        or data.get("auth_url")
+        or ""
+    ).strip()
+    state = str(
+        (payload.get("state") if isinstance(payload, dict) else "")
+        or data.get("state")
+        or _state_from_url(auth_url)
+        or ""
+    ).strip()
+    if not auth_url.startswith(("http://", "https://")):
+        raise RuntimeError("CPA 未返回有效 auth_url")
+    if not state:
+        raise RuntimeError("CPA 授权地址缺少 state")
+    return auth_url, state
+
+
+def callback_url(code: str, state: str, auth_url: str = "", redirect_uri: str = REDIRECT_URI) -> str:
+    """Build the callback URL expected by CPA from a captured OAuth result."""
+    target = str(redirect_uri or "").strip() or REDIRECT_URI
+    try:
+        query_redirect = parse_qs(urlparse(str(auth_url or "")).query).get("redirect_uri", [""])[0]
+        parsed = urlparse(query_redirect)
+        if parsed.scheme in {"http", "https"} and parsed.netloc and parsed.path:
+            target = query_redirect
+    except Exception:
+        pass
+    separator = "&" if "?" in target else "?"
+    return f"{target}{separator}{urlencode({'code': str(code or ''), 'state': str(state or '')})}"
+
+
+def submit_cpa_callback(
+    base_url,
+    mgmt_key,
+    callback: str,
+    timeout=DEFAULT_TIMEOUT,
+    retries=5,
+    retry_delay=3,
+):
+    """Submit a callback to CPA, retrying only transient management failures."""
+    callback = str(callback or "").strip()
+    if not callback:
+        raise ValueError("OAuth callback 为空")
+    url = f"{_cpa_origin(base_url)}/v0/management/oauth-callback"
+    body = {"provider": "codex", "redirect_url": callback}
+    headers = _cpa_headers(mgmt_key)
+    last = None
+    for attempt in range(max(1, int(retries or 1))):
+        try:
+            response = requests.post(url, headers=headers, json=body, timeout=timeout)
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            if response.ok:
+                if isinstance(payload, dict) and payload.get("success") is False:
+                    raise RuntimeError(str(payload.get("error") or payload.get("message") or "CPA callback rejected"))
+                return payload if isinstance(payload, dict) else {"raw": response.text[:500]}
+            detail = payload.get("error") or payload.get("message") if isinstance(payload, dict) else ""
+            error = RuntimeError(f"CPA callback HTTP {response.status_code}: {detail or response.text[:240]}")
+            retryable = response.status_code in {409, 429, 500, 502, 503, 504}
+            if not retryable:
+                raise error
+            last = error
+        except requests.RequestException as exc:
+            last = exc
+        if attempt + 1 < max(1, int(retries or 1)):
+            time.sleep(max(0.2, float(retry_delay or 3)) * (attempt + 1))
+    raise RuntimeError(f"CPA callback 提交失败: {last}") from last
 
 
 def _state_from_url(url):
@@ -1248,6 +1356,20 @@ async def authorize_with_retry(page, gen_auth_url, account_email="", phone_skip_
             print(f"  [codex] 第 {attempt+1} 次硬超时，强制中断重试...")
         last_msg = msg
         if code:
+            if state and not cb_state:
+                last_msg = "OAuth callback 缺少 state，已丢弃本次授权"
+                print(f"  [codex] 第 {attempt+1} 次 callback 缺少 state，重新生成授权链接...")
+                if attempt < total - 1:
+                    await asyncio.sleep(1.5)
+                    continue
+                return None, None, None, last_msg
+            if cb_state and state and cb_state != state:
+                last_msg = "OAuth callback state 不匹配，已丢弃本次授权"
+                print(f"  [codex] 第 {attempt+1} 次 callback state 不匹配，重新生成授权链接...")
+                if attempt < total - 1:
+                    await asyncio.sleep(1.5)
+                    continue
+                return None, None, None, last_msg
             if isinstance(result_metadata, dict):
                 result_metadata.update(attempt_metadata)
             return code, session_id, cb_state or state, "ok"

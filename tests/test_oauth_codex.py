@@ -4,6 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from common.oauth_codex import (
     CONSENT_LABELS,
+    callback_url,
+    generate_cpa_auth_url,
+    submit_cpa_callback,
     _complete_auth_email_login,
     _enter_otp,
     _icloud_existing_codes,
@@ -11,11 +14,76 @@ from common.oauth_codex import (
     _is_phone_flow_url,
     _totp_code,
     _wait_for_phone_flow_exit,
+    authorize_with_retry,
     handle_add_phone,
 )
 
 
 class OAuthCodexTests(unittest.TestCase):
+    def test_cpa_auth_url_extracts_nested_state(self):
+        response = MagicMock(ok=True)
+        response.json.return_value = {
+            "data": {
+                "auth_url": "https://auth.test/oauth?state=cpa-state",
+            }
+        }
+        with patch("common.oauth_codex.requests.get", return_value=response) as get:
+            auth_url, state = generate_cpa_auth_url("https://cpa.test/management.html", "secret")
+        self.assertEqual(auth_url, "https://auth.test/oauth?state=cpa-state")
+        self.assertEqual(state, "cpa-state")
+        self.assertEqual(get.call_args.args[0], "https://cpa.test/v0/management/codex-auth-url")
+
+    def test_cpa_callback_retries_transient_conflict(self):
+        failed = MagicMock(ok=False, status_code=409, text="Timeout waiting for OAuth callback")
+        failed.json.return_value = {"error": "Timeout waiting for OAuth callback"}
+        success = MagicMock(ok=True, status_code=200)
+        success.json.return_value = {"message": "accepted"}
+        with patch("common.oauth_codex.requests.post", side_effect=[failed, success]) as post, patch(
+            "common.oauth_codex.time.sleep"
+        ) as sleep:
+            payload = submit_cpa_callback(
+                "https://cpa.test",
+                "secret",
+                "http://localhost:1455/auth/callback?code=code&state=state",
+                retries=2,
+                retry_delay=0,
+            )
+        self.assertEqual(payload["message"], "accepted")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once()
+        self.assertNotIn("secret", str(post.call_args_list[0].kwargs["json"]))
+
+    def test_callback_url_uses_redirect_uri_from_authorize_url(self):
+        result = callback_url(
+            "code-value",
+            "state-value",
+            "https://auth.openai.com/oauth/authorize?redirect_uri="
+            "http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
+        )
+        self.assertEqual(
+            result,
+            "http://localhost:1455/auth/callback?code=code-value&state=state-value",
+        )
+
+    def test_authorize_retry_rejects_callback_without_state(self):
+        async def exercise():
+            with patch(
+                "common.oauth_codex.drive_authorize",
+                new=AsyncMock(return_value=("code-value", None, "ok")),
+            ), patch("common.oauth_codex.asyncio.sleep", new=AsyncMock()):
+                return await authorize_with_retry(
+                    MagicMock(),
+                    lambda: ("https://auth.test", "session", "expected-state"),
+                    phone_skip_attempts=0,
+                    allow_phone=False,
+                )
+
+        code, session_id, state, message = asyncio.run(exercise())
+        self.assertIsNone(code)
+        self.assertIsNone(session_id)
+        self.assertIsNone(state)
+        self.assertIn("缺少 state", message)
+
     def test_totp_code_matches_rfc_6238_vector(self):
         self.assertEqual(
             _totp_code("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", timestamp=59),

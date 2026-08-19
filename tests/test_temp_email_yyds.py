@@ -185,7 +185,7 @@ class ICloudMailTests(unittest.TestCase):
         self.assertEqual(sess.calls[0][1], "https://mail.no-replyca.xyz/api/user/email")
         self.assertEqual(
             sess.calls[0][2]["params"],
-            {"type": "icloud", "apikey": "alias-key"},
+            {"type": "icloud", "apikey": "alias-key", "share": "1"},
         )
 
     def test_create_uses_icloud_code_service_query(self):
@@ -205,10 +205,32 @@ class ICloudMailTests(unittest.TestCase):
         self.assertEqual(sess.calls[0][1], "https://mail.no-replyca.xyz/api/user/email")
         self.assertEqual(
             sess.calls[0][2]["params"],
-            {"type": "icloud-code", "service": "openai", "apikey": "test-key"},
+            {
+                "type": "icloud-code",
+                "service": "openai",
+                "apikey": "test-key",
+                "share": "1",
+            },
         )
         self.assertEqual(mailbox["mail_type"], "icloud-code")
         self.assertEqual(mailbox["service"], "openai")
+
+    def test_create_builds_keyless_share_url_from_share_token(self):
+        sess = FakeSession([
+            FakeResponse(data={"code": 0, "data": {
+                "email": "icloud@example.com", "share_token": "opaque/token"
+            }}),
+        ])
+        mailbox = temp_email._icloud_create(
+            None, None, None, "test-key", "https://mail.no-replyca.xyz", sess,
+            mail_type="icloud-code", service="openai",
+        )
+
+        expected = "https://mail.no-replyca.xyz/api/share/opaque%2Ftoken"
+        self.assertEqual(mailbox["share_token"], "opaque/token")
+        self.assertEqual(mailbox["share_url"], expected)
+        self.assertEqual(mailbox["mail_api_url"], expected)
+        self.assertEqual(sess.calls[0][2]["params"]["share"], "1")
 
     def test_create_explicit_chatgpt_purpose_overrides_generic_alias_config(self):
         sess = FakeSession([
@@ -270,6 +292,27 @@ class ICloudMailTests(unittest.TestCase):
         )
         self.assertEqual(messages[0]["code"], "654321")
         self.assertEqual(sess.calls[0][1], "https://icloud-api.example/s/opaque/icloud@example.com")
+        self.assertNotIn("params", sess.calls[0][2])
+
+    def test_fetch_accepts_keyless_share_endpoint(self):
+        sess = FakeSession([
+            FakeResponse(data={"data": {
+                "subject": "Your code", "code": "789012"
+            }}),
+        ])
+        messages = temp_email._icloud_fetch(
+            "icloud@example.com",
+            "icloud@example.com",
+            "",
+            "",
+            "https://icloud-api.example/api/share/share-token",
+            sess,
+        )
+        self.assertEqual(messages[0]["code"], "789012")
+        self.assertEqual(
+            sess.calls[0][1],
+            "https://icloud-api.example/api/share/share-token",
+        )
         self.assertNotIn("params", sess.calls[0][2])
 
     def test_fetch_accepts_nested_messages_and_plain_text_endpoint(self):
