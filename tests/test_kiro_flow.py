@@ -113,6 +113,10 @@ class KiroIntegrationTests(unittest.TestCase):
     def test_schema_and_proxy_route_expose_kiro(self):
         task = next(item for item in SCRIPTS if item["id"] == "register_kiro")
         self.assertEqual(task["file"], "register_kiro.py")
+        provider = next(arg for arg in task["args"] if arg["flag"] == "--temp-provider")
+        self.assertEqual(provider["type"], "choice")
+        self.assertIn("yyds", provider["choices"])
+        self.assertIn("remail", provider["choices"])
         export_task = next(item for item in SCRIPTS if item["id"] == "export_kiro_credentials")
         self.assertEqual(export_task["file"], "tools/export_kiro_credentials.py")
         keys = {item["key"] for group in ENV_SCHEMA for item in group["items"]}

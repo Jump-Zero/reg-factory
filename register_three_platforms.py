@@ -395,7 +395,11 @@ async def main():
                         help="Kiro 账号密码；留空由注册脚本随机生成")
     parser.add_argument("--kiro-full-name", default="Test User")
     parser.add_argument("--kiro-email-provider", choices=["pool", "temp", "custom"], default="pool")
-    parser.add_argument("--kiro-temp-provider", default="")
+    parser.add_argument(
+        "--kiro-temp-provider",
+        choices=("", "yyds", "remail", "gptmail", "moemail", "cfmail", "icloud", "custom"),
+        default="",
+    )
     parser.add_argument("--grok-mailbox-attempts", type=int, default=6)
     parser.add_argument("--claude-profile-retries", type=int, default=3)
     parser.add_argument("--claude-hcaptcha-retries", type=int, default=2)
