@@ -41,7 +41,7 @@ class EmailPoolTests(unittest.TestCase):
                 selected = emails.next_email("chatgpt")
 
             self.assertEqual(selected[0], "clean@outlook.com")
-    def test_platform_pool_skips_outlook_mailboxes_already_sold_standalone(self):
+    def test_platform_pool_allows_outlook_mailboxes_already_claimed_for_sale(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = os.path.join(tmp, "emails.txt")
             sold = os.path.join(tmp, "outlook_sale_emails.txt")
@@ -57,7 +57,30 @@ class EmailPoolTests(unittest.TestCase):
                             with patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")):
                                 selected = emails.next_email("chatgpt")
 
-            self.assertEqual(selected[0], "clean@outlook.com")
+            self.assertEqual(selected[0], "sold@outlook.com")
+
+    def test_retryable_chatgpt_mailbox_allows_outlook_mailbox_claimed_for_sale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.join(tmp, "emails.txt")
+            used = os.path.join(tmp, "used.txt")
+            errors = os.path.join(tmp, "errors.txt")
+            sold = os.path.join(tmp, "outlook_sale_emails.txt")
+            with open(pool, "w", encoding="utf-8") as f:
+                f.write("sold@outlook.com----pw----rt----client\n")
+            with open(errors, "w", encoding="utf-8") as f:
+                f.write("sold@outlook.com----pw----email_submit_stuck\n")
+            with open(sold, "w", encoding="utf-8") as f:
+                f.write("sold@outlook.com\n")
+            with (
+                patch.object(emails, "EMAILS_FILE", pool),
+                patch.object(emails, "_used_file", return_value=used),
+                patch.object(emails, "_error_file", return_value=errors),
+                patch.object(emails, "_outlook_sale_file", return_value=sold),
+                patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")),
+            ):
+                selected = emails.retryable_email("chatgpt")
+
+            self.assertEqual(selected, ("sold@outlook.com", "pw", "rt", "client"))
 
     def test_latest_email_requires_token_and_reserves_newest(self):
         with tempfile.TemporaryDirectory() as tmp:

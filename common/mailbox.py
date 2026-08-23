@@ -528,7 +528,30 @@ def get_link_by_token(
 
 # ========== 浏览器登录取信（refresh_token 失效时的兜底，已验证可用）==========
 
-async def _outlook_login(page, email, password):
+async def _fill_outlook_totp(page, totp_secret):
+    if not totp_secret:
+        return False
+    try:
+        from common.oauth_codex import _totp_code
+
+        code = _totp_code(totp_secret)
+        selector = (
+            'input[name="otc"], input[name="otp"], input[name="totp"], '
+            'input[autocomplete="one-time-code"], input[inputmode="numeric"], '
+            'input[data-testid*="otp" i]'
+        )
+        field = page.locator(selector).first
+        if await field.count() == 0 or not await field.is_visible():
+            return False
+        await field.fill(code)
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(5)
+        return True
+    except Exception:
+        return False
+
+
+async def _outlook_login(page, email, password, totp_secret=""):
     """用邮箱密码登录 Outlook。返回是否成功进入邮箱。
     已验证：登录后可能跳 passkey 设置页，直接导航 inbox URL 可绕过。"""
     try:
@@ -546,6 +569,7 @@ async def _outlook_login(page, email, password):
             await asyncio.sleep(0.5)
             await page.keyboard.press("Enter")
             await asyncio.sleep(5)
+        await _fill_outlook_totp(page, totp_secret)
 
         # 密码提交后会出现若干中间页，逐个处理（轮询几轮，每轮点掉一个）：
         #  - 隐私/服务协议同意页 (Review your privacy / 隐私声明 / Accept and continue): 点 接受/同意/继续
@@ -563,6 +587,9 @@ async def _outlook_login(page, email, password):
             if "outlook" in (page.url or "") and "live.com/mail" in (page.url or ""):
                 break
             cur_url = (page.url or "").lower()
+            await _fill_outlook_totp(page, totp_secret)
+            if "outlook" in (page.url or "") and "live.com/mail" in (page.url or ""):
+                break
             body = ""
             try:
                 body = (await page.locator("body").inner_text())[:400].lower()
@@ -602,7 +629,7 @@ async def _outlook_login(page, email, password):
             if not clicked:
                 # 没有可点的中间页按钮，尝试直接去邮箱
                 break
-        return True
+        return "outlook" in (page.url or "") and "live.com/mail" in (page.url or "")
     except Exception as e:
         print(f"  [mail-pw] login error: {e}")
         return False
@@ -804,11 +831,11 @@ async def fetch_from_broker(email, password, sender_hint, subject_hint, regex, k
         return None
 
 
-async def prelogin_outlook(page, email, password):
+async def prelogin_outlook(page, email, password, totp_secret=""):
     """预登录 Outlook：登录 + 过隐私协议/passkey + 进收件箱，停在邮箱就绪状态。
     用法：在触发发码（如 chatgpt 提交邮箱）【之前】先调用它，等码一到立刻能扫到，
     避免"发码后才登录、登录+过协议耗时导致错过/超时"。返回是否就绪。"""
-    if not await _outlook_login(page, email, password):
+    if not await _outlook_login(page, email, password, totp_secret=totp_secret):
         return False
     try:
         await page.goto("https://outlook.live.com/mail/0/", timeout=60000)
@@ -829,6 +856,7 @@ async def get_code_outlook_pw(
     max_wait=150,
     poll=8,
     skip_login=False,
+    totp_secret="",
 ):
     """浏览器登录 Outlook 取 6 位验证码（refresh_token 失效时用）。
     通过点击左侧文件夹切换 inbox/junk（直接 goto junk URL 列表为空）。
@@ -838,7 +866,7 @@ async def get_code_outlook_pw(
         return await fetch_from_broker(email, password, sender_hint, subject_hint, code_regex, "code", max_wait)
     pat = re.compile(code_regex)
     if not skip_login:
-        if not await _outlook_login(page, email, password):
+        if not await _outlook_login(page, email, password, totp_secret=totp_secret):
             return None
         # 进收件箱让整个邮箱界面完整加载一次
         try:

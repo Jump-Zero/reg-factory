@@ -1194,6 +1194,7 @@ def api_asset_email(
     pristine_only: bool = False,
     normal_only: bool = False,
     no_graph_only: bool = False,
+    status: str = "",
 ):
     denied = _asset_api_denied(request)
     if denied:
@@ -1208,7 +1209,8 @@ def api_asset_email(
             email_provider=email_provider,
             pristine_only=pristine_only,
             no_graph_only=no_graph_only,
-            verified_only=normal_only and not no_graph_only,
+            verified_only=normal_only and not no_graph_only and not bool(str(status).strip()),
+            status=status,
         )
     )
 
@@ -1221,6 +1223,7 @@ def api_asset_cookie(
     index: int | None = None,
     codex_phone_status: str = "",
     email_provider: str = "",
+    status: str = "",
 ):
     denied = _asset_api_denied(request)
     if denied:
@@ -1235,6 +1238,7 @@ def api_asset_cookie(
             claim_once=True,
             codex_phone_status=codex_phone_status,
             email_provider=email_provider,
+            status=status,
         )
     )
 
@@ -1314,7 +1318,8 @@ async def api_asset_export(request: Request):
     resource = str(data.get("resource") or "emails").strip().lower()
     output_format = str(data.get("format") or ("four" if resource == "emails" else "raw")).strip().lower()
     consume = data.get("consume", True)
-    normal_only = data.get("normal_only", True)
+    status = data.get("status", "")
+    normal_only = data.get("normal_only", not bool(str(status).strip()))
     include_claimed = data.get("include_claimed", consume)
     if not all(isinstance(value, bool) for value in (consume, normal_only, include_claimed)):
         return JSONResponse({"error": "consume, normal_only and include_claimed must be boolean"}, status_code=400)
@@ -1326,10 +1331,11 @@ async def api_asset_export(request: Request):
                 resource,
                 output_format=output_format,
                 limit=data.get("limit", 100),
-                verified_only=normal_only,
+                verified_only=normal_only and not bool(str(status).strip()),
                 email_provider=str(data.get("email_provider") or ""),
                 codex_phone_status=str(data.get("codex_phone_status") or ""),
                 include_claimed=include_claimed,
+                status=status,
             )
             payload = _asset_export_zip(results, resource, output_format)
             lifecycle = (
@@ -1502,8 +1508,9 @@ async def api_asset_scan_start(request: Request):
     if invalid:
         return JSONResponse({"error": f"不支持的平台：{', '.join(invalid)}"}, status_code=400)
     try:
-        concurrency = min(2, max(1, int((data or {}).get("concurrency") or 1)))
-        account_concurrency = min(8, max(1, int((data or {}).get("account_concurrency") or 4)))
+        platform_limit, account_limit = asset_scanner.scan_concurrency_limits()
+        concurrency = min(platform_limit, max(1, int((data or {}).get("concurrency") or 1)))
+        account_concurrency = min(account_limit, max(1, int((data or {}).get("account_concurrency") or 4)))
         timeout = min(60, max(5, int((data or {}).get("timeout") or 15)))
     except (TypeError, ValueError):
         return JSONResponse({"error": "concurrency 和 timeout 必须是整数"}, status_code=400)
@@ -1609,9 +1616,9 @@ async def api_chatgpt_plus_import_codex(request: Request):
     if len(account_text) > 5_000_000:
         return JSONResponse({"error": "批量账号内容超过 5 MB"}, status_code=413)
 
-    from common.account_records import canonical_account_line, parse_account_text
+    from common.account_records import canonical_plus_account_line, parse_account_text
 
-    records, errors = parse_account_text(account_text)
+    records, errors = parse_account_text(account_text, plus_credentials=True)
     if errors:
         return JSONResponse(
             {"error": "账号格式错误或存在重复邮箱", "details": errors[:20]},
@@ -1677,7 +1684,7 @@ async def api_chatgpt_plus_import_codex(request: Request):
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(canonical_account_line(item) for item in records) + "\n")
+            handle.write("\n".join(canonical_plus_account_line(item) for item in records) + "\n")
         with contextlib.suppress(OSError):
             os.chmod(input_path, 0o600)
 

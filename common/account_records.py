@@ -13,6 +13,7 @@ CLIENT_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+TOTP_SECRET_RE = re.compile(r"^[A-Z2-7]{16,128}={0,6}$", re.IGNORECASE)
 COOKIE_RE = re.compile(
     r"(?:^|[;\s])(?P<name>__Secure-next-auth\.session-token(?:\.\d+)?|session-token)=(?P<value>[^;\s]+)",
     re.IGNORECASE,
@@ -70,6 +71,11 @@ def _token_kind(token: str) -> str:
     return "session_token"
 
 
+def _looks_like_totp_secret(value: str) -> bool:
+    """Recognize the base32 secret commonly printed on paid-account cards."""
+    return bool(TOTP_SECRET_RE.fullmatch(str(value or "").strip()))
+
+
 def _cookies_from_value(value) -> list[dict]:
     if isinstance(value, dict):
         value = [value]
@@ -112,6 +118,12 @@ def _from_mapping(value: dict) -> dict:
         or ""
     ).strip()
     password = str(value.get("password") or value.get("pass") or value.get("pwd") or "").strip()
+    account_password = str(
+        value.get("account_password")
+        or value.get("chatgpt_password")
+        or value.get("login_password")
+        or ""
+    ).strip()
     refresh_token = str(
         value.get("refresh_token")
         or value.get("refreshToken")
@@ -196,6 +208,7 @@ def _from_mapping(value: dict) -> dict:
         "source_type": source_type,
         "email": email,
         "password": password,
+        "account_password": account_password,
         "refresh_token": refresh_token,
         "client_id": client_id,
         "access_token": access_token,
@@ -274,7 +287,7 @@ def _validate(record: dict) -> dict:
     return record
 
 
-def parse_account_line(line: str) -> dict:
+def parse_account_line(line: str, *, plus_credentials: bool = False) -> dict:
     """Parse one mailbox, session-cookie, OAuth JSON, or raw token record."""
     raw = str(line or "").strip()
     if not raw or raw.startswith("#"):
@@ -314,6 +327,13 @@ def parse_account_line(line: str) -> dict:
             mapping = {"email": email, "password": password, "client_id": third}
         elif len(fields) == 3 and third.startswith("M."):
             mapping = {"email": email, "password": password, "refresh_token": third}
+        elif len(fields) == 3 and plus_credentials and _looks_like_totp_secret(third):
+            mapping = {
+                "email": email,
+                "password": password,
+                "account_password": password,
+                "two_factor": third,
+            }
         elif len(fields) == 3 and CLIENT_ID_RE.fullmatch(fourth):
             mapping = {"email": email, "password": password, "refresh_token": third, "client_id": fourth}
         elif CLIENT_ID_RE.fullmatch(third) and not CLIENT_ID_RE.fullmatch(fourth):
@@ -353,7 +373,9 @@ def _identity(record: dict) -> str:
     return "token:" + hashlib.sha256(payload).hexdigest()
 
 
-def parse_account_text(text: str) -> tuple[list[dict], list[dict]]:
+def parse_account_text(
+    text: str, *, plus_credentials: bool = False
+) -> tuple[list[dict], list[dict]]:
     records = []
     errors = []
     seen = set()
@@ -403,7 +425,9 @@ def parse_account_text(text: str) -> tuple[list[dict], list[dict]]:
                     errors.append({"line": record_line, "error": str(exc)})
                 continue
             try:
-                candidates.append((index + 1, parse_account_line(line)))
+                candidates.append(
+                    (index + 1, parse_account_line(line, plus_credentials=plus_credentials))
+                )
             except ValueError as exc:
                 errors.append({"line": index + 1, "error": str(exc)})
             index += 1
@@ -422,7 +446,7 @@ def canonical_account_line(record: dict) -> str:
         payload = {
             key: record.get(key)
             for key in (
-                "source_type", "email", "password", "refresh_token", "client_id",
+                "source_type", "email", "password", "account_password", "refresh_token", "client_id",
                 "access_token", "session_token", "cookies", "plan_type", "codex_phone_status",
                 "mail_api_url", "mail_api_key", "two_factor",
             )
@@ -452,6 +476,23 @@ def canonical_account_line(record: dict) -> str:
     while len(fields) > 2 and not fields[-1]:
         fields.pop()
     return "----".join(fields)
+
+
+def canonical_plus_account_line(record: dict) -> str:
+    """Serialize Plus card credentials without losing the authenticator secret."""
+    if (
+        record.get("source_type") == "mailbox"
+        and record.get("password")
+        and record.get("two_factor")
+        and not record.get("mail_api_url")
+    ):
+        payload = {
+            key: record.get(key)
+            for key in ("email", "password", "account_password", "two_factor", "provider")
+            if record.get(key) not in (None, "", [], {})
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return canonical_account_line(record)
 
 
 def masked_email(email: str) -> str:

@@ -499,10 +499,43 @@ class WebUIAssetScanTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(current["scan"]["running"])
         self.assertEqual(current["scan"]["progress"]["completed"], 1)
         self.assertEqual(current["summary"]["statuses"]["normal"], 1)
-        self.assertEqual(captured["concurrency"], 2)
+        self.assertEqual(captured["concurrency"], 5)
         self.assertEqual(captured["account_concurrency"], 4)
         self.assertFalse(captured["include_plus_trial"])
         self.assertTrue(captured["force"])
+
+    async def test_asset_scan_accepts_higher_concurrency_with_configured_limits(self):
+        from common import asset_scanner
+
+        report = {
+            "schema_version": 1,
+            "finished_at": "2026-07-28T09:00:00Z",
+            "last_scan_at": "2026-07-28T09:00:00Z",
+            "items": [],
+            "summary": {"total": 0, "statuses": {}, "platforms": {}},
+        }
+        captured = {}
+
+        def scan_pool(**kwargs):
+            captured.update(kwargs)
+            return report
+
+        with patch.object(asset_scanner, "get_report", return_value=report), \
+                patch.object(asset_scanner, "scan_pool", side_effect=scan_pool), \
+                patch.dict(os.environ, {
+                    "ASSET_SCAN_MAX_PLATFORM_CONCURRENCY": "5",
+                    "ASSET_SCAN_MAX_ACCOUNT_CONCURRENCY": "32",
+                }, clear=False):
+            started = await server.api_asset_scan_start(FakeJSONRequest({
+                "platforms": ["outlook", "chatgpt", "claude", "grok", "kiro"],
+                "concurrency": 5,
+                "account_concurrency": 32,
+            }))
+            await server.ASSET_SCAN_TASK
+
+        self.assertTrue(started["ok"])
+        self.assertEqual(captured["concurrency"], 5)
+        self.assertEqual(captured["account_concurrency"], 32)
 
     async def test_progress_only_poll_does_not_rebuild_inventory(self):
         from common import asset_scanner

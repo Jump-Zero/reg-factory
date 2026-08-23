@@ -20,7 +20,6 @@ from common import oauth_codex as ox
 from common import proxy_switch
 from common.account_records import (
     is_icloud_email,
-    is_outlook_email,
     masked_email,
     parse_account_text,
 )
@@ -105,6 +104,7 @@ class MailCodeProvider:
         self.icloud_api_url = str(record.get("mail_api_url") or "").strip()
         self.icloud_api_key = str(record.get("mail_api_key") or "").strip()
         self.icloud_token = str(record.get("two_factor") or "").strip()
+        self.totp_secret = self.icloud_token
         self.mail_page = None
         self.mail_prelogged = False
 
@@ -139,10 +139,10 @@ class MailCodeProvider:
         password = self.record.get("password") or ""
         if not password:
             raise RuntimeError("邮箱 Graph token 不可用且没有邮箱密码兜底")
-        if not is_outlook_email(email):
-            raise RuntimeError("非 Outlook 邮箱需要配置 iCloud 接码 API 或直接提供有效 session token")
         self.mail_page = await self.context.new_page()
-        self.mail_prelogged = await prelogin_outlook(self.mail_page, email, password)
+        self.mail_prelogged = await prelogin_outlook(
+            self.mail_page, email, password, totp_secret=self.totp_secret
+        )
         if not self.mail_prelogged:
             raise RuntimeError("Outlook 邮箱密码登录失败，无法自动取 OpenAI 验证码")
         await self.main_page.bring_to_front()
@@ -197,6 +197,7 @@ class MailCodeProvider:
                 max_wait=self.max_wait,
                 poll=8,
                 skip_login=self.mail_prelogged,
+                totp_secret=self.totp_secret,
             )
             self.mail_prelogged = bool(code) or self.mail_prelogged
             await self.main_page.bring_to_front()
@@ -356,6 +357,7 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
                 email_code_provider=mail_provider,
                 allow_phone=not getattr(args, "skip_phone", False),
                 totp_secret=record.get("two_factor") or "",
+                account_password=record.get("account_password") or "",
             )
             if not code:
                 raise RuntimeError(message or "Codex OAuth 授权未完成")
@@ -397,7 +399,7 @@ async def run(args):
     finally:
         if args.delete_input:
             source_path.unlink(missing_ok=True)
-    records, errors = parse_account_text(raw)
+    records, errors = parse_account_text(raw, plus_credentials=True)
     if errors:
         lines = ", ".join(str(item["line"]) for item in errors[:10])
         raise RuntimeError(f"账号格式错误或重复：第 {lines} 行")

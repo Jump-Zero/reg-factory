@@ -59,6 +59,7 @@ _PLATFORMS = {
 }
 
 EMAIL_PROVIDERS = ("outlook", "icloud", "temporary", "other")
+ASSET_STATUSES = ("normal", "unlock", "banned", "expired", "restricted", "invalid", "unknown", "error")
 LIFECYCLE_BUCKETS = ("exported", "quarantine")
 QUARANTINE_STATUSES = ("banned", "expired", "invalid", "unknown")
 DEFINITIVE_UNKNOWN_EVIDENCE = {
@@ -790,7 +791,7 @@ def registered_mailbox_usage() -> dict[str, tuple[str, ...]]:
 
 def _verification_payload(platform: str, item: dict) -> dict:
     verification = {
-        "status": "normal",
+        "status": str(item.get("status") or "unknown"),
         "checked_at": str(item.get("checked_at") or ""),
         "evidence": str(item.get("evidence") or ""),
     }
@@ -805,7 +806,26 @@ def _verification_payload(platform: str, item: dict) -> dict:
     return verification
 
 
-def _verification_indexes(platform: str) -> tuple[dict[str, dict], dict[str, dict]]:
+def _normalize_status_filter(value) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple, set)):
+        raw_values = value
+    else:
+        raw_values = str(value).replace(",", " ").split()
+    statuses = tuple(dict.fromkeys(
+        str(item).strip().lower() for item in raw_values if str(item).strip()
+    ))
+    invalid = set(statuses).difference(ASSET_STATUSES)
+    if invalid:
+        raise AssetError("status must be one or more of: " + ", ".join(ASSET_STATUSES))
+    return statuses
+
+
+def _verification_indexes(
+    platform: str,
+    statuses: tuple[str, ...] = ("normal",),
+) -> tuple[dict[str, dict], dict[str, dict]]:
     from common import asset_scanner
 
     by_email = {}
@@ -813,7 +833,7 @@ def _verification_indexes(platform: str) -> tuple[dict[str, dict], dict[str, dic
     for item in asset_scanner.get_report().get("items", []):
         if not isinstance(item, dict):
             continue
-        if item.get("platform") != platform or item.get("status") != "normal":
+        if item.get("platform") != platform or item.get("status") not in statuses:
             continue
         item_email = str(item.get("email") or "").strip().lower()
         verification = _verification_payload(platform, item)
@@ -841,6 +861,28 @@ def _verified_records(platform: str, records: list[dict], source_for) -> list[di
     return verified
 
 
+def _status_records(
+    platform: str,
+    records: list[dict],
+    source_for,
+    statuses: tuple[str, ...],
+) -> list[dict]:
+    by_email, by_source = _verification_indexes(platform, statuses)
+    filtered = []
+    for record in records:
+        email = str(record.get("email") or "").strip()
+        if not email and isinstance(record.get("data"), dict):
+            email = _email_from_session(record["data"])
+        verification = by_email.get(email.lower()) or by_source.get(str(source_for(record)).strip())
+        if verification:
+            filtered.append({**record, "_verification": verification})
+    if not filtered:
+        raise AssetUnverified(
+            "最近一次号池扫描中没有匹配 status 的可领取资产；请先手动扫描，或更换 status 筛选"
+        )
+    return filtered
+
+
 def get_email(
     index: int | None = None,
     output_format: str = "json",
@@ -849,6 +891,7 @@ def get_email(
     email_provider: str = "",
     pristine_only: bool = False,
     no_graph_only: bool = False,
+    status: str = "",
     _defer_claim: bool = False,
 ) -> dict:
     output_format = str(output_format or "json").strip().lower()
@@ -877,9 +920,16 @@ def get_email(
         raise AssetNotFound("没有可单独售卖的邮箱；号池邮箱已被平台注册或尝试使用")
     if no_graph_only and verified_only:
         raise AssetError("no_graph_only 不能与 normal_only 同时使用")
-    if verified_only:
+    status_filter = _normalize_status_filter(status)
+    if status_filter and no_graph_only:
+        raise AssetError("status 不能与 no_graph_only 同时使用")
+    if verified_only and status_filter and status_filter != ("normal",):
+        raise AssetError("status 与 normal_only 不一致")
+    if status_filter:
+        records = _status_records("outlook", records, lambda record: record["_asset_source"], status_filter)
+    elif verified_only:
         records = _verified_records("outlook", records, lambda record: record["_asset_source"])
-    should_claim = (verified_only or claim_once) and not _defer_claim
+    should_claim = (verified_only or bool(status_filter) or claim_once) and not _defer_claim
     if should_claim:
         selected, record, total, remaining, advanced = _claim_record(
             records,
@@ -913,7 +963,7 @@ def get_email(
         "data": data,
         "email_provider": record.get("email_provider") or classify_email_provider(record.get("email", "")),
     }
-    if verified_only:
+    if verified_only or status_filter:
         result["verification"] = record["_verification"]
     if should_claim:
         result.update({
@@ -1117,7 +1167,7 @@ def _chatgpt_mail_api_url(email: str, session: dict | None = None) -> str:
 
 
 def _chatgpt_registration_mailbox_map(records: list[dict]) -> dict[str, dict]:
-    """Merge static Outlook mailboxes with dynamic iCloud registrations."""
+    """Merge static mailboxes with registration-only details discovered in sessions."""
     mailboxes = _mailbox_map()
     account_passwords = {}
     for directory in _cookie_directories("chatgpt"):
@@ -1149,6 +1199,38 @@ def _chatgpt_registration_mailbox_map(records: list[dict]) -> dict[str, dict]:
     return mailboxes
 
 
+def _mailbox_delivery_details(email: str, session: dict | None, mailbox_records: dict[str, dict]) -> dict:
+    """Return the mailbox credentials and recovery details associated with a platform token."""
+    normalized = str(email or "").strip().lower()
+    source = dict(mailbox_records.get(normalized) or {})
+    if not normalized:
+        return {}
+    result = {
+        "email": str(source.get("email") or email or "").strip(),
+        "password": str(source.get("password") or "").strip(),
+        "refresh_token": str(source.get("refresh_token") or "").strip(),
+        "client_id": str(source.get("client_id") or "").strip(),
+        "email_provider": str(source.get("email_provider") or "").strip().lower(),
+        "line": str(source.get("line") or "").strip(),
+    }
+    access_url = _mail_api_url_from_session(session or {})
+    if not access_url:
+        access_url = str(source.get("mail_api_url") or source.get("access_url") or "").strip()
+    if access_url:
+        result["access_url"] = access_url
+    two_factor = _two_factor_from_session(session or {})
+    if not two_factor:
+        two_factor = str(source.get("two_factor") or "").strip()
+    if two_factor:
+        result["two_factor"] = two_factor
+    if not result["email_provider"]:
+        result["email_provider"] = _email_provider_from_session(session or {}, result["email"])
+    return {
+        key: value for key, value in result.items()
+        if value
+    }
+
+
 def get_platform_asset(
     platform: str,
     output_format: str = "raw",
@@ -1157,6 +1239,7 @@ def get_platform_asset(
     claim_once: bool = False,
     codex_phone_status: str = "",
     email_provider: str = "",
+    status: str = "",
     _defer_claim: bool = False,
 ) -> dict:
     platform = str(platform or "").strip().lower()
@@ -1172,17 +1255,22 @@ def get_platform_asset(
     provider_filter = str(email_provider or "").strip().lower()
     if provider_filter and provider_filter not in EMAIL_PROVIDERS:
         raise AssetError("email_provider must be outlook, icloud, temporary, or other")
+    status_filter = _normalize_status_filter(status)
+    if verified_only and status_filter and status_filter != ("normal",):
+        raise AssetError("status 与 normal_only 不一致")
+    requested_statuses = status_filter or (("normal",) if verified_only else ())
 
     token_formats = {"session", "sub2api", "cpa", "chatgpt2api", "email_four"}
-    should_claim = (verified_only or claim_once) and not _defer_claim
+    should_claim = (verified_only or bool(status_filter) or claim_once) and not _defer_claim
+    mailbox_records = {}
     if output_format in {"raw", "cookies", "header"}:
         records = _cookie_records(platform)
         if provider_filter:
             records = [record for record in records if record.get("email_provider") == provider_filter]
         if phone_filter == "verified":
             records = []
-        if verified_only:
-            records = _verified_records(platform, records, lambda record: record["path"].name)
+        if requested_statuses:
+            records = _status_records(platform, records, lambda record: record["path"].name, requested_statuses)
         if should_claim:
             selected, record, total, remaining, advanced = _claim_record(
                 records,
@@ -1213,11 +1301,7 @@ def get_platform_asset(
         if output_format == "email_four" and platform != "chatgpt":
             raise AssetError("email_four 仅适用于 ChatGPT 注册邮箱")
         records = _token_records(platform)
-        mailbox_records = (
-            _chatgpt_registration_mailbox_map(records)
-            if output_format == "email_four"
-            else {}
-        )
+        mailbox_records = _chatgpt_registration_mailbox_map(records)
         if output_format == "email_four":
             records = [
                 record for record in records
@@ -1247,11 +1331,12 @@ def get_platform_asset(
                 record for record in records
                 if str(record["data"].get("codex_phone_status") or "not_verified").strip().lower() == phone_filter
             ]
-        if verified_only:
-            records = _verified_records(
+        if requested_statuses:
+            records = _status_records(
                 platform,
                 records,
                 lambda record: record["path"].name,
+                requested_statuses,
             )
         if should_claim:
             selected, record, total, remaining, advanced = _claim_record(
@@ -1320,6 +1405,9 @@ def get_platform_asset(
         "data": data,
         **extra,
     }
+    mailbox = _mailbox_delivery_details(email, session if output_format in token_formats else None, mailbox_records)
+    if mailbox:
+        result["mailbox"] = mailbox
     if platform == "chatgpt" and result["email_provider"] == "icloud":
         mail_api_url = _chatgpt_mail_api_url(
             email,
@@ -1327,7 +1415,7 @@ def get_platform_asset(
         )
         if mail_api_url:
             result["mail_api_url"] = mail_api_url
-    if verified_only:
+    if verified_only or status_filter:
         result["verification"] = record["_verification"]
     if should_claim:
         result.update({
@@ -1346,6 +1434,7 @@ def export_batch(
     email_provider: str = "",
     codex_phone_status: str = "",
     include_claimed: bool = False,
+    status: str = "",
 ) -> list[dict]:
     """Build and claim a bounded batch without reparsing files per account."""
     resource = str(resource or "").strip().lower()
@@ -1356,6 +1445,10 @@ def export_batch(
     except (TypeError, ValueError) as exc:
         raise AssetError("limit must be an integer") from exc
     output_format = str(output_format or ("four" if resource == "emails" else "raw")).strip().lower()
+    status_filter = _normalize_status_filter(status)
+    if verified_only and status_filter and status_filter != ("normal",):
+        raise AssetError("status 与 normal_only 不一致")
+    requested_statuses = status_filter or (("normal",) if verified_only else ())
     scope = "outlook" if resource == "emails" else resource
     with _CURSOR_LOCK:
         existing_claims = set(_read_claims().get(scope, set()))
@@ -1370,7 +1463,8 @@ def export_batch(
                 result = get_email(
                     index=index,
                     output_format=output_format,
-                    verified_only=verified_only,
+                    verified_only=bool(requested_statuses),
+                    status=",".join(requested_statuses),
                     claim_once=False,
                     email_provider=email_provider,
                     _defer_claim=True,
@@ -1380,7 +1474,8 @@ def export_batch(
                     resource,
                     output_format=output_format,
                     index=index,
-                    verified_only=verified_only,
+                    verified_only=bool(requested_statuses),
+                    status=",".join(requested_statuses),
                     claim_once=False,
                     email_provider=email_provider,
                     codex_phone_status=codex_phone_status,

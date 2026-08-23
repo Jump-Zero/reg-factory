@@ -32,9 +32,15 @@ curl "http://127.0.0.1:8799/api/assets/emails?format=json&email_provider=icloud"
 
 # 只领取最近一次号池扫描中状态为正常的邮箱
 curl "http://127.0.0.1:8799/api/assets/emails?normal_only=true"
+
+# 按最近一次扫描状态领取；显式 status 会覆盖默认的正常筛选
+curl "http://127.0.0.1:8799/api/assets/emails?status=normal"
+curl "http://127.0.0.1:8799/api/assets/cookies/chatgpt?format=session&status=normal"
+# 多个状态用逗号分隔
+curl "http://127.0.0.1:8799/api/assets/emails?status=normal,error"
 ```
 
-`format=json` 返回 `email`、`password`、`refresh_token`、`client_id`；`format=line` 返回原始 `----` 分隔文本；`format=four` 始终返回 `邮箱----密码----refresh_token----client_id` 四段。默认领取不读取扫描状态，但会永久排除已经被任意平台注册领取、尝试或成功使用的邮箱，防止同一 Outlook 邮箱再被单独售卖。设置 `normal_only=true` 后只使用最近一次号池扫描缓存筛选，并在响应中返回 `verification`；领取请求本身仍不会联网检测。没有缓存为正常且尚未领取的邮箱时返回 HTTP 409。
+`format=json` 返回 `email`、`password`、`refresh_token`、`client_id`；`format=line` 返回原始 `----` 分隔文本；`format=four` 始终返回 `邮箱----密码----refresh_token----client_id` 四段。默认领取不读取扫描状态，但会永久排除已经被任意平台注册领取、尝试或成功使用的邮箱，防止同一 Outlook 邮箱再被单独售卖。设置 `normal_only=true` 或 `status=normal` 后只使用最近一次号池扫描缓存筛选，并在响应中返回 `verification`；`status` 支持 `normal`、`unlock`、`banned`、`expired`、`restricted`、`invalid`、`unknown`、`error`，多个状态用逗号分隔。显式 `status` 优先于默认正常筛选。领取请求本身仍不会联网检测。没有匹配状态且尚未领取的资产时返回 HTTP 409。
 
 邮箱与平台资产响应都会包含 `email_provider`：`outlook`、`icloud`、`temporary` 或 `other`。可用 `email_provider` 查询参数按注册邮箱来源筛选。
 

@@ -187,6 +187,7 @@ class ChatGPTPlusTests(unittest.TestCase):
         self.assertIn('_PLUS_CHECKOUT_GATE_PATHS', server)
         self.assertNotIn("pay.nyanya.love", server)
         self.assertIn('id="plus-account-input"', index)
+        self.assertIn("email----password----2fa_secret", index)
         self.assertIn('id="plus-sms-provider"', index)
         self.assertIn('value="custom"', index)
         self.assertIn('id="custom-sms-input"', index)

@@ -488,6 +488,8 @@ function buildAssetRequest(){
   if(resource === 'emails' && $('#asset-normal-only').checked){
     params.set('normal_only', 'true');
   }
+  const status = $('#asset-status-filter')?.value || '';
+  if(status) params.set('status', status);
   const emailProvider = $('#asset-email-provider').value;
   if(emailProvider) params.set('email_provider', emailProvider);
   if(assetPickMode === 'index'){
@@ -966,7 +968,8 @@ async function exportAssetBatch(){
         resource:request.resource,
         format:request.format,
         limit,
-        normal_only:true,
+        normal_only:!($('#asset-status-filter')?.value),
+        status:$('#asset-status-filter')?.value || '',
         email_provider:$('#asset-email-provider').value,
         consume:true,
         include_claimed:true,
@@ -1019,6 +1022,7 @@ $('#asset-format').onchange = updateAssetRequestPreview;
 $('#asset-index').oninput = updateAssetRequestPreview;
 $('#asset-normal-only').onchange = updateAssetRequestPreview;
 $('#asset-email-provider').onchange = updateAssetRequestPreview;
+$('#asset-status-filter').onchange = updateAssetRequestPreview;
 $('#asset-api-key').oninput = updateAssetRequestPreview;
 $$('[data-asset-pick]').forEach(button=>button.onclick=()=>setAssetPickMode(button.dataset.assetPick));
 $('#btn-refresh-assets').onclick = ()=>Promise.all([refreshAssetSummary(), loadAssetScan()]);

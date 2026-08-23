@@ -181,7 +181,7 @@
             <label class="plus-field plus-field-wide">
               <span>Plus 邮箱 / Cookie / OAuth Token（每行一个）</span>
               <textarea id="plus-account-input" spellcheck="false" autocomplete="off"
-                placeholder="Outlook: email----password----refresh_token----client_id&#10;iCloud 三行: 邮箱&#10;接码 API URL&#10;2FA/API token&#10;Cookie: __Secure-next-auth.session-token=...&#10;OAuth JSON: {&quot;access_token&quot;:&quot;...&quot;,&quot;refresh_token&quot;:&quot;...&quot;,...}"></textarea>
+                placeholder="Plus 卡密: email----password----2fa_secret&#10;Outlook: email----password----refresh_token----client_id&#10;iCloud 三行: 邮箱&#10;接码 API URL&#10;2FA/API token&#10;Cookie: __Secure-next-auth.session-token=...&#10;OAuth JSON: {&quot;access_token&quot;:&quot;...&quot;,&quot;refresh_token&quot;:&quot;...&quot;,...}"></textarea>
             </label>
             <div class="plus-controls">
               <label class="plus-field"><span>手机号接码平台</span><select id="plus-sms-provider"><option value="auto">自动切换</option><option value="custom">自定义号码池</option><option value="smsman">SMS-Man</option><option value="firefox">firefox.fun</option><option value="hero">Hero SMS</option></select></label>
@@ -285,10 +285,10 @@
             </div>
             <div class="asset-scan-actions">
               <label class="asset-scan-concurrency"><span>平台并行</span>
-                <select id="asset-scan-concurrency"><option value="1" selected>1（最稳）</option><option value="2">2</option></select>
+                <select id="asset-scan-concurrency"><option value="1" selected>1（最稳）</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>
               </label>
               <label class="asset-scan-concurrency"><span>账号并行</span>
-                <select id="asset-scan-account-concurrency"><option value="1">1</option><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select>
+                <select id="asset-scan-account-concurrency"><option value="1">1</option><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option><option value="16">16</option><option value="32">32</option></select>
               </label>
               <label class="asset-scan-concurrency"><input id="asset-scan-plus-trial" type="checkbox"><span>同时检测 Plus 资格</span></label>
               <button id="btn-scan-current" class="btn-secondary" type="button">扫描当前类型</button>
@@ -420,6 +420,20 @@
             <span>仅领取最近一次扫描为正常的邮箱</span>
           </label>
 
+          <label class="asset-field">
+            <span>按扫描状态领取</span>
+            <select id="asset-status-filter">
+              <option value="">不按状态筛选</option>
+              <option value="normal">正常</option>
+              <option value="unlock">待解锁</option>
+              <option value="banned">封禁</option>
+              <option value="expired">过期</option>
+              <option value="restricted">受限</option>
+              <option value="invalid">凭据异常</option>
+              <option value="unknown">未知</option>
+              <option value="error">检测异常</option>
+            </select>
+          </label>
           <div class="asset-request">
             <div class="asset-request-head"><span>请求地址</span><button id="btn-copy-url" class="btn-inline" type="button">复制地址</button></div>
             <code id="asset-request-url"></code>

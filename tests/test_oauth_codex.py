@@ -210,6 +210,52 @@ class OAuthCodexTests(unittest.TestCase):
         self.assertGreaterEqual(fill.await_count, 2)
         self.assertEqual(page.url, "https://auth.openai.com/codex/consent")
 
+    def test_oauth_password_page_is_completed_before_email_code(self):
+        async def exercise():
+            page = MagicMock()
+            page.url = "https://auth.openai.com/log-in/password"
+            password_input = MagicMock()
+            password_input.first = password_input
+            password_input.count = AsyncMock(return_value=1)
+            password_input.is_visible = AsyncMock(return_value=True)
+            code_input = MagicMock()
+            code_input.first = code_input
+            code_input.count = AsyncMock(return_value=1)
+            submit = MagicMock()
+            submit.first = submit
+            submit.count = AsyncMock(return_value=1)
+
+            click_count = 0
+
+            async def click():
+                nonlocal click_count
+                click_count += 1
+                page.url = (
+                    "https://auth.openai.com/email-verification"
+                    if click_count == 1
+                    else "https://auth.openai.com/codex/consent"
+                )
+
+            submit.click = AsyncMock(side_effect=click)
+            page.locator.side_effect = [password_input, submit, code_input, submit]
+            provider = AsyncMock(return_value="123456")
+            with patch("common.browser.react_fill", new=AsyncMock(return_value=True)) as fill, patch(
+                "common.oauth_codex.asyncio.sleep", new=AsyncMock()
+            ):
+                ok, message = await _complete_auth_email_login(
+                    page,
+                    "person@outlook.jp",
+                    email_code_provider=provider,
+                    account_password="fixture-password",
+                )
+            return ok, message, provider, fill, page
+
+        ok, message, provider, fill, page = asyncio.run(exercise())
+        self.assertTrue(ok, message)
+        provider.assert_awaited_once()
+        self.assertIn("fixture-password", str(fill.await_args_list))
+        self.assertEqual(page.url, "https://auth.openai.com/codex/consent")
+
     def test_phone_retry_treats_navigation_past_add_phone_as_success(self):
         async def exercise():
             page = MagicMock()

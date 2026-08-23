@@ -529,6 +529,14 @@ class AssetStoreTests(unittest.TestCase):
 
         self.assertEqual(outlook["data"], "outlook@outlook.com----pw1----rt1----cid1")
         self.assertEqual(outlook["email_provider"], "outlook")
+        self.assertEqual(outlook["mailbox"], {
+            "email": "outlook@outlook.com",
+            "password": "pw1",
+            "refresh_token": "rt1",
+            "client_id": "cid1",
+            "email_provider": "outlook",
+            "line": "outlook@outlook.com----pw1----rt1----cid1",
+        })
         self.assertEqual(icloud["data"], "icloud@icloud.com----pw2----rt2----cid2")
         self.assertEqual(icloud["email_provider"], "icloud")
 

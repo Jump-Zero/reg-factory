@@ -6,6 +6,7 @@ from pathlib import Path
 from common.account_records import (
     DEFAULT_GRAPH_CLIENT_ID,
     canonical_account_line,
+    canonical_plus_account_line,
     masked_email,
     parse_account_line,
     parse_account_text,
@@ -51,6 +52,28 @@ class AccountRecordTests(unittest.TestCase):
         )
         self.assertEqual(record["refresh_token"], "M.C502.token")
         self.assertEqual(record["client_id"], "9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+
+    def test_plus_card_three_fields_store_totp_secret(self):
+        raw = (
+            "fixture@example.com----CardPassword123----"
+            "JBSWY3DPEHPK3PXP"
+        )
+        record = parse_account_line(raw, plus_credentials=True)
+        self.assertEqual(record["email"], "fixture@example.com")
+        self.assertEqual(record["password"], "CardPassword123")
+        self.assertEqual(record["account_password"], "CardPassword123")
+        self.assertEqual(record["two_factor"], "JBSWY3DPEHPK3PXP")
+        self.assertFalse(record["refresh_token"])
+
+        serialized = canonical_plus_account_line(record)
+        reparsed, errors = parse_account_text(serialized, plus_credentials=True)
+        self.assertFalse(errors)
+        self.assertEqual(reparsed[0]["two_factor"], record["two_factor"])
+
+    def test_default_three_field_parser_keeps_legacy_refresh_token_behavior(self):
+        record = parse_account_line("user@outlook.com----secret----custom-refresh")
+        self.assertEqual(record["refresh_token"], "custom-refresh")
+        self.assertFalse(record["two_factor"])
 
     def test_parses_client_id_before_refresh_token(self):
         record = parse_account_line(

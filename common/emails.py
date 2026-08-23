@@ -70,10 +70,11 @@ def mark_registration_started(platform, email, password=""):
 
 def _load_used(platform):
     used = set()
+    # A sale claim may be followed by registration. Registration reservations
+    # remain one-way exclusions so the same mailbox cannot be sold afterward.
     for fp in [
         _used_file(platform),
         _error_file(platform),
-        _outlook_sale_file(),
         _outlook_registration_file(),
     ]:
         if os.path.exists(fp):
@@ -166,7 +167,8 @@ def retryable_email(platform, require_token=False, validate_token=False):
 
     This deliberately ignores the cross-platform registration exclusion: it is a
     retry of the same platform, not a return to the pristine Outlook sale pool.
-    Permanent sale exclusions and successful platform records still win.
+    Successful platform records still win. Sale claims do not block a mailbox
+    from later entering a registration flow.
     """
     normalized_platform = str(platform or "").strip().lower()
     if normalized_platform != "chatgpt":
@@ -174,15 +176,6 @@ def retryable_email(platform, require_token=False, validate_token=False):
     with _lock, file_lock(f"{EMAILS_FILE}.{platform}.retry"):
         if not os.path.exists(EMAILS_FILE):
             return None
-        sold = set()
-        sale_path = _outlook_sale_file()
-        if os.path.exists(sale_path):
-            with open(sale_path, "r", encoding="utf-8") as handle:
-                sold = {
-                    line.strip().lower()
-                    for line in handle
-                    if line.strip() and not line.startswith("#")
-                }
         used_path = _used_file(platform)
         latest_status = {}
         if os.path.exists(used_path):
@@ -225,7 +218,7 @@ def retryable_email(platform, require_token=False, validate_token=False):
         from common.mailbox import check_mailbox_access
         retry_claim = _retry_claim_status()
         for email in reversed(retry_candidates):
-            if email in sold or latest_status.get(email) in {"ok", retry_claim}:
+            if latest_status.get(email) in {"ok", retry_claim}:
                 continue
             record = records.get(email)
             if not record:
