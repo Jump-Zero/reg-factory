@@ -560,6 +560,8 @@ function updateAssetStatusSummary(){
   const source = $('#asset-scan-source') ? $('#asset-scan-source').value : 'all';
   const items = (assetScanData.items || []).filter(item=>
     (platform === 'all' || item.platform === platform) &&
+    // 与表格口径一致：子邮箱收纳在母邮箱下，不单独计入汇总
+    !(item.platform === 'outlook' && item.parent_email) &&
     (source === 'all' || item.mail_source === source)
   );
   const counts = {};
@@ -584,6 +586,8 @@ function filteredAssetScanItems(){
   const source = $('#asset-scan-source') ? $('#asset-scan-source').value : 'all';
   return (assetScanData.items || []).filter(item=>
     (platform === 'all' || item.platform === platform) &&
+    // 子邮箱收纳在母邮箱行下展开查看，不再作为独立行显示（含列表末尾）
+    !(item.platform === 'outlook' && item.parent_email) &&
     (status === 'all' ||
      (status === 'sub_imported' && item.sub2api_uploaded) ||
      (status === 'sub_not_imported' && !item.sub2api_uploaded) ||

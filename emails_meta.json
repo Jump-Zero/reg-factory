@@ -734,16 +734,68 @@
     "source": "imported"
   },
   "fountmbugua9660@outlook.com": {
-    "source": "imported"
+    "source": "imported",
+    "is_parent": true,
+    "child_emails": [
+      "FountMbugua9660+w7mmq8@outlook.com",
+      "FountMbugua9660+jv64dg@outlook.com",
+      "FountMbugua9660+7sgd0g@outlook.com",
+      "FountMbugua9660+okwmnn@outlook.com",
+      "FountMbugua9660+4mahbm@outlook.com",
+      "FountMbugua9660+2omrbs@outlook.com",
+      "FountMbugua9660+f0fz10@outlook.com",
+      "FountMbugua9660+8el05d@outlook.com",
+      "FountMbugua9660+svq0pn@outlook.com",
+      "FountMbugua9660+hh98kv@outlook.com"
+    ]
   },
   "fountnieto186265@outlook.com": {
-    "source": "imported"
+    "source": "imported",
+    "is_parent": true,
+    "child_emails": [
+      "FountNieto186265+uqbv7z@outlook.com",
+      "FountNieto186265+rxmwz6@outlook.com",
+      "FountNieto186265+zq70s5@outlook.com",
+      "FountNieto186265+647jvw@outlook.com",
+      "FountNieto186265+cvghnu@outlook.com",
+      "FountNieto186265+qhe0hb@outlook.com",
+      "FountNieto186265+62xm7k@outlook.com",
+      "FountNieto186265+c4ablv@outlook.com",
+      "FountNieto186265+z74iff@outlook.com",
+      "FountNieto186265+228lg1@outlook.com"
+    ]
   },
   "fountseewald219783@outlook.com": {
-    "source": "imported"
+    "source": "imported",
+    "is_parent": true,
+    "child_emails": [
+      "FountSeewald219783+q5gyvu@outlook.com",
+      "FountSeewald219783+srg0or@outlook.com",
+      "FountSeewald219783+bi77ok@outlook.com",
+      "FountSeewald219783+8v449q@outlook.com",
+      "FountSeewald219783+mu715x@outlook.com",
+      "FountSeewald219783+kh70is@outlook.com",
+      "FountSeewald219783+esncru@outlook.com",
+      "FountSeewald219783+qsj032@outlook.com",
+      "FountSeewald219783+wywl3b@outlook.com",
+      "FountSeewald219783+rvyz2q@outlook.com"
+    ]
   },
   "fountwoodrow5710@outlook.com": {
-    "source": "imported"
+    "source": "imported",
+    "is_parent": true,
+    "child_emails": [
+      "FountWoodrow5710+2scar1@outlook.com",
+      "FountWoodrow5710+u2me76@outlook.com",
+      "FountWoodrow5710+3lvvxa@outlook.com",
+      "FountWoodrow5710+ypvtz8@outlook.com",
+      "FountWoodrow5710+ngclhm@outlook.com",
+      "FountWoodrow5710+fi657a@outlook.com",
+      "FountWoodrow5710+c6ochl@outlook.com",
+      "FountWoodrow5710+3t2jda@outlook.com",
+      "FountWoodrow5710+twbnfp@outlook.com",
+      "FountWoodrow5710+mojlva@outlook.com"
+    ]
   },
   "fouon15981@outlook.com": {
     "source": "imported"
@@ -801,5 +853,168 @@
   },
   "foxybyb39928@outlook.com": {
     "source": "imported"
+  },
+  "fountmbugua9660+w7mmq8@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountmbugua9660+jv64dg@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountmbugua9660+7sgd0g@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountmbugua9660+okwmnn@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountmbugua9660+4mahbm@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountmbugua9660+2omrbs@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountmbugua9660+f0fz10@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountmbugua9660+8el05d@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountmbugua9660+svq0pn@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountmbugua9660+hh98kv@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountMbugua9660@outlook.com"
+  },
+  "fountnieto186265+uqbv7z@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountnieto186265+rxmwz6@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountnieto186265+zq70s5@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountnieto186265+647jvw@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountnieto186265+cvghnu@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountnieto186265+qhe0hb@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountnieto186265+62xm7k@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountnieto186265+c4ablv@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountnieto186265+z74iff@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountnieto186265+228lg1@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountNieto186265@outlook.com"
+  },
+  "fountseewald219783+q5gyvu@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "fountseewald219783+srg0or@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "fountseewald219783+bi77ok@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "fountseewald219783+8v449q@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "fountseewald219783+mu715x@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "fountseewald219783+kh70is@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "fountseewald219783+esncru@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "fountseewald219783+qsj032@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "fountseewald219783+wywl3b@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "fountseewald219783+rvyz2q@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountSeewald219783@outlook.com"
+  },
+  "g2w02sx81fhr@outlook.com": {
+    "source": "registered"
+  },
+  "fountwoodrow5710+2scar1@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
+  },
+  "fountwoodrow5710+u2me76@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
+  },
+  "fountwoodrow5710+3lvvxa@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
+  },
+  "fountwoodrow5710+ypvtz8@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
+  },
+  "fountwoodrow5710+ngclhm@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
+  },
+  "fountwoodrow5710+fi657a@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
+  },
+  "fountwoodrow5710+c6ochl@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
+  },
+  "fountwoodrow5710+3t2jda@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
+  },
+  "fountwoodrow5710+twbnfp@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
+  },
+  "fountwoodrow5710+mojlva@outlook.com": {
+    "source": "imported",
+    "parent_email": "FountWoodrow5710@outlook.com"
   }
 }
