@@ -159,6 +159,22 @@ class TrafficSaverTests(unittest.TestCase):
         mode = asyncio.run(traffic_saver.install(context, chatgpt))
         self.assertEqual(mode, "balanced")
 
+    def test_github_disables_request_filter_and_extreme_launch_args(self):
+        github = {
+            "REG_FACTORY_PLATFORM": "github",
+            "PROXY_MODE": "residential",
+            "REG_FACTORY_PROXY": "http://proxy.test:9000",
+            "REG_FACTORY_RESIDENTIAL_TRAFFIC_MODE": "extreme",
+        }
+        self.assertEqual(
+            traffic_saver.bitbrowser_open_payload("profile-1", github),
+            {"id": "profile-1"},
+        )
+        context = _Context()
+        mode = asyncio.run(traffic_saver.install(context, github))
+        self.assertEqual(mode, "off")
+        self.assertIsNone(context.pattern)
+
     def test_install_routes_requests_using_configured_mode(self):
         context = _Context()
         mode = asyncio.run(traffic_saver.install(context, {

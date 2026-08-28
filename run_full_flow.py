@@ -294,6 +294,8 @@ def stage_platforms(args, env, email, password, token="", client_id=""):
         "--claude-challenge-wait", str(max(0, getattr(args, "claude_challenge_wait", 45))),
         "--claude-challenge-node-retries", str(max(0, getattr(args, "claude_challenge_node_retries", 3))),
         "--claude-captcha-manual-timeout", str(max(0, getattr(args, "claude_captcha_manual_timeout", 0))),
+        "--claude-auth-mode", getattr(args, "claude_auth_mode", "magic"),
+        "--claude-google-manual-timeout", str(max(0, getattr(args, "claude_google_manual_timeout", 0))),
         "--codex-sms-provider", getattr(args, "codex_sms_provider", "auto"),
         "--codex-timeout", str(max(1, getattr(args, "codex_timeout", 120))),
         "--codex-phone-skip", str(max(0, getattr(args, "codex_phone_skip", 0))),
@@ -531,6 +533,10 @@ def main():
                     help="Claude 提交邮箱前的节点轮换次数")
     ap.add_argument("--claude-captcha-manual-timeout", type=int, default=0,
                     help="Claude 等待人工验证秒数；0 表示关闭")
+    ap.add_argument("--claude-auth-mode", choices=("magic", "google"), default="magic",
+                    help="Claude 登录方式：magic 邮箱链接或 Google OAuth")
+    ap.add_argument("--claude-google-manual-timeout", type=int, default=0,
+                    help="Google 安全验证人工接管等待秒数")
     ap.add_argument("--skip-claude-validation", action="store_true",
                     help="跳过 Claude 对历史 sessionKey 的全量收尾校验")
     ap.add_argument("--kiro-account-password", default="",

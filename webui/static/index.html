@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
-<link rel="stylesheet" href="/static/style.css?v=20260819-env-collapse-1">
+<link rel="stylesheet" href="/static/style.css?v=20260825-gopay-1">
 </head>
 <body>
 <header class="topbar">
@@ -149,12 +149,12 @@
           <div class="plus-import-form">
             <div class="plus-protocol">
               <div class="plus-protocol-head">
-                <span>批量协议提链</span>
+                <span>协议提链与支付</span>
                 <small id="plus-protocol-state">正在检查协议引擎</small>
               </div>
               <div class="plus-protocol-grid">
                 <label class="plus-field"><span>账号来源</span><select id="plus-protocol-source"><option value="saved">本次 / 已授权账号</option><option value="pool">号池有资格账号</option></select></label>
-                <label class="plus-field"><span>协议操作</span><select id="plus-protocol-action"><option value="">只授权导入</option><option value="extract">批量协议提链</option><option value="pay">批量协议支付（PayPal）</option></select></label>
+                <label class="plus-field"><span>协议操作</span><select id="plus-protocol-action"><option value="">只授权导入</option><option value="extract">批量协议提链</option><option value="pay">批量协议支付</option></select></label>
                 <label class="plus-field"><span>提链渠道</span><select id="plus-protocol-method">
                   <option value="paypal">PayPal · US / USD</option>
                   <option value="gopay">GoPay · ID / IDR</option>
@@ -173,8 +173,9 @@
               </div>
               <div id="plus-payment-confirm-row" class="plus-payment-actions" hidden>
                 <button id="btn-plus-payment-config" class="btn-secondary" type="button">支付资料</button>
+                <button id="btn-plus-gopay-config" class="btn-secondary" type="button" hidden>GoPay 钱包池</button>
                 <span id="plus-payment-details-state">尚未录入本次资料</span>
-                <label class="plus-payment-confirm"><input id="plus-payment-confirm" type="checkbox"><span>确认执行真实 PayPal 支付</span></label>
+                <label class="plus-payment-confirm"><input id="plus-payment-confirm" type="checkbox"><span id="plus-payment-confirm-label">确认执行真实支付</span></label>
               </div>
               <div id="plus-protocol-note" class="plus-protocol-note">只处理命中免费 Plus 优惠的已授权账号；执行前会实时复检资格。</div>
             </div>
@@ -236,6 +237,111 @@
         <span id="plus-payment-dialog-message" role="status" aria-live="polite"></span>
         <button id="btn-plus-payment-apply" class="btn-run" type="button">用于本次任务</button>
       </div>
+    </dialog>
+
+    <!-- GoPay wallet pool used by the existing Plus protocol payment flow -->
+    <dialog id="gopay-wallet-dialog" class="gopay-wallet-dialog" aria-labelledby="gopay-wallet-title">
+      <div class="gopay-workbench">
+        <div class="gopay-head">
+          <div>
+            <h2 id="gopay-wallet-title">GoPay 钱包池</h2>
+            <span id="gopay-state" role="status" aria-live="polite">正在载入引擎</span>
+          </div>
+          <div class="gopay-head-actions">
+            <button id="btn-gopay-refresh" class="icon-button" type="button" title="刷新 GoPay 数据" aria-label="刷新 GoPay 数据">↻</button>
+            <button id="btn-gopay-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+          </div>
+        </div>
+
+        <div class="gopay-stats">
+          <div><span>账号</span><strong id="gopay-stat-accounts">--</strong></div>
+          <div><span>可用账号</span><strong id="gopay-stat-available">--</strong></div>
+          <div><span>总余额</span><strong id="gopay-stat-balance">--</strong></div>
+          <div><span>可用号码</span><strong id="gopay-stat-phones">--</strong></div>
+        </div>
+
+        <div class="gopay-grid">
+          <div class="gopay-column">
+            <section class="gopay-section" aria-labelledby="gopay-register-title">
+              <div class="gopay-section-head">
+                <div><h3 id="gopay-register-title">注册与登录</h3><span id="gopay-register-message"></span></div>
+              </div>
+              <div class="gopay-form-grid">
+                <label class="gopay-field"><span>号码来源</span><select id="gopay-register-source"><option value="custom">自定义号码池</option><option value="smsbower">SMSBower</option><option value="manual">手动手机号</option></select></label>
+                <label class="gopay-field"><span>模式</span><select id="gopay-register-mode"><option value="register">注册新号</option><option value="login">登录已有号</option></select></label>
+                <label id="gopay-manual-phone-field" class="gopay-field gopay-field-wide" hidden><span>手机号</span><input id="gopay-register-phone" type="text" autocomplete="off" placeholder="+628xxxxxxxxxx"></label>
+                <label class="gopay-field"><span>PIN</span><input id="gopay-register-pin" type="password" inputmode="numeric" maxlength="6" value="147258" autocomplete="off"></label>
+                <label class="gopay-field"><span>国家码</span><input id="gopay-country-code" type="text" value="62" inputmode="numeric"></label>
+                <label class="gopay-field"><span>批量数量</span><input id="gopay-register-count" type="number" min="1" max="50" value="1"></label>
+                <label class="gopay-field"><span>并发</span><input id="gopay-register-workers" type="number" min="1" max="5" value="1"></label>
+                <label class="gopay-field gopay-field-wide"><span>注册代理</span><input id="gopay-register-proxy" type="password" autocomplete="off" placeholder="留空时使用 GoPay 默认代理"></label>
+              </div>
+              <div class="gopay-actions">
+                <button id="btn-gopay-register" class="btn-run" type="button">启动单个任务</button>
+                <button id="btn-gopay-batch" class="btn-secondary" type="button">启动批量任务</button>
+              </div>
+            </section>
+
+            <section class="gopay-section" aria-labelledby="gopay-phone-title">
+              <div class="gopay-section-head">
+                <div><h3 id="gopay-phone-title">共享号码池</h3><span id="gopay-phone-message"></span></div>
+                <button id="btn-gopay-clear-phones" class="btn-danger-quiet" type="button">清空可用号码</button>
+              </div>
+              <label class="gopay-field gopay-field-wide"><span>手机号与短信记录 URL</span><textarea id="gopay-phone-input" spellcheck="false" autocomplete="off" placeholder="+628xxxxxxxxxx----https://example.com/smsrecord?token=..."></textarea></label>
+              <button id="btn-gopay-import-phones" class="btn-secondary" type="button">导入号码</button>
+              <div class="gopay-table-wrap gopay-phone-table-wrap">
+                <table class="gopay-table"><thead><tr><th>手机号</th><th>状态</th><th>记录地址</th><th></th></tr></thead><tbody id="gopay-phone-rows"></tbody></table>
+              </div>
+            </section>
+
+            <details class="gopay-section gopay-sms-config">
+              <summary>SMSBower 配置 <span id="gopay-sms-summary">正在读取</span></summary>
+              <div class="gopay-form-grid">
+                <label class="gopay-field gopay-field-wide"><span>API Key</span><input id="gopay-sms-key" type="password" autocomplete="off" placeholder="留空保留现有密钥"></label>
+                <label class="gopay-field gopay-field-wide"><span>API 地址</span><input id="gopay-sms-base" type="text" value="https://smsbower.page"></label>
+                <label class="gopay-field"><span>服务</span><input id="gopay-sms-service" type="text" value="ni"></label>
+                <label class="gopay-field"><span>国家</span><input id="gopay-sms-country" type="text" value="6"></label>
+              </div>
+              <button id="btn-gopay-save-sms" class="btn-secondary" type="button">保存 SMS 配置</button>
+            </details>
+          </div>
+
+          <div class="gopay-column">
+            <section class="gopay-section" aria-labelledby="gopay-accounts-title">
+              <div class="gopay-section-head">
+                <div><h3 id="gopay-accounts-title">GoPay 账号</h3><span id="gopay-account-message"></span></div>
+                <button id="btn-gopay-clear-accounts" class="btn-danger-quiet" type="button">删除全部账号</button>
+              </div>
+              <div class="gopay-table-wrap">
+                <table class="gopay-table gopay-account-table"><thead><tr><th>手机号</th><th>余额</th><th>状态</th><th>客户 ID</th><th>操作</th></tr></thead><tbody id="gopay-account-rows"></tbody></table>
+              </div>
+            </section>
+
+            <section class="gopay-section" aria-labelledby="gopay-jobs-title">
+              <div class="gopay-section-head"><div><h3 id="gopay-jobs-title">任务状态</h3><span>运行任务每 3 秒刷新</span></div></div>
+              <div class="gopay-job-tabs" role="tablist" aria-label="GoPay 任务类型">
+                <button class="active" type="button" data-gopay-job-tab="register">注册 / 登录</button>
+                <button type="button" data-gopay-job-tab="payment">支付</button>
+              </div>
+              <div class="gopay-table-wrap" data-gopay-job-panel="register">
+                <table class="gopay-table"><thead><tr><th>任务</th><th>手机号</th><th>状态</th><th>进度</th><th></th></tr></thead><tbody id="gopay-register-job-rows"></tbody></table>
+              </div>
+              <div class="gopay-table-wrap" data-gopay-job-panel="payment" hidden>
+                <table class="gopay-table"><thead><tr><th>任务</th><th>手机号</th><th>状态</th><th>进度</th><th></th></tr></thead><tbody id="gopay-payment-job-rows"></tbody></table>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="gopay-otp-dialog" class="gopay-otp-dialog" aria-labelledby="gopay-otp-title">
+      <div class="gopay-otp-head">
+        <div><h3 id="gopay-otp-title">提交 GoPay OTP</h3><span id="gopay-otp-detail"></span></div>
+        <button id="btn-gopay-otp-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <label class="gopay-field"><span>验证码</span><input id="gopay-otp-code" type="text" inputmode="numeric" maxlength="8" autocomplete="one-time-code"></label>
+      <div class="gopay-otp-actions"><span id="gopay-otp-message"></span><button id="btn-gopay-otp-submit" class="btn-run" type="button">提交 OTP</button></div>
     </dialog>
 
     <!-- 邮箱池视图 -->
@@ -520,7 +626,8 @@
             <label class="network-field"><span>ChatGPT</span><select id="proxy-mode-chatgpt" data-platform-proxy><option value="inherit">继承全局</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">动态住宅 IP</option></select></label>
             <label class="network-field"><span>Grok</span><select id="proxy-mode-grok" data-platform-proxy><option value="inherit">继承全局</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">动态住宅 IP</option></select></label>
             <label class="network-field"><span>Kiro</span><select id="proxy-mode-kiro" data-platform-proxy><option value="inherit">继承全局</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">动态住宅 IP</option></select></label>
-            <label class="network-field"><span>轮换/测试目标</span><select id="proxy-platform-target"><option value="">全局出口</option><option value="outlook">Outlook</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="grok">Grok</option><option value="kiro">Kiro</option></select></label>
+            <label class="network-field"><span>GitHub</span><select id="proxy-mode-github" data-platform-proxy><option value="inherit">继承全局</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">动态住宅 IP</option></select></label>
+            <label class="network-field"><span>轮换/测试目标</span><select id="proxy-platform-target"><option value="">全局出口</option><option value="outlook">Outlook</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="grok">Grok</option><option value="kiro">Kiro</option><option value="github">GitHub</option></select></label>
           </div>
         </div>
 
@@ -599,6 +706,6 @@
 
 <div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
 
-<script src="/static/app.js?v=20260819-fingerprint-browser-1"></script>
+<script src="/static/app.js?v=20260825-gopay-1"></script>
 </body>
 </html>

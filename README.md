@@ -111,6 +111,7 @@ macOS / Linux：
 - 环境配置：分组编辑 `.env` 并测试外部服务连通性。
 - Codex K12：管理 K12 workspace、邮箱资产、任务与 Codex 凭据。
 - Plus Codex 导入：使用已经开通 Plus 的 ChatGPT 账号，登录后强制完成手机号接码验证，再走 Codex OAuth 并导入 SUB2API；不再执行提链、绑卡或支付。WebUI 支持批量粘贴 Outlook/Hotmail/Live/MSN、iCloud、ChatGPT session Cookie/token 和完整 Codex OAuth JSON，也兼容 RT/client_id 正反顺序及多种分隔符。
+- GoPay 钱包支付：集成在现有 Plus 协议支付面板中；选择 `GoPay + 批量协议支付` 后，系统先提取 Midtrans 链接，再从本地钱包池自动选择可用账号支付。钱包池弹窗负责注册/登录、余额、号码和 OTP，不再提供第二套支付入口。
 
 控制台只监听本机。Codex K12 的独立说明见 [codex_k12/README.md](codex_k12/README.md)。
 
@@ -175,8 +176,8 @@ python register.py --count 1 --node auto --provider yyds
 # ChatGPT 使用 iCloud 接码邮箱（先在 .env 配置 ICLOUD_MAIL_API_KEY）
 python register_chatgpt.py --count 1 --email-provider icloud
 
-# 使用普通 iCloud 子邮箱接口（/api/user/email?type=icloud&apikey=...）
-# 先在 .env 设置 ICLOUD_MAIL_TYPE=icloud
+# ChatGPT 注册固定使用 iCloud 接码邮箱（icloud-code + service=openai）
+# 先在 .env 设置 CHATGPT_EMAIL_PROVIDER=icloud 和 ICLOUD_MAIL_API_KEY
 
 # 已开通 Plus 账号：手机号接码验证 -> Codex OAuth -> SUB2API
 python tools/import_plus_codex.py --accounts-file accounts.txt --sms-provider auto --phone-attempts 3
@@ -205,6 +206,7 @@ reg-factory/
 ├─ gmail_android/          # BlueStacks + Appium 的 Gmail 流程
 ├─ vision_solver/          # 通用视觉验证码求解库
 ├─ xconsole_client/        # XConsole 客户端
+├─ vendor/gopay_engine/    # 隔离的 GoPay/Gojek 与 Midtrans 协议核心
 ├─ tests/                  # Python 测试
 ├─ run_full_flow.py        # 端到端主入口
 ├─ register_*.py           # 各平台注册入口
@@ -229,6 +231,7 @@ reg-factory/
 | `runtime/logs/`、`tri_register_logs/` | 任务日志 |
 | `runtime/state/` | Clash/住宅代理轮换状态 |
 | `runtime/secrets/` | 本地临时凭据与测试密钥 |
+| `runtime/gopay/` | GoPay 账号、PIN、token、短信配置和支付任务状态 |
 | `screenshots*/` | 调试截图 |
 | `unlock_results/` | Outlook 解锁结果 |
 

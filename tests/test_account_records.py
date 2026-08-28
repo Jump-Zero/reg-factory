@@ -21,6 +21,45 @@ from tools.import_plus_codex import (
 
 
 class AccountRecordTests(unittest.TestCase):
+    def test_claude_batch_import_accepts_custom_education_domain(self):
+        import register
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "education.txt"
+            path.write_text(
+                "student@university.edu----EduPassword123!\n"
+                "teacher@school.ac.uk|SchoolPassword!\n",
+                encoding="utf-8",
+            )
+            records = register.load_claude_email_file(str(path))
+
+        self.assertEqual(
+            records,
+            [
+                ("student@university.edu", "EduPassword123!", "", ""),
+                ("teacher@school.ac.uk", "SchoolPassword!", "", ""),
+            ],
+        )
+
+    def test_claude_batch_import_accepts_inline_record(self):
+        import register
+
+        records = register.load_claude_email_file(
+            "teacher@school.edu----SchoolPassword----recovery@gmail.com"
+        )
+
+        self.assertEqual(
+            records,
+            [
+                (
+                    "teacher@school.edu",
+                    "SchoolPassword",
+                    "recovery@gmail.com",
+                    DEFAULT_GRAPH_CLIENT_ID,
+                )
+            ],
+        )
+
     def test_plus_import_requires_phone_verification(self):
         self.assertEqual(
             require_phone_verification({"codex_phone_status": "verified"}), "verified"

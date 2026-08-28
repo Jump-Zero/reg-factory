@@ -35,13 +35,24 @@ datas = [
     (str(ROOT / "webui" / "static"), "webui/static"),
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "common" / "bundled_browser_helper.py"), "common"),
+    (str(ROOT / "vendor" / "gopay_engine"), "vendor/gopay_engine"),
 ]
 datas.extend((str(ROOT / item), str(Path(item).parent)) for item in TASK_FILES)
 
 playwright_datas, playwright_binaries, playwright_hidden = collect_all("playwright")
 datas.extend(playwright_datas)
+tls_datas, tls_binaries, tls_hidden = collect_all("tls_client")
+tls_runtime_name = "tls-client-64.dll"
+tls_datas = [
+    item for item in tls_datas
+    if "dependencies" not in Path(item[0]).parts
+    or Path(item[0]).name in {"__init__.py", tls_runtime_name}
+]
+tls_binaries = [item for item in tls_binaries if Path(item[0]).name == tls_runtime_name]
+datas.extend(tls_datas)
 
-hiddenimports = playwright_hidden + [
+hiddenimports = playwright_hidden + tls_hidden + [
+    "sqlite3",
     "webui.server",
     "webui.scripts",
     "run_full_flow",
@@ -65,7 +76,7 @@ for package in ("common", "vision_solver", "xconsole_client"):
 a = Analysis(
     [str(ROOT / "scripts" / "reg-factory-server.py")],
     pathex=[str(ROOT)],
-    binaries=playwright_binaries,
+    binaries=playwright_binaries + tls_binaries,
     datas=datas,
     hiddenimports=sorted(set(hiddenimports)),
     hookspath=[],

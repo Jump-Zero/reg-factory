@@ -26,7 +26,7 @@ WebUI 左侧“网络出口”页提供三种互斥模式：
 | 固定节点 | `clash_fixed` | 始终强制使用 `CLASH_FIXED_NODE`，脚本传入其他节点也不会覆盖 |
 | 动态住宅 IP | `residential` | 使用单个住宅代理或持久轮换代理池，可调用供应商换 IP 接口 |
 
-五个平台可覆盖全局模式：`OUTLOOK_PROXY_MODE`、`CLAUDE_PROXY_MODE`、`CHATGPT_PROXY_MODE`、`GROK_PROXY_MODE`、`KIRO_PROXY_MODE`。值为 `inherit`、`clash_auto`、`clash_fixed` 或 `residential`。例如：
+六个平台可覆盖全局模式：`OUTLOOK_PROXY_MODE`、`CLAUDE_PROXY_MODE`、`CHATGPT_PROXY_MODE`、`GROK_PROXY_MODE`、`KIRO_PROXY_MODE`、`GITHUB_PROXY_MODE`。值为 `inherit`、`clash_auto`、`clash_fixed` 或 `residential`。例如：
 
 ```env
 PROXY_MODE=clash_auto
@@ -34,6 +34,7 @@ OUTLOOK_PROXY_MODE=clash_auto
 CLAUDE_PROXY_MODE=residential
 CHATGPT_PROXY_MODE=residential
 GROK_PROXY_MODE=residential
+GITHUB_PROXY_MODE=residential
 REG_FACTORY_PROXY=http://user:pass@host:port
 ```
 

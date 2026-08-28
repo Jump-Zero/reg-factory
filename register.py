@@ -17,6 +17,7 @@ import string
 import sys
 import time
 from datetime import datetime
+from urllib.parse import urlsplit
 
 if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
@@ -711,6 +712,40 @@ def read_next_email_from_file():
                 return email_addr, password, token, client_id
         print(f"  [email-file] no unused emails left in {EMAILS_FILE}")
         return None
+
+
+def load_claude_email_file(path):
+    """Load a batch of imported mailbox/Google account records safely."""
+    from common.account_records import parse_account_text
+
+    source = str(path or "").strip()
+    try:
+        with open(source, "r", encoding="utf-8-sig") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        # WebUI text fields can contain one pasted account record.  Only treat
+        # a missing path as inline data when it is clearly structured.
+        inline_delimiters = ("----", "------", "++++", "|", "\t")
+        if "@" not in source or not any(delimiter in source for delimiter in inline_delimiters):
+            raise
+        text = source
+        print("  [email-file] using inline account record")
+    records, errors = parse_account_text(text)
+    for error in errors:
+        print(f"  [email-file] skipped line {error.get('line')}: {error.get('error')}")
+    loaded = []
+    for record in records:
+        email = str(record.get("email") or "").strip()
+        password = str(
+            record.get("password") or record.get("account_password") or ""
+        ).strip()
+        loaded.append((
+            email,
+            password,
+            str(record.get("refresh_token") or "").strip(),
+            str(record.get("client_id") or "").strip(),
+        ))
+    return loaded
 
 
 def mark_email_used(email, password=""):
@@ -2753,6 +2788,226 @@ def _find_turnstile_checkbox_center(image_bytes):
                 and inner_dark / inner_pixels <= 0.2):
             return (center_x, center_y)
     return None
+
+
+async def authenticate_claude_google(context, page, email, password, manual_timeout=0):
+    """Authenticate Claude through its Google OAuth button.
+
+    This keeps the Google sign-in inside the supplied browser profile.  It only
+    fills credentials provided by the caller; Google security checks, passkeys,
+    CAPTCHA and 2-step verification remain manual when a timeout is enabled.
+    Returns the page that owns the authenticated Claude session.
+    """
+    if not email:
+        raise ClaudeChallengeError(
+            "Google OAuth requires an imported Google account email"
+        )
+
+    # Google GIS popup callbacks are sensitive to blocked bootstrap resources.
+    # Temporarily bypass the metered-request filter for the OAuth handshake;
+    # the normal saver is restored as soon as Claude receives the session.
+    oauth_bypassed = set_traffic_saver_bypass(context, True)
+    if oauth_bypassed:
+        print("  [traffic] bypass enabled for Google OAuth handshake")
+
+    async def visible_google_button(target):
+        # Use Playwright's trusted click path so popup/event handlers installed by
+        # Claude's OAuth widget are invoked reliably. DOM `node.click()` can
+        # report success while leaving the login page unchanged.
+        candidates = target.locator('button, a, [role="button"]')
+        count = await candidates.count()
+        for index in range(count):
+            node = candidates.nth(index)
+            try:
+                if not await node.is_visible():
+                    continue
+                text = ((await node.inner_text()) or "").strip().lower()
+                marker = " ".join(
+                    filter(
+                        None,
+                        [
+                            await node.get_attribute("aria-label"),
+                            await node.get_attribute("data-provider"),
+                            await node.get_attribute("title"),
+                            await node.get_attribute("id"),
+                            await node.get_attribute("class"),
+                            await node.get_attribute("href"),
+                        ],
+                    )
+                ).lower()
+                if ("google" not in text and "google" not in marker) or any(
+                    item in text for item in ("settings", "docs")
+                ):
+                    continue
+                await node.click(timeout=5000)
+                return True
+            except Exception:
+                continue
+        return False
+
+    clicked = await visible_google_button(page)
+    if not clicked:
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                if await visible_google_button(frame):
+                    clicked = True
+                    break
+            except Exception:
+                continue
+    if not clicked:
+        raise ClaudeChallengeError("Claude login page has no visible Google authorization button")
+    print("  [google] clicked Claude Google authorization")
+    await asyncio.sleep(2)
+
+    automatic_deadline = time.time() + 120
+    manual_deadline = time.time() + max(0, int(manual_timeout or 0))
+    saw_google = False
+    while time.time() < max(automatic_deadline, manual_deadline):
+        pages = [item for item in context.pages if not item.is_closed()]
+        google_page = next(
+            (
+                item for item in pages
+                if (urlsplit(item.url or "").hostname or "").lower()
+                in {"accounts.google.com", "google.com"}
+            ),
+            None,
+        )
+        target = google_page or page
+        url = (target.url or "").lower()
+        body = ""
+        try:
+            body = (await target.locator("body").inner_text(timeout=1500)).lower()
+        except Exception:
+            pass
+        if google_page:
+            saw_google = True
+            try:
+                email_input = google_page.locator(
+                    'input[type="email"], input[name="identifier"]'
+                ).first
+                if await email_input.count() > 0 and await email_input.is_visible():
+                    current = (await email_input.input_value()).strip()
+                    if not current:
+                        await email_input.fill(email)
+                        await email_input.press("Enter")
+                        await asyncio.sleep(2)
+                        continue
+                password_input = google_page.locator('input[type="password"]').first
+                if password and await password_input.count() > 0 and await password_input.is_visible():
+                    current = (await password_input.input_value()).strip()
+                    if not current:
+                        await password_input.fill(password)
+                        await password_input.press("Enter")
+                        await asyncio.sleep(3)
+                        continue
+                elif await password_input.count() > 0 and await password_input.is_visible():
+                    if not manual_timeout:
+                        raise ClaudeChallengeError(
+                            "Google password is not in the imported record; set --google-manual-timeout for manual entry"
+                        )
+                    print("  [google] enter the Google password manually in the browser")
+
+                if any(marker in body for marker in (
+                    "use another account", "choose an account", "select an account",
+                )):
+                    chooser = google_page.get_by_text("Use another account", exact=True).first
+                    if await chooser.count() > 0:
+                        try:
+                            await chooser.click(timeout=2000)
+                            await asyncio.sleep(1)
+                            continue
+                        except Exception:
+                            pass
+
+                for label in (
+                    "Next", "Continue", "I agree", "Allow", "I understand",
+                    "Accept", "Got it", "Done",
+                ):
+                    button = google_page.get_by_role("button", name=label, exact=True).first
+                    if await button.count() > 0 and await button.is_visible():
+                        try:
+                            await button.click(timeout=1500)
+                            await asyncio.sleep(2)
+                            break
+                        except Exception:
+                            pass
+
+                challenge = any(marker in body for marker in (
+                    "verify it's you", "2-step verification", "2 step verification",
+                    "enter a code", "security check", "captcha", "passkey",
+                    "confirm it's you", "couldn't sign you in", "one moment please",
+                    "unusual traffic", "not a robot",
+                ))
+                if challenge:
+                    if not manual_timeout:
+                        raise ClaudeChallengeError(
+                            "Google requires a security check; set --google-manual-timeout to allow manual completion"
+                        )
+                    if time.time() >= manual_deadline:
+                        raise ClaudeChallengeError("Google manual security check timed out")
+                    print(
+                        f"  [google] waiting for manual security check "
+                        f"({max(0, int(manual_deadline - time.time()))}s left)"
+                    )
+                    await asyncio.sleep(2)
+                    continue
+            except Exception as exc:
+                message = str(exc).lower()
+                if "target page" not in message and "browser has been closed" not in message:
+                    raise
+                # A GIS popup normally closes after posting its result to the
+                # Claude opener. Continue with cookie/opener checks below.
+                google_page = None
+                await asyncio.sleep(1)
+
+        # OAuth may finish in a popup and close it; the original Claude page
+        # then receives the callback a moment later.
+        def is_claude_page(candidate):
+            try:
+                hostname = (urlsplit(candidate.url or "").hostname or "").lower()
+            except Exception:
+                return False
+            return hostname == "claude.ai" or hostname.endswith(".claude.ai")
+
+        claude_page = next(
+            (
+                item for item in pages
+                if is_claude_page(item)
+                and "/login" not in (item.url or "").lower()
+            ),
+            None,
+        )
+        if claude_page:
+            print(f"  [google] Claude OAuth complete: {claude_page.url}")
+            await asyncio.sleep(3)
+            if oauth_bypassed:
+                set_traffic_saver_bypass(context, False)
+            return claude_page
+        try:
+            session_cookies = await context.cookies("https://claude.ai")
+        except Exception:
+            session_cookies = []
+        if any(
+            item.get("name") == "sessionKey" and item.get("value")
+            for item in session_cookies
+        ):
+            try:
+                await page.goto("https://claude.ai/new", timeout=30000)
+                await asyncio.sleep(3)
+            except Exception:
+                pass
+            print(f"  [google] Claude session cookie detected: {page.url}")
+            if oauth_bypassed:
+                set_traffic_saver_bypass(context, False)
+            return page
+        if saw_google and not google_page:
+            await asyncio.sleep(2)
+            continue
+        await asyncio.sleep(1)
+
+    raise ClaudeChallengeError("Google OAuth did not return to Claude before timeout")
 
 
 async def _click_explicit_challenge_checkbox(frame, *, timeout=3000):
@@ -5616,6 +5871,8 @@ async def register(
     email_token="",
     email_client_id="",
     temp_mailbox=None,
+    auth_mode="magic",
+    google_manual_timeout=0,
 ):
     """Run one registration. Returns sessionKey on success, None on failure."""
     bb = BitBrowser()
@@ -5638,12 +5895,20 @@ async def register(
     session_key = None
     email_submitted = False
     context = None
+    google_traffic_bypassed = False
     try:
         async with async_playwright() as p:
             print("[2/6] connect Playwright...")
             browser = await p.chromium.connect_over_cdp(ws_url)
             context = browser.contexts[0]
             await install_traffic_saver(context)
+            if str(auth_mode or "magic").strip().lower() == "google":
+                # Google Identity Services must load before the OAuth button is
+                # clicked; enabling bypass only inside the click handler is too
+                # late because the GIS bootstrap script may already be blocked.
+                google_traffic_bypassed = set_traffic_saver_bypass(context, True)
+                if google_traffic_bypassed:
+                    print("  [traffic] bypass enabled for Google OAuth bootstrap")
             try:
                 await context.set_extra_http_headers({
                     "Accept-Language": "en-US,en;q=0.9"
@@ -5797,7 +6062,9 @@ async def register(
 
             check_timeout()
 
-            if email_token:
+            google_authenticated = str(auth_mode or "magic").strip().lower() == "google"
+
+            if email_token and not google_authenticated:
                 from common.mailbox import check_mailbox_access
 
                 mailbox_health = await asyncio.to_thread(
@@ -5864,27 +6131,52 @@ async def register(
             # Enter and submit email only after the login page is stable. Claude
             # can redirect to another challenge after the first field appears.
             print(f"  email: {email}")
-            magic_requested_at = await submit_claude_email(
-                page,
-                email,
-                allow_node_rotation=True,
-                attempts=1 if residential_login else 2,
-            )
-            if not magic_requested_at:
-                raise ClaudeChallengeError(
-                    "Claude email form could not be submitted after verification"
+            if google_authenticated:
+                login_ready = await ensure_claude_login_form(
+                    page,
+                    allow_node_rotation=True,
+                    challenge_wait=CLAUDE_CHALLENGE_WAIT_SECONDS,
+                    node_retries=CLAUDE_CHALLENGE_NODE_RETRIES,
+                    manual_timeout=google_manual_timeout,
                 )
+                if not login_ready:
+                    raise ClaudeChallengeError(
+                        "Claude login challenge did not clear before Google authorization"
+                    )
+                # From this point Claude has accepted the OAuth action; failures
+                # belong to Google's security flow, not pre-login egress checks.
+                email_submitted = True
+                page = await authenticate_claude_google(
+                    context,
+                    page,
+                    email,
+                    email_password,
+                    manual_timeout=google_manual_timeout,
+                )
+                magic_requested_at = time.time()
+            else:
+                magic_requested_at = await submit_claude_email(
+                    page,
+                    email,
+                    allow_node_rotation=True,
+                    attempts=1 if residential_login else 2,
+                )
+                if not magic_requested_at:
+                    raise ClaudeChallengeError(
+                        "Claude email form could not be submitted after verification"
+                    )
             email_submitted = True
             check_timeout()
 
-            # Poll the selected mailbox source for the magic link.
-            print("\n[4/6] get magic link...")
-            magic_link = None
+            # Poll the selected mailbox source for magic-link auth, or keep the
+            # Google OAuth session already established in this browser profile.
+            print("\n[4/6] authenticate Claude session...")
+            magic_link = "__google_authenticated__" if google_authenticated else None
             outlook_page = None
-            if temp_mailbox:
+            if not google_authenticated and temp_mailbox:
                 print(f"  reading magic link via {temp_mailbox['provider']} temp email...")
                 magic_link = await get_magic_link_by_temp_email(temp_mailbox, max_wait=60)
-            elif email_token:
+            elif not google_authenticated and email_token:
                 print("  reading magic link via Graph refresh token...")
                 magic_link = get_magic_link_by_token(
                     email,
@@ -5893,7 +6185,7 @@ async def register(
                     max_wait=60,
                     received_after=magic_requested_at,
                 )
-            else:
+            elif not google_authenticated:
                 outlook_page = await context.new_page()
                 magic_link = await get_magic_link_outlook_pw(outlook_page, email, email_password, max_wait=60)
 
@@ -5941,31 +6233,32 @@ async def register(
 
             if outlook_page:
                 await outlook_page.close()
-            print(f"  link: {magic_link[:80]}...")
+            print(f"  link: {magic_link[:80]}..." if not google_authenticated else "  Google session is authenticated")
             # Prefer direct nonce verification. Browser-side verification can
             # remain on a Cloudflare loading page before hCaptcha even renders.
-            has_browser_login_state = bool(
-                getattr(page, "_rf_visible_email_submitted", False)
-            )
-            verified_over_http = False
-            if not has_browser_login_state:
-                verified_over_http = await verify_claude_magic_link_http(
-                    page, magic_link
+            if not google_authenticated:
+                has_browser_login_state = bool(
+                    getattr(page, "_rf_visible_email_submitted", False)
                 )
-            if not verified_over_http:
-                await open_claude_magic_link(page, magic_link)
-            print(f"  URL: {page.url}")
+                verified_over_http = False
+                if not has_browser_login_state:
+                    verified_over_http = await verify_claude_magic_link_http(
+                        page, magic_link
+                    )
+                if not verified_over_http:
+                    await open_claude_magic_link(page, magic_link)
+                print(f"  URL: {page.url}")
 
-            check_timeout()
-            await prepare_claude_post_magic_with_http_fallback(page, magic_link)
-            check_timeout()
-            if page.is_closed():
-                print(
-                    "  [magic-browser] verification closed the challenge tab; "
-                    "opening the authenticated app in a fresh tab"
-                )
-                page = await context.new_page()
-                await _open_claude_authenticated_app(page, "magic-browser")
+                check_timeout()
+                await prepare_claude_post_magic_with_http_fallback(page, magic_link)
+                check_timeout()
+                if page.is_closed():
+                    print(
+                        "  [magic-browser] verification closed the challenge tab; "
+                        "opening the authenticated app in a fresh tab"
+                    )
+                    page = await context.new_page()
+                    await _open_claude_authenticated_app(page, "magic-browser")
             if await _claude_new_user_unavailable(page):
                 raise ClaudeNewUserUnavailable(
                     "Claude has temporarily paused access for new users"
@@ -6440,6 +6733,8 @@ async def register(
             mark_email_error(email, email_password, str(e)[:100])
     finally:
         if context is not None:
+            if google_traffic_bypassed:
+                set_traffic_saver_bypass(context, False)
             log_traffic_summary(context)
         try:
             bb.close_browser(profile_id)
@@ -6475,11 +6770,31 @@ async def main():
     parser.add_argument("--count", "-n", type=int, default=1, help="number of accounts to register")
     parser.add_argument("--timeout", "-t", type=int, default=480, help="timeout per registration (seconds)")
     parser.add_argument("--concurrency", "-c", type=int, default=1, help="number of concurrent registrations")
-    parser.add_argument("--emails", "-e", type=str, help="file with outlook emails (one per line: account----password----token----ClientID)")
+    parser.add_argument(
+        "--emails", "-e", type=str,
+        help="batch account file; email----password, JSON, or email----password----token----client_id",
+    )
     parser.add_argument("--email", type=str, help="single fixed outlook email for debug")
     parser.add_argument("--password", type=str, default="", help="password for --email")
     parser.add_argument("--token", type=str, default="", help="refresh token for --email")
     parser.add_argument("--client-id", type=str, default="", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--auth-mode",
+        choices=("magic", "google"),
+        default="magic",
+        help="Claude 登录方式：magic 邮箱链接，或 google Google OAuth",
+    )
+    parser.add_argument(
+        "--google-auth",
+        action="store_true",
+        help="兼容别名：使用 Google OAuth 登录 Claude",
+    )
+    parser.add_argument(
+        "--google-manual-timeout",
+        type=int,
+        default=0,
+        help="Google 安全验证人工接管等待秒数；0 表示遇到挑战直接失败",
+    )
     parser.add_argument("--latest-rt", action="store_true",
                         help="use newest unused Outlook accounts with working Graph RT")
     parser.add_argument(
@@ -6490,7 +6805,7 @@ async def main():
     )
     parser.add_argument(
         "--provider",
-        choices=("yyds", "gptmail", "cfmail", "moemail", "icloud", "remail", "custom"),
+        choices=("google", "yyds", "gptmail", "cfmail", "moemail", "icloud", "remail", "custom"),
         default=None,
         help="temporary email provider; yyds uses YYDS_API_KEY",
     )
@@ -6520,6 +6835,19 @@ async def main():
         help="skip the post-batch validation scan of all saved Claude session keys",
     )
     args = parser.parse_args()
+
+    auth_mode = (
+        "google"
+        if args.google_auth or args.auth_mode == "google" or args.provider == "google"
+        else "magic"
+    )
+    # Provider=google is a UI convenience alias for the OAuth login mode.
+    if args.provider == "google":
+        args.provider = None
+    if auth_mode == "google" and args.provider:
+        raise SystemExit("--auth-mode google 不能同时使用临时邮箱 provider")
+    if auth_mode == "google" and not (args.email or args.emails):
+        raise SystemExit("--auth-mode google 需要 --email 或 --emails 批量导入 Google 账号")
 
     REGISTER_TIMEOUT = args.timeout
     CLAUDE_PROXY_PORT = args.proxy_port
@@ -6557,6 +6885,8 @@ async def main():
         has_email_file=bool(args.emails),
         latest_rt=args.latest_rt,
     )
+    if auth_mode == "google":
+        temp_email_provider = None
     use_temp_email = bool(temp_email_provider)
 
     residential = bool(
@@ -6600,21 +6930,7 @@ async def main():
         print(f"  using fixed email: {args.email.strip()}")
     if args.emails and not use_temp_email:
         try:
-            with open(args.emails, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split("----")
-                    if len(parts) >= 3:
-                        email_list.append((
-                            parts[0].strip(),
-                            parts[1].strip(),
-                            parts[2].strip(),
-                            parts[3].strip() if len(parts) >= 4 else "",
-                        ))
-                    elif len(parts) >= 2:
-                        email_list.append((parts[0].strip(), parts[1].strip(), "", ""))
+            email_list.extend(load_claude_email_file(args.emails))
             print(f"  loaded {len(email_list)} emails from {args.emails}")
         except Exception as e:
             print(f"  failed to load emails: {e}")
@@ -6638,6 +6954,13 @@ async def main():
     pool_mailboxes = bool(
         args.latest_rt and not args.email and not args.emails and not use_temp_email
     )
+    if auth_mode == "google" and not email_list and args.email:
+        email_list.append((
+            args.email.strip(), args.password.strip(), "", ""
+        ))
+    if auth_mode == "google" and not email_list:
+        print("  no usable Google accounts loaded; provide --emails with email----password records")
+        return 2
 
     results = []
     results_lock = asyncio.Lock()
@@ -6773,6 +7096,8 @@ async def main():
                         email_token,
                         email_client_id,
                         temp_mailbox=temp_mailbox,
+                        auth_mode=auth_mode,
+                        google_manual_timeout=max(0, args.google_manual_timeout),
                     )
                     result_status = "OK" if sk else "FAIL"
                     break

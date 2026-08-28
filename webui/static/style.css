@@ -699,6 +699,91 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .multi-badge.ok{border:1px solid rgba(65,184,120,.5);background:rgba(65,184,120,.1);color:var(--green)}
 .multi-badge.no{border:1px solid var(--line);background:var(--surface);color:var(--quiet)}
 
+/* GoPay workbench */
+.gopay-wallet-dialog{width:min(1180px,calc(100vw - 24px));height:min(850px,calc(100dvh - 24px));padding:0;overflow:auto;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--text);box-shadow:0 20px 70px rgba(0,0,0,.58)}
+.gopay-wallet-dialog::backdrop{background:rgba(5,6,8,.78)}
+.gopay-workbench{min-height:100%;background:var(--surface);overflow:hidden}
+.gopay-head{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:74px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.gopay-head-actions{display:flex;align-items:center;gap:7px}
+.gopay-head h2{margin:0 0 4px;font-size:17px;font-weight:680}
+#gopay-state{color:var(--muted);font-size:11px}
+#gopay-state.ok{color:var(--green)}
+#gopay-state.bad{color:var(--red)}
+.gopay-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--line)}
+.gopay-stats>div{min-width:0;padding:12px 16px;border-right:1px solid var(--line)}
+.gopay-stats>div:last-child{border-right:0}
+.gopay-stats span{display:block;color:var(--quiet);font-size:10px}
+.gopay-stats strong{display:block;margin-top:4px;color:var(--text);font-size:18px;font-weight:680;overflow-wrap:anywhere}
+.gopay-grid{display:grid;grid-template-columns:minmax(390px,.85fr) minmax(520px,1.15fr);min-height:0}
+.gopay-column{min-width:0}
+.gopay-column:first-child{border-right:1px solid var(--line)}
+.gopay-section{display:block;margin:0;padding:16px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent}
+.gopay-column .gopay-section:last-child{border-bottom:0}
+.gopay-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}
+.gopay-section-head h3{margin:0 0 3px;font-size:13px;font-weight:680}
+.gopay-section-head span{display:block;color:var(--muted);font-size:10.5px;line-height:1.4;overflow-wrap:anywhere}
+.gopay-section-head span.ok{color:var(--green)}
+.gopay-section-head span.bad{color:var(--red)}
+.gopay-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.gopay-field{display:block;min-width:0}
+.gopay-field[hidden]{display:none}
+.gopay-field>span{display:block;margin-bottom:5px;color:#d9dce1;font-size:10.5px;font-weight:600}
+.gopay-field input,.gopay-field select,.gopay-field textarea{width:100%;min-width:0;border:1px solid var(--line);border-radius:6px;background:var(--surface-raised);color:var(--text);font-size:12px}
+.gopay-field input,.gopay-field select{height:36px;padding:7px 9px}
+.gopay-field textarea{height:90px;padding:9px;resize:vertical;font:10.5px/1.5 var(--mono);overflow-wrap:anywhere}
+.gopay-field input:hover,.gopay-field select:hover,.gopay-field textarea:hover{border-color:var(--line-strong)}
+.gopay-field-wide{grid-column:1/-1}
+.gopay-actions{display:flex;align-items:center;gap:8px;margin-top:12px}
+.btn-danger-quiet{min-height:30px;padding:5px 9px;border:1px solid rgba(226,100,85,.45);border-radius:6px;background:transparent;color:var(--red);font-size:10.5px;white-space:nowrap;cursor:pointer}
+.btn-danger-quiet:hover{background:rgba(226,100,85,.1)}
+.gopay-table-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:6px}
+.gopay-table{width:100%;min-width:620px;border-collapse:collapse;table-layout:fixed;font-size:10.5px}
+.gopay-account-table{min-width:760px}
+.gopay-account-table th:nth-child(1),.gopay-account-table td:nth-child(1){width:18%}
+.gopay-account-table th:nth-child(2),.gopay-account-table td:nth-child(2){width:13%}
+.gopay-account-table th:nth-child(3),.gopay-account-table td:nth-child(3){width:15%}
+.gopay-account-table th:nth-child(4),.gopay-account-table td:nth-child(4){width:28%}
+.gopay-account-table th:nth-child(5),.gopay-account-table td:nth-child(5){width:26%}
+.gopay-table th{padding:8px 9px;border-bottom:1px solid var(--line);background:var(--surface-raised);color:var(--quiet);font-weight:600;text-align:left}
+.gopay-table td{padding:8px 9px;border-bottom:1px solid var(--line);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gopay-table tr:last-child td{border-bottom:0}
+.gopay-table tbody tr:hover{background:var(--surface-hover)}
+.gopay-table td:last-child{overflow:visible;text-overflow:clip}
+.gopay-row-actions{display:flex;align-items:center;gap:5px}
+.gopay-row-actions button{min-height:26px;padding:3px 7px;border:1px solid var(--line);border-radius:5px;background:transparent;color:#a9c8ff;font-size:9.5px;white-space:nowrap;cursor:pointer}
+.gopay-row-actions button:hover{border-color:var(--accent);background:var(--accent-soft)}
+.gopay-row-actions button.danger{color:var(--red)}
+.gopay-status{display:inline-flex;align-items:center;min-height:21px;padding:2px 6px;border:1px solid var(--line);border-radius:5px;color:var(--muted);font-size:9.5px}
+.gopay-status.success,.gopay-status.available,.gopay-status.done{border-color:rgba(65,184,120,.45);color:var(--green)}
+.gopay-status.running,.gopay-status.waiting_otp{border-color:rgba(77,141,247,.5);color:#8eb8ff}
+.gopay-status.failed,.gopay-status.used_failed{border-color:rgba(226,100,85,.45);color:var(--red)}
+.gopay-phone-table-wrap{margin-top:12px}
+.gopay-phone-table-wrap .gopay-table{min-width:560px}
+.gopay-sms-config>summary{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--text);font-size:12px;font-weight:650;cursor:pointer;list-style:none}
+.gopay-sms-config>summary::-webkit-details-marker{display:none}
+.gopay-sms-config>summary span{color:var(--muted);font-size:10.5px;font-weight:400}
+.gopay-sms-config[open]>summary{margin-bottom:12px}
+.gopay-sms-config .btn-secondary{margin-top:12px}
+.gopay-confirm{display:flex;align-items:center;gap:7px;margin:11px 0;color:#efcb91;font-size:10.5px;cursor:pointer}
+.gopay-confirm input{width:16px;height:16px;margin:0;accent-color:var(--amber)}
+.gopay-job-tabs{display:grid;grid-template-columns:1fr 1fr;margin-bottom:10px;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.gopay-job-tabs button{min-height:31px;border:0;border-right:1px solid var(--line);background:var(--surface-raised);color:var(--muted);font-size:10.5px;cursor:pointer}
+.gopay-job-tabs button:last-child{border-right:0}
+.gopay-job-tabs button.active{background:var(--accent-soft);color:#9fc2ff}
+.gopay-otp-dialog{width:min(430px,calc(100vw - 24px));padding:0;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);box-shadow:0 20px 70px rgba(0,0,0,.58)}
+.gopay-otp-dialog::backdrop{background:rgba(5,6,8,.78)}
+.gopay-otp-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid var(--line)}
+.gopay-otp-head h3{margin:0 0 3px;font-size:14px}
+.gopay-otp-head span{color:var(--muted);font-size:10.5px}
+.gopay-otp-dialog>.gopay-field{padding:15px}
+.gopay-otp-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 15px;border-top:1px solid var(--line)}
+#gopay-otp-message{flex:1;color:var(--red);font-size:10.5px}
+
+@media (max-width:1100px){
+  .gopay-grid{grid-template-columns:1fr}
+  .gopay-column:first-child{border-right:0;border-bottom:1px solid var(--line)}
+}
+
 /* Contact dialog */
 .contact-dialog{
   width:min(410px,calc(100vw - 24px));max-height:calc(100dvh - 24px);padding:13px;
@@ -892,6 +977,19 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   .plus-import-actions{align-items:stretch;flex-direction:column}
   .plus-import-actions .btn-run,.plus-import-actions .btn-secondary{width:100%;min-height:41px}
   .plus-stage-row span{padding:8px 4px;font-size:9px;white-space:normal}
+  .gopay-head{align-items:flex-start;min-height:0;padding:13px}
+  .gopay-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .gopay-stats>div:nth-child(even){border-right:0}
+  .gopay-stats>div:nth-child(-n+2){border-bottom:1px solid var(--line)}
+  .gopay-section{padding:13px}
+  .gopay-section-head{align-items:stretch;flex-direction:column}
+  .gopay-form-grid{grid-template-columns:1fr}
+  .gopay-field-wide{grid-column:auto}
+  .gopay-field input,.gopay-field select{height:40px}
+  .gopay-actions{align-items:stretch;flex-direction:column}
+  .gopay-actions .btn-run,.gopay-actions .btn-secondary{width:100%;min-height:41px}
+  .gopay-otp-actions{align-items:stretch;flex-direction:column}
+  .gopay-otp-actions .btn-run{width:100%}
   .contact-dialog{padding:9px}
   .tour-popover{max-height:min(68dvh,560px);padding:13px}
   .tour-popover h2{font-size:15px}

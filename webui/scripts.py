@@ -92,6 +92,11 @@ SCRIPTS = [
             {"flag": "--claude-challenge-wait", "type": "int", "default": 45, "help": "Claude 每个节点等待 Cloudflare 自动通过秒数"},
             {"flag": "--claude-challenge-node-retries", "type": "int", "default": 3, "help": "Claude 提交邮箱前的节点轮换次数"},
             {"flag": "--claude-captcha-manual-timeout", "type": "int", "default": 0, "help": "Claude 等待人工验证秒数；0 表示关闭"},
+            {"flag": "--claude-auth-mode", "type": "choice", "choices": ["magic", "google"],
+             "labels": {"magic": "Claude Magic Link", "google": "Google OAuth"},
+             "default": "magic", "help": "Claude 登录方式；Google OAuth 使用导入的企业/教育邮箱账号"},
+            {"flag": "--claude-google-manual-timeout", "type": "int", "default": 0,
+             "help": "Google security check manual takeover timeout in seconds"},
             {"flag": "--skip-claude-validation", "type": "bool", "default": False, "help": "跳过 Claude 对历史 sessionKey 的全量收尾校验"},
             {"flag": "--kiro-account-password", "type": "str", "default": "", "help": "Kiro Builder ID 密码；留空自动生成"},
             {"flag": "--kiro-full-name", "type": "str", "default": "Test User", "help": "Kiro Builder ID 显示名称"},
@@ -154,6 +159,11 @@ SCRIPTS = [
             {"flag": "--claude-challenge-wait", "type": "int", "default": 45, "help": "Claude 每节点等待 Cloudflare 自动通过秒数"},
             {"flag": "--claude-challenge-node-retries", "type": "int", "default": 3, "help": "Claude 提交邮箱前的节点轮换次数"},
             {"flag": "--claude-captcha-manual-timeout", "type": "int", "default": 0, "help": "Claude 等待人工验证秒数；0 表示关闭"},
+            {"flag": "--claude-auth-mode", "type": "choice", "choices": ["magic", "google"],
+             "labels": {"magic": "Claude Magic Link", "google": "Google OAuth"},
+             "default": "magic", "help": "Claude 登录方式；Google OAuth 使用导入的企业/教育邮箱账号"},
+            {"flag": "--claude-google-manual-timeout", "type": "int", "default": 0,
+             "help": "Google security check manual takeover timeout in seconds"},
             {"flag": "--no-claude-auto-validate", "type": "bool", "default": False, "help": "跳过 Claude 对历史 sessionKey 的全量收尾校验"},
             {"flag": "--kiro-account-password", "type": "str", "default": "", "help": "Kiro Builder ID 密码；留空自动生成"},
             {"flag": "--kiro-full-name", "type": "str", "default": "Test User", "help": "Kiro Builder ID 显示名称"},
@@ -201,6 +211,9 @@ SCRIPTS = [
             {"flag": "--timeout", "type": "int", "default": 600, "help": "单账号 OAuth 超时秒数"},
             {"flag": "--skip-phone", "type": "bool", "default": False, "help": "跳过手机号/2FA 验证，仅保存或导出凭据"},
             {"flag": "--no-import", "type": "bool", "default": False, "help": "不创建 SUB2API 账号"},
+            {"flag": "--invite-friend", "type": "bool", "default": False,
+             "help": "OAuth 成功后邀请新用户(从邮箱池抽未注册号)，仅 Plus/Pro 账号可见入口"},
+            {"flag": "--invite-timeout", "type": "int", "default": 45, "help": "邀请流程超时秒数"},
             {"flag": "--output-format", "type": "choice", "choices": ["none", "sub2api"],
              "labels": {"none": "不额外输出", "sub2api": "SUB2API token JSON"},
              "default": "none", "help": "成功凭据的额外输出格式"},
@@ -290,8 +303,13 @@ SCRIPTS = [
             {"flag": "--concurrency", "type": "int", "default": 1,
              "help": "并发数；每个任务独立 Profile；固定 Clash 节点可共享 IP 并发"},
             {"flag": "--timeout", "type": "int", "default": 480, "help": "单号超时(秒)"},
+            {"flag": "--auth-mode", "type": "choice", "choices": ["magic", "google"],
+             "labels": {"magic": "Claude Magic Link", "google": "Google OAuth"},
+             "default": "magic", "help": "Claude 登录方式；Google OAuth 使用导入的企业/教育邮箱账号"},
+            {"flag": "--emails", "type": "str", "default": "",
+             "help": "批量导入文件路径；支持 email----password、JSON 和现有邮箱记录格式"},
             {"flag": "--provider", "type": "choice",
-             "choices": ["", "yyds", "gptmail", "cfmail", "moemail", "custom"], "default": "",
+             "choices": ["", "google", "yyds", "gptmail", "cfmail", "moemail", "custom"], "default": "",
              "labels": {"": "Outlook 资产池", "yyds": "YYDS 临时邮箱", "gptmail": "GPTMail 临时邮箱", "cfmail": "CFMail 临时邮箱", "moemail": "MoeMail 临时邮箱", "custom": "自定义临时邮箱"},
              "help": "邮箱来源；选择临时邮箱后忽略 Outlook/最新 RT"},
             {"flag": "--domain", "type": "str", "default": "",
@@ -311,6 +329,8 @@ SCRIPTS = [
              "help": "提交邮箱前最多轮换节点次数"},
             {"flag": "--captcha-manual-timeout", "type": "int", "default": 0,
              "help": "等待手动图形验证秒数(0=关闭)"},
+            {"flag": "--google-manual-timeout", "type": "int", "default": 0,
+             "help": "Google security check manual takeover timeout in seconds"},
         ],
     },
     {
@@ -349,6 +369,7 @@ SCRIPTS = [
         "category": "单平台注册",
         "title": "GitHub 注册",
         "desc": "GitHub 注册(含 Arkose 验证视觉求解，需配 VISION_*/VOTE_*)。",
+        "warning": "GitHub 会按设备、IP、自动化特征和近期行为限制注册；出现 Access is temporarily restricted、CLIENT_INTEGRITY 或 PAGE_BLANK 时会停止重试。CLIENT_INTEGRITY 表示 GitHub 未通过浏览器 JS/完整性检查；请检查浏览器 provider 和正常浏览器页面。",
         "args": [
             {"flag": "--count", "type": "int", "default": 1, "help": "注册数量"},
             {"flag": "--concurrency", "type": "int", "default": 1,
@@ -356,8 +377,10 @@ SCRIPTS = [
             {"flag": "--auto", "type": "bool", "default": False, "help": "走完整流程(含取 launch code)"},
             {"flag": "--email", "type": "str", "default": "", "help": "指定邮箱(默认从 _outlook_pool 取)"},
             {"flag": "--password", "type": "str", "default": "", "help": "邮箱密码"},
-            {"flag": "--no-keep", "type": "bool", "default": False, "help": "结束后删窗口(默认保留)"},
+            {"flag": "--no-keep", "type": "bool", "default": False, "help": "结束后删除窗口；默认保留 BitBrowser/内置 Chromium 供手动检查"},
             {"flag": "--timeout", "type": "int", "default": 600, "help": "超时(秒)"},
+            {"flag": "--node", "type": "str", "default": "auto",
+             "help": "GitHub Clash 节点；auto 检查当前节点，不可达时选择响应正常的节点"},
         ],
     },
     # ---------------------------------------------------------------- 邮箱注册
@@ -472,6 +495,15 @@ SCRIPTS = [
         ],
     },
 ]
+
+
+# Keep the provider picker self-explanatory when Google OAuth is selected.
+for _script in SCRIPTS:
+    if _script.get("id") != "register_claude":
+        continue
+    for _arg in _script.get("args", []):
+        if _arg.get("flag") == "--provider":
+            _arg.setdefault("labels", {})["google"] = "Google OAuth"
 
 
 def script_by_id(sid):
@@ -742,7 +774,7 @@ ENV_SCHEMA = [
          "help": "iCloud 邮箱 API 请求地址；email.manageh.shop 是文档站，不是接口地址"},
         {"key": "ICLOUD_MAIL_API_KEY", "secret": True, "help": "iCloud 邮箱 API key"},
         {"key": "ICLOUD_MAIL_TYPE", "type": "choice", "choices": ["icloud-code", "icloud"],
-         "default": "icloud-code", "help": "ChatGPT 注册固定使用低成本 iCloud 子邮箱；此项供其它流程选择邮箱类型"},
+         "default": "icloud-code", "help": "ChatGPT 注册固定使用 iCloud 接码邮箱；此项供其它流程选择邮箱类型"},
         {"key": "ICLOUD_MAIL_SERVICE", "default": "openai", "help": "ChatGPT 固定按 openai 服务申请接码邮箱"},
     ]},
     {"group": "临时邮箱(Claude/Grok 注册取码)", "tests": [{"target": "yyds", "label": "测试 YYDS"}], "items": [

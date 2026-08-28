@@ -14,7 +14,7 @@ from typing import Any
 
 PAYMENT_METHODS: tuple[dict[str, Any], ...] = (
     {"id": "paypal", "label": "PayPal", "country": "US", "currency": "USD", "batch_enabled": True, "payment_execution": "paypal_auto"},
-    {"id": "gopay", "label": "GoPay", "country": "ID", "currency": "IDR", "batch_enabled": True},
+    {"id": "gopay", "label": "GoPay", "country": "ID", "currency": "IDR", "batch_enabled": True, "payment_execution": "gopay_wallet"},
     {"id": "gcash", "label": "GCash", "country": "PH", "currency": "PHP", "batch_enabled": True},
     {"id": "grabpay", "label": "GrabPay", "country": "PH", "currency": "PHP", "batch_enabled": True},
     {"id": "upi", "label": "UPI", "country": "IN", "currency": "INR", "batch_enabled": True},
@@ -44,6 +44,8 @@ def _catalog_methods(engine_root: object = "") -> list[dict[str, Any]]:
                     item["batch_enabled"] = bool(item.get("batch_enabled", True))
                     if item["id"] == "paypal":
                         item["payment_execution"] = "paypal_auto"
+                    elif item["id"] == "gopay":
+                        item["payment_execution"] = "gopay_wallet"
                     elif item["id"] == "blik":
                         item["payment_execution"] = "single_code"
                     normalized.append(item)
@@ -67,9 +69,11 @@ def payment_method(method: object, engine_root: object = "") -> dict[str, Any] |
 def resolve_protocol_engine_root(value: object = "") -> Path | None:
     """Locate a compatible local GPT-Register-Tool checkout, if installed."""
     project_root = Path(__file__).resolve().parents[1]
+    data_root = Path(os.environ.get("REG_FACTORY_DATA_DIR") or project_root).resolve()
     candidates = (
         str(value or "").strip(),
         os.environ.get("REG_FACTORY_PROTOCOL_PAYMENT_ROOT", "").strip(),
+        str(data_root.parent / "GPT-Register-Tool"),
         str(project_root.parent / "GPT-Register-Tool"),
     )
     seen: set[Path] = set()
@@ -92,20 +96,43 @@ def protocol_catalog(engine_root: object = "") -> list[dict[str, Any]]:
     """Return UI-safe channel metadata and whether the local bridge can run it."""
     root = resolve_protocol_engine_root(engine_root)
     paypal_ready = paypal_payment_ready(root)
+    try:
+        from common import gopay_service
+
+        gopay_status = gopay_service.status()
+    except Exception:
+        gopay_status = {"ready": False, "available_accounts": 0}
     return [
         {
             **item,
             "available": bool(root),
-            "batch_payment_enabled": item.get("payment_execution") == "paypal_auto",
-            "payment_available": bool(root and item.get("payment_execution") == "paypal_auto"),
+            "batch_payment_enabled": item.get("payment_execution") in {"paypal_auto", "gopay_wallet"},
+            "payment_available": bool(
+                root
+                and (
+                    item.get("payment_execution") == "paypal_auto"
+                    or (
+                        item.get("payment_execution") == "gopay_wallet"
+                        and gopay_status.get("ready")
+                    )
+                )
+            ),
             "payment_configured": bool(
-                item.get("payment_execution") == "paypal_auto" and paypal_ready
+                (item.get("payment_execution") == "paypal_auto" and paypal_ready)
+                or (
+                    item.get("payment_execution") == "gopay_wallet"
+                    and int(gopay_status.get("available_accounts") or 0) > 0
+                )
             ),
             "payment_reason": (
                 "可使用引擎默认资料，也可在本次任务中临时录入"
                 if item.get("payment_execution") == "paypal_auto" and paypal_ready
                 else "需要在本次任务中录入卡片、地址和手机号接码资料"
                 if item.get("payment_execution") == "paypal_auto"
+                else f"GoPay 钱包池可用账号 {int(gopay_status.get('available_accounts') or 0)} 个"
+                if item.get("payment_execution") == "gopay_wallet" and gopay_status.get("ready")
+                else "GoPay 钱包引擎不可用"
+                if item.get("payment_execution") == "gopay_wallet"
                 else "BLIK 仅支持单账号六位码支付，不支持批量"
                 if item.get("payment_execution") == "single_code"
                 else "该渠道需在提取的链接或二维码中完成渠道确认"

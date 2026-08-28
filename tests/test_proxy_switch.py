@@ -97,6 +97,17 @@ class ProxySwitchTests(unittest.TestCase):
         self.assertEqual(claude["HTTPS_PROXY"], "http://resident:secret@home.test:9000")
         self.assertEqual(proxy_switch.browser_proxy_fields(claude)["host"], "home.test")
 
+    def test_github_platform_mode_uses_its_own_route(self):
+        env = {
+            "PROXY_MODE": "clash_auto",
+            "CLASH_PROXY": "http://127.0.0.1:7897",
+            "REG_FACTORY_PROXY": "http://global.test:9000",
+            "GITHUB_PROXY_MODE": "residential",
+        }
+        github = proxy_switch.platform_environment(env, "github")
+        self.assertEqual(proxy_switch.proxy_mode(github), "residential")
+        self.assertEqual(github["HTTPS_PROXY"], "http://global.test:9000")
+
     def test_outlook_loop_writes_residential_proxy_to_bitbrowser_profile(self):
         response = {"success": True, "data": {"id": "profile-1"}}
         with patch.dict(

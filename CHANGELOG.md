@@ -1,5 +1,43 @@
 ﻿# 更新日志
 
+## 2026-08-28 - 2.0.8
+
+**GoPay 钱包支付**
+- 将 GoPay/Gojek 注册、余额查询和 Midtrans 支付协议核心隔离到 `vendor/gopay_engine/`，运行凭据统一写入 `runtime/gopay/`。
+- Plus 协议支付新增 GoPay 钱包执行器，从本地钱包池自动选择账号完成 Midtrans 支付；钱包池提供注册、登录、余额、号码和 OTP 管理。
+- 新增 GoPay 本地 API，并对响应中的 PIN、代理口令和 token 做脱敏；真实支付和批量删除要求显式确认。
+
+**注册与网络稳定性**
+- Claude 支持 Google OAuth、企业/教育邮箱批量导入，以及 2FA、Passkey 和 CAPTCHA 的人工接管。
+- GitHub 注册增加独立出口配置、页面完整性/限制诊断、原生国家选择和验证码处理改进。
+- ChatGPT/Codex 邮箱接码支持同一号码连续接收多个 OTP，并完善 iCloud OpenAI 接码邮箱流程。
+
+**WebUI 与打包**
+- Plus 支付面板整合 GoPay 钱包池和批量协议支付；补充配置、API、CLI 和使用文档。
+- 发布包纳入 GoPay 协议资源及 `tls_client` 运行时依赖，并加强敏感运行数据排除检查。
+
+**验证**
+- Python 全量测试：638 passed。
+- WebUI JavaScript 语法检查通过。
+
+## 2026-08-25 - GoPay 钱包执行器集成
+
+- 将 GoPay/Gojek 注册、余额查询和 Midtrans 支付协议核心隔离到 `vendor/gopay_engine/`，运行凭据统一写入 `runtime/gopay/`。
+- 现有 Plus 协议支付系统新增 `gopay_wallet` 执行器：提取 Midtrans 链接后自动选择本地 GoPay 账号支付，复用同一资格门控、任务日志和报告。
+- GoPay 账号、共享号码池、SMSBower、批量注册/登录与 OTP 管理收进 Plus 支付区的钱包池弹窗，不再保留独立导航和第二套支付入口。
+- 新增 `/api/gopay/*` 本地 API；响应剔除 PIN、代理口令和 token，真实支付与批量删除均要求显式确认。
+- 共享号码池支持同一注册流程连续接收多个 OTP，并保留现有 ChatGPT/Codex 接码行为。
+
+## 2026-08-23 - Claude Google OAuth 与企业/教育邮箱批量导入
+
+- Claude 注册新增 `--auth-mode google`，通过 Claude 登录页的 Google OAuth 完成授权；Google 密码可由导入记录提供，也可留空后在浏览器人工输入。
+- Google 账号遇到 2FA、Passkey 或 CAPTCHA 时支持 `--google-manual-timeout` 人工接管，不绕过 Google 安全校验。
+- Claude `--emails` 批量文件统一复用邮箱记录解析器，支持 `email----password`、JSON、分隔符变体及 `.edu`/`.ac.uk` 等企业教育域名。
+- `register_three_platforms.py`、`run_full_flow.py` 和 WebUI schema 透传 Claude Google 登录参数。
+
+**验证**
+- Claude/邮箱/schema 回归测试 60 项通过。
+
 ## 2026-08-22 - 2.0.7
 
 **Outlook 检测与状态领取**

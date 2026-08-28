@@ -1917,20 +1917,21 @@ def _protocol_batch_script():
 
 @app.get("/api/chatgpt-plus/protocol-status")
 def api_chatgpt_plus_protocol_status():
-    from common.protocol_payment import paypal_payment_ready, protocol_catalog, resolve_protocol_engine_root
+    from common.protocol_payment import protocol_catalog, resolve_protocol_engine_root
 
     root = resolve_protocol_engine_root()
     pool_emails = _protocol_pool_eligible_emails()
-    payment_ready = paypal_payment_ready(root or "")
+    methods = protocol_catalog(root or "")
+    payment_methods = [item for item in methods if item.get("payment_available")]
     return {
         "ok": True,
         "engine_ready": bool(root),
         "account_count": len(_chatgpt_protocol_accounts(limit=100)),
         "pool_eligible_count": len(_chatgpt_protocol_accounts(pool_emails, limit=100)),
-        "payment_ready": bool(root),
-        "payment_configured": payment_ready,
-        "payment_message": "可使用引擎默认支付资料" if payment_ready else "支付时需录入本次任务资料",
-        "methods": protocol_catalog(root or ""),
+        "payment_ready": bool(payment_methods),
+        "payment_configured": any(item.get("payment_configured") for item in payment_methods),
+        "payment_message": "PayPal 与 GoPay 按所选渠道使用各自支付资料",
+        "methods": methods,
         "message": "协议引擎已就绪" if root else "未找到协议引擎；设置 REG_FACTORY_PROTOCOL_PAYMENT_ROOT 后可用",
     }
 
@@ -1960,17 +1961,28 @@ async def api_chatgpt_plus_protocol_batch(request: Request):
     if operation not in {"extract", "pay"}:
         return JSONResponse({"error": "未知协议操作"}, status_code=400)
     payment_config = {}
+    gopay_status = {}
     if operation == "pay":
-        if method["id"] != "paypal":
-            return JSONResponse({"error": "当前只有 PayPal 支持批量协议直接支付；其他渠道需提链后确认"}, status_code=400)
+        execution = str(method.get("payment_execution") or "")
+        if execution not in {"paypal_auto", "gopay_wallet"}:
+            return JSONResponse({"error": f"{method['label']} 当前只支持协议提链，不能自动支付"}, status_code=400)
         if data.get("confirm_payment") is not True:
             return JSONResponse({"error": "执行真实支付前必须明确勾选支付确认"}, status_code=400)
-        try:
-            payment_config = _parse_paypal_payment_details(data.get("payment_details"))
-        except (TypeError, ValueError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        if not payment_config and not paypal_payment_ready(engine_root):
-            return JSONResponse({"error": "请录入本次 PayPal 卡片、账单地址和手机号接码资料"}, status_code=400)
+        if execution == "paypal_auto":
+            try:
+                payment_config = _parse_paypal_payment_details(data.get("payment_details"))
+            except (TypeError, ValueError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            if not payment_config and not paypal_payment_ready(engine_root):
+                return JSONResponse({"error": "请录入本次 PayPal 卡片、账单地址和手机号接码资料"}, status_code=400)
+        else:
+            from common import gopay_service
+
+            gopay_status = await asyncio.to_thread(gopay_service.status)
+            if not gopay_status.get("ready"):
+                return JSONResponse({"error": gopay_status.get("error") or "GoPay 钱包引擎不可用"}, status_code=503)
+            if int(gopay_status.get("available_accounts") or 0) < 1:
+                return JSONResponse({"error": "GoPay 钱包池没有可用且余额充足的账号"}, status_code=400)
     raw_emails = data.get("emails") or []
     if not isinstance(raw_emails, list) or len(raw_emails) > 100:
         return JSONResponse({"error": "emails 必须是最多 100 条的数组"}, status_code=400)
@@ -2007,6 +2019,21 @@ async def api_chatgpt_plus_protocol_batch(request: Request):
             {"error": "没有命中明确 0 元试用资格的账号，未创建协议任务", "skipped": skipped},
             status_code=422,
         )
+    if (
+        operation == "pay"
+        and method.get("payment_execution") == "gopay_wallet"
+        and int(gopay_status.get("available_accounts") or 0) < len(eligible)
+    ):
+        return JSONResponse(
+            {
+                "error": (
+                    f"GoPay 钱包池可用账号不足：需要 {len(eligible)} 个，"
+                    f"当前 {int(gopay_status.get('available_accounts') or 0)} 个"
+                ),
+                "skipped": skipped,
+            },
+            status_code=409,
+        )
 
     data_root = os.path.abspath(os.environ.get("REG_FACTORY_DATA_DIR") or ROOT)
     runtime_dir = os.path.join(data_root, "runtime", "protocol_payment")
@@ -2029,11 +2056,13 @@ async def api_chatgpt_plus_protocol_batch(request: Request):
         with contextlib.suppress(OSError):
             os.chmod(input_path, 0o600)
         task_env = _child_env("chatgpt")
+        task_env["REG_FACTORY_RUN_ID"] = f"webui-{uuid.uuid4().hex}"
         runtime_values = _plus_runtime_environment()
         task_env.update(runtime_values)
         task_env["REG_FACTORY_PROTOCOL_PAYMENT_ROOT"] = str(engine_root)
         task_env["REG_FACTORY_PROTOCOL_CHECKOUT_PROXY"] = runtime_values.get("REG_FACTORY_PLUS_LINK_PROXY", "")
         task_env["REG_FACTORY_PROTOCOL_APPROVE_PROXY"] = runtime_values.get("REG_FACTORY_PLUS_BIND_PROXY", "")
+        task_env["REG_FACTORY_GOPAY_API_BASE"] = str(request.base_url).rstrip("/")
         from common import proxy_switch
 
         await asyncio.to_thread(proxy_switch.ensure_proxy_mode, task_env)
@@ -3151,6 +3180,256 @@ async def api_custom_sms_import(request: Request):
     return await asyncio.to_thread(custom_sms.import_text, text)
 
 
+def _gopay_error(exc: Exception):
+    from common.gopay_service import GoPayUnavailable
+
+    if isinstance(exc, GoPayUnavailable):
+        status_code = 503
+    elif isinstance(exc, LookupError):
+        status_code = 404
+    else:
+        status_code = 400
+    return JSONResponse({"error": str(exc)[:300]}, status_code=status_code)
+
+
+@app.get("/api/gopay/status")
+async def api_gopay_status():
+    from common import gopay_service
+
+    return await asyncio.to_thread(gopay_service.status)
+
+
+@app.get("/api/gopay/accounts")
+async def api_gopay_accounts():
+    from common import gopay_service
+
+    try:
+        return {"accounts": await asyncio.to_thread(gopay_service.accounts)}
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/accounts/{phone}/balance")
+async def api_gopay_balance(phone: str):
+    from common import gopay_service
+
+    try:
+        return await asyncio.to_thread(gopay_service.refresh_balance, phone)
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/accounts/{phone}/relogin")
+async def api_gopay_relogin(phone: str, request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        return await asyncio.to_thread(gopay_service.start_relogin, phone, data or {})
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/accounts/{phone}/delete")
+async def api_gopay_account_delete(phone: str, request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        if (data or {}).get("confirm") is not True:
+            raise ValueError("删除 GoPay 账号必须显式确认")
+        removed = await asyncio.to_thread(gopay_service.delete_account, phone)
+        if not removed:
+            raise LookupError("GoPay 账号不存在")
+        return {"ok": True, "removed": 1}
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/accounts/clear")
+async def api_gopay_accounts_clear(request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        if (data or {}).get("confirm") is not True:
+            raise ValueError("清空 GoPay 账号必须显式确认")
+        removed = await asyncio.to_thread(gopay_service.clear_accounts)
+        return {"ok": True, "removed": removed}
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.get("/api/gopay/phones")
+async def api_gopay_phones():
+    from common import gopay_service
+
+    try:
+        return await asyncio.to_thread(gopay_service.phone_pool)
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/phones/import")
+async def api_gopay_phones_import(request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        text = str((data or {}).get("text") or "")
+        if not text.strip():
+            raise ValueError("请粘贴至少一个手机号和短信记录 URL")
+        if len(text) > 1_000_000:
+            return JSONResponse({"error": "号码批量内容不能超过 1 MB"}, status_code=413)
+        return await asyncio.to_thread(gopay_service.import_phones, text)
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/phones/{phone}/delete")
+async def api_gopay_phone_delete(phone: str):
+    from common import gopay_service
+
+    try:
+        removed = await asyncio.to_thread(gopay_service.delete_phone, phone)
+        if not removed:
+            raise LookupError("号码不存在")
+        return {"ok": True, "removed": 1}
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/phones/clear")
+async def api_gopay_phones_clear(request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        if (data or {}).get("confirm") is not True:
+            raise ValueError("清空号码池必须显式确认")
+        removed = await asyncio.to_thread(gopay_service.clear_phones)
+        return {"ok": True, "removed": removed}
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.get("/api/gopay/sms")
+async def api_gopay_sms_status():
+    from common import gopay_service
+
+    try:
+        return await asyncio.to_thread(gopay_service.sms_status)
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/sms")
+async def api_gopay_sms_save(request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        return await asyncio.to_thread(gopay_service.save_sms_config, data or {})
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.get("/api/gopay/register/jobs")
+async def api_gopay_register_jobs():
+    from common import gopay_service
+
+    try:
+        return {"jobs": await asyncio.to_thread(gopay_service.registration_jobs)}
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/register")
+async def api_gopay_register(request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        return await asyncio.to_thread(gopay_service.start_registration, data or {})
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/register/batch")
+async def api_gopay_register_batch(request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        return await asyncio.to_thread(gopay_service.start_batch, data or {})
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/register/jobs/{job_id}/otp")
+async def api_gopay_register_otp(job_id: str, request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        return await asyncio.to_thread(
+            gopay_service.submit_registration_otp,
+            job_id,
+            str((data or {}).get("code") or ""),
+        )
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.get("/api/gopay/payments")
+async def api_gopay_payment_jobs():
+    from common import gopay_service
+
+    try:
+        return {"jobs": await asyncio.to_thread(gopay_service.payment_jobs)}
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.get("/api/gopay/payments/{job_id}")
+async def api_gopay_payment_job(job_id: str):
+    from common import gopay_service
+
+    try:
+        job = await asyncio.to_thread(gopay_service.payment_job, job_id)
+        if not job:
+            raise LookupError("支付任务不存在")
+        return job
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/payments")
+async def api_gopay_payment_start(request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        return await asyncio.to_thread(gopay_service.start_payment, data or {})
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
+@app.post("/api/gopay/payments/{job_id}/otp")
+async def api_gopay_payment_otp(job_id: str, request: Request):
+    from common import gopay_service
+
+    try:
+        data = await request.json()
+        return await asyncio.to_thread(
+            gopay_service.submit_payment_otp,
+            job_id,
+            str((data or {}).get("code") or ""),
+        )
+    except Exception as exc:
+        return _gopay_error(exc)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return open(os.path.join(WEBUI, "static", "index.html"), encoding="utf-8").read()
@@ -3298,6 +3577,12 @@ def api_status():
         network = bool(proxy) if mode == "residential" else (True if mode == "direct" else _test_clash()[0])
     except Exception:
         node = None
+    try:
+        from common import gopay_service
+
+        gopay_ready = bool(gopay_service.status().get("ready"))
+    except Exception:
+        gopay_ready = False
     return {
         "pid": os.getpid(),
         "version": WEBUI_VERSION,
@@ -3311,6 +3596,7 @@ def api_status():
         "direct_proxy": mode == "residential" and bool(proxy),
         "k12": _k12_alive(),
         "chatgpt_plus": _plus_status()["ready"],
+        "gopay": gopay_ready,
         "node": node,
         "running": sum(1 for r in RUNS.values() if not r["done"]),
         "update": _update_status(),
@@ -3322,7 +3608,7 @@ def _proxy_panel_data(include_nodes=False):
 
     config = {key: _read_config_val(key, "") for key in _PROXY_ENV_KEYS}
     config["PROXY_MODE"] = ps.proxy_mode()
-    for platform in ("OUTLOOK", "CLAUDE", "CHATGPT", "GROK", "KIRO"):
+    for platform in ("OUTLOOK", "CLAUDE", "CHATGPT", "GROK", "KIRO", "GITHUB"):
         config[f"{platform}_PROXY_MODE"] = config[f"{platform}_PROXY_MODE"] or "inherit"
     config["CLASH_API"] = config["CLASH_API"] or "http://127.0.0.1:9097"
     config["CLASH_PROXY"] = config["CLASH_PROXY"] or "http://127.0.0.1:7897"
@@ -3350,7 +3636,7 @@ def _proxy_panel_data(include_nodes=False):
         "effective_proxy": ps.effective_proxy_url(),
         "routes": {
             platform: ps.proxy_mode(ps.platform_environment(os.environ, platform))
-            for platform in ("outlook", "claude", "chatgpt", "grok", "kiro")
+            for platform in ("outlook", "claude", "chatgpt", "grok", "kiro", "github")
         },
     }
 
@@ -3402,7 +3688,7 @@ async def api_proxy_set(request: Request):
     updates["PROXY_MODE"] = mode
     platform_modes = {
         platform: updates[f"{platform.upper()}_PROXY_MODE"] or "inherit"
-        for platform in ("outlook", "claude", "chatgpt", "grok", "kiro")
+        for platform in ("outlook", "claude", "chatgpt", "grok", "kiro", "github")
     }
     for platform, platform_mode in platform_modes.items():
         if platform_mode not in {"inherit", "clash_auto", "clash_fixed", "residential"}:
@@ -3492,8 +3778,8 @@ async def api_proxy_set(request: Request):
 
 def _proxy_target_env(platform: str = "") -> dict:
     normalized = str(platform or "").strip().lower()
-    if normalized and normalized not in {"outlook", "claude", "chatgpt", "grok", "kiro"}:
-        raise ValueError("测试平台仅支持 outlook、claude、chatgpt、grok、kiro")
+    if normalized and normalized not in {"outlook", "claude", "chatgpt", "grok", "kiro", "github"}:
+        raise ValueError("测试平台仅支持 outlook、claude、chatgpt、grok、kiro、github")
     return _child_env(normalized)
 
 
@@ -3865,11 +4151,12 @@ async def _start_managed_run(cmd, sid, task_env, task_cwd):
     )
     _run_seq[0] += 1
     run_id = f"r{_run_seq[0]}"
+    github_keep = sid == "register_github" and "--no-keep" not in cmd
     rec = {"proc": proc, "lines": [], "done": False, "stopped": False,
            "returncode": None, "script": sid,
            "cmd": " ".join(cmd), "started": time.strftime("%H:%M:%S"),
            "run_owner": task_env["REG_FACTORY_RUN_ID"],
-           "keep_on_fail": "--keep-on-fail" in cmd}
+           "keep_on_fail": "--keep-on-fail" in cmd or github_keep}
     RUNS[run_id] = rec
 
     def _sanitize_line(value):
@@ -3984,6 +4271,14 @@ async def api_stop(run_id: str):
         rec["stopped"] = True
         stopped = await asyncio.to_thread(_terminate_process_tree, rec["proc"].pid)
         owner = rec.get("run_owner")
+        gopay_cancelled = 0
+        if owner:
+            with contextlib.suppress(Exception):
+                from common import gopay_service
+
+                gopay_cancelled = await asyncio.to_thread(
+                    gopay_service.cancel_payment_context, owner
+                )
         browser_cleanup = (
             await asyncio.to_thread(_cleanup_registered_browser_profiles, owner)
             if owner
@@ -3992,6 +4287,7 @@ async def api_stop(run_id: str):
         return {
             "ok": stopped and not browser_cleanup["failed"],
             "stopped": 1 if stopped else 0,
+            "gopay_payments": gopay_cancelled,
             "browser_profiles": browser_cleanup,
         }
     return {"ok": True, "stopped": 0}
@@ -4000,6 +4296,7 @@ async def api_stop(run_id: str):
 @app.post("/api/stop-all")
 async def api_stop_all():
     tracked = {}
+    tracked_owners = set()
     for rec in RUNS.values():
         if rec.get("done"):
             continue
@@ -4007,6 +4304,8 @@ async def api_stop_all():
         pid = int(getattr(rec.get("proc"), "pid", 0) or 0)
         if pid > 0:
             tracked[pid] = rec
+        if rec.get("run_owner"):
+            tracked_owners.add(rec["run_owner"])
 
     discovered = await asyncio.to_thread(_list_orphaned_task_processes)
     targets = set(tracked)
@@ -4024,6 +4323,14 @@ async def api_stop_all():
             stopped += 1
         else:
             failed.append(pid)
+    gopay_cancelled = 0
+    with contextlib.suppress(Exception):
+        from common import gopay_service
+
+        for owner in tracked_owners:
+            gopay_cancelled += await asyncio.to_thread(
+                gopay_service.cancel_payment_context, owner
+            )
     browser_cleanup = await asyncio.to_thread(_cleanup_registered_browser_profiles)
     return {
         "ok": not failed,
@@ -4031,6 +4338,7 @@ async def api_stop_all():
         "tracked": len(tracked),
         "orphaned": orphaned,
         "failed": failed,
+        "gopay_payments": gopay_cancelled,
         "browser_profiles": browser_cleanup,
     }
 

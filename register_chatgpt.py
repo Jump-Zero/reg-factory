@@ -1722,8 +1722,13 @@ async def recover_stuck_chatgpt_email_submit(page, email):
 
 
 def create_chatgpt_icloud_mailbox():
-    """Allocate a low-cost iCloud submail for registration and code polling."""
-    return create_mailbox(provider="icloud", mail_type="icloud")
+    """Allocate an iCloud mailbox intended for ChatGPT verification codes."""
+    # ChatGPT no longer accepts the generic iCloud submail product.  Use the
+    # provider's OpenAI-filtered mailbox so registration codes are delivered
+    # through the supported iCloud code-mail flow.
+    return create_mailbox(
+        provider="icloud", mail_type="icloud-code", service="openai"
+    )
 
 
 def create_chatgpt_remail_mailbox():
@@ -1764,10 +1769,10 @@ def _allocate_untainted_chatgpt_icloud_mailbox(max_attempts=12):
         mailbox = create_chatgpt_icloud_mailbox()
         root = _icloud_registration_root(mailbox.get("email"))
         if root and root in tainted_roots:
-            print(f"  [email] skipping known ChatGPT iCloud mother mailbox: {root}")
+            print(f"  [email] skipping known ChatGPT iCloud mailbox: {root}")
             continue
         return mailbox
-    raise RuntimeError("iCloud submail pool repeatedly returned known ChatGPT mother mailboxes")
+    raise RuntimeError("iCloud mailbox provider repeatedly returned known ChatGPT mailboxes")
 
 
 def allocate_chatgpt_registration_mailbox():
@@ -1785,7 +1790,7 @@ def allocate_chatgpt_registration_mailbox():
         try:
             if EMAIL_PROVIDER == "icloud":
                 mailbox = _allocate_untainted_chatgpt_icloud_mailbox()
-                label = "iCloud submail"
+                label = "iCloud code mailbox"
             else:
                 mailbox = create_chatgpt_remail_mailbox()
                 label = f"Remail ({mailbox.get('email', '').split('@')[-1]})"
@@ -1829,7 +1834,7 @@ def allocate_chatgpt_registration_mailbox():
     print("  [email] Outlook pool exhausted; switching to iCloud mailbox")
     try:
         mailbox = _allocate_untainted_chatgpt_icloud_mailbox()
-        print(f"  [email] iCloud submail allocated: {mailbox['email']}")
+        print(f"  [email] iCloud code mailbox allocated: {mailbox['email']}")
         return {
             "email": mailbox["email"],
             "password": "",
@@ -2057,6 +2062,7 @@ async def extract_codex(
                 print(f"  [codex][CPA] {'OK' if cok else 'FAIL'} {cpa['file_name']} - {cmsg}")
             except Exception as e:
                 print(f"  [codex][CPA] 推送异常: {str(e)[:80]}")
+
         return True
     except Exception as e:
         print(f"  [codex] 提取失败: {str(e)[:120]}")

@@ -134,7 +134,7 @@ ChatGPT 注册可通过 `--country JP` 等两位 ISO 国家码约束出口。脚
 
 Plus 导入页把“授权导入”“渠道选择”“批量协议提链”和“批量协议支付”放在一个任务面板中。OAuth 导入成功后可从本地 session 读取当前 AT；也可选择“号池有资格账号”，直接载入资产扫描缓存中标记为 `zero_price` 且存在可用本地 session 的账号。`eligible`、`discount` 和 `unknown` 不会进入协议号池。无论来源如何，协议任务都会逐账号实时复检优惠资格，未再次命中的账号不会进入提链或支付。
 
-渠道目录包括 PayPal、GoPay、GCash、GrabPay、UPI、iDEAL、PIX、Kakao Pay、BLIK、TWINT、Direct Card Checkout 和 MoMo。BLIK 的上游协议不支持批量，因此在批量界面中明确禁用。除 PayPal 外，批量任务只生成支付链接或二维码；PayPal 可通过明确选择“批量协议支付”、勾选真实支付确认并再次确认弹窗后调用上游 `paypal_auto` 执行器。支付资料可仅在本次任务中录入，也可使用协议引擎已有的 `paypal_auto` 配置。任务输入文件以本机权限保护，子进程结束即删除；最终报告不保存 AT、Cookie、卡片、地址或接码 URL。
+渠道目录包括 PayPal、GoPay、GCash、GrabPay、UPI、iDEAL、PIX、Kakao Pay、BLIK、TWINT、Direct Card Checkout 和 MoMo。BLIK 的上游协议不支持批量，因此在批量界面中明确禁用。PayPal 与 GoPay 支持“批量协议支付”：PayPal 调用 `paypal_auto`，GoPay 在现有协议引擎生成 Midtrans 链接后从本地钱包池自动选择一号一付；其余渠道只生成支付链接或二维码。两种真实支付都必须勾选支付确认并通过二次确认弹窗。GoPay 批量任务开始前会检查可用钱包账号数，数量不足时不会开始部分支付。任务输入文件以本机权限保护，子进程结束即删除；最终报告不保存 AT、Cookie、PIN、钱包 token、卡片、地址或接码 URL。
 
 协议执行复用本机的 GPT-Register-Tool 引擎。默认自动查找同级 `GPT-Register-Tool` 目录；发布包或其他目录可在 `.env` 中设置 `REG_FACTORY_PROTOCOL_PAYMENT_ROOT`。Plus 提链默认跟随 ChatGPT 的 Clash 出口；需要其他出口时，通过 `REG_FACTORY_PLUS_LINK_ROUTE`、`REG_FACTORY_PLUS_BIND_ROUTE` 或对应的显式 proxy override 配置。
 
@@ -191,3 +191,25 @@ curl -X POST http://127.0.0.1:8799/api/assets/cursors/reset \
 ```
 
 领取账本保存在 `runtime/state/asset_api_claims.json`，只包含不可逆的 SHA-256 标识和平台范围，不保存邮箱或凭据。旧版兼容游标仍保存在 `runtime/state/asset_api_cursors.json`。重置不会修改 `emails.txt`、Cookie 或 Token 文件。
+
+## GoPay 本地 API
+
+主 WebUI 在 `/api/gopay/*` 提供 Plus 支付面板内置钱包池所需的本机接口。账号凭据、PIN、短信配置与支付任务状态保存在 `REG_FACTORY_DATA_DIR/runtime/gopay/`，接口响应不会返回 access token、refresh token、PIN 或代理口令。钱包池没有独立支付入口；正常支付应通过 `/api/chatgpt-plus/protocol-batch` 的 `method=gopay`、`operation=pay` 发起。
+
+```bash
+# 状态、账号和共享号码池
+curl http://127.0.0.1:8799/api/gopay/status
+curl http://127.0.0.1:8799/api/gopay/accounts
+curl http://127.0.0.1:8799/api/gopay/phones
+
+# 使用共享号码池启动单个注册任务
+curl -X POST http://127.0.0.1:8799/api/gopay/register \
+  -H "Content-Type: application/json" \
+  -d '{"source":"custom","pin":"147258","country_code":"62"}'
+
+# 等待 OTP 的注册任务可人工提交验证码
+curl -X POST http://127.0.0.1:8799/api/gopay/register/jobs/JOB_ID/otp \
+  -H "Content-Type: application/json" -d '{"code":"123456"}'
+```
+
+`POST /api/gopay/payments` 是协议 worker 使用的本机执行接口，JSON 必须明确包含 `"confirm_payment":true`；同一 Midtrans snap 和已绑定的 GoPay 账号会由协议引擎阻止重复使用。用户界面的唯一支付入口仍是 Plus 协议支付任务。

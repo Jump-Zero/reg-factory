@@ -208,6 +208,8 @@ class RegistrationSchemaTests(unittest.TestCase):
         self.assertTrue(args["--latest-rt"]["default"])
         self.assertIn("--client-id", args)
         self.assertIn("yyds", args["--provider"]["choices"])
+        self.assertIn("google", args["--provider"]["choices"])
+        self.assertEqual(args["--provider"]["labels"]["google"], "Google OAuth")
         self.assertIn("--domain", args)
         self.assertLess(
             next(i for i, item in enumerate(_script("register_claude")["args"]) if item["flag"] == "--provider"),
@@ -217,6 +219,16 @@ class RegistrationSchemaTests(unittest.TestCase):
         self.assertEqual(args["--node"]["default"], "auto")
         self.assertEqual(args["--challenge-node-retries"]["default"], 3)
         self.assertEqual(args["--captcha-manual-timeout"]["default"], 0)
+
+    def test_claude_exposes_google_auth_and_batch_mailboxes(self):
+        args = {item["flag"]: item for item in _script("register_claude")["args"]}
+        self.assertEqual(args["--auth-mode"]["choices"], ["magic", "google"])
+        self.assertIn("--emails", args)
+        self.assertIn("--google-manual-timeout", args)
+        for script_id in ("run_full_flow", "register_three_platforms"):
+            flow_args = {item["flag"]: item for item in _script(script_id)["args"]}
+            self.assertIn("--claude-auth-mode", flow_args)
+            self.assertIn("--claude-google-manual-timeout", flow_args)
 
     def test_webui_exposes_claude_solver_configuration_only(self):
         script = _script("register_claude")

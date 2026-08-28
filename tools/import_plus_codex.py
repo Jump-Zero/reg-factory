@@ -294,6 +294,7 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
         "phone_status": "not_verified",
         "plan_type": record.get("plan_type") or "",
         "sub2api_account_id": None,
+        "invitee_email": "",
         "message": "",
         "finished_at": "",
     }
@@ -372,10 +373,28 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
             result["plan_type"] = _check_paid(credentials.get("plan_type") or result["plan_type"], args)
             await _save_and_create(origin, sub2api_token, group_id, credentials, email, result, args)
 
+            # 邀请好友:Plus/Pro 账号 OAuth 成功后,从池子抽未注册邮箱邀请(触发 banked reset 奖励)
+            if getattr(args, "invite_friend", False) and result.get("status") == "success":
+                result["stage"] = "invite"
+                try:
+                    invite_timeout = getattr(args, "invite_timeout", 45)
+                    print(f"  [invite] 检测邀请好友资格(timeout={invite_timeout}s)...")
+                    invite_ok, invitee_email, invite_msg = await ox.handle_codex_invite_friend(
+                        page, email, timeout=invite_timeout
+                    )
+                    result["invitee_email"] = invitee_email or ""
+                    if invite_ok and invitee_email:
+                        print(f"  [invite] ✅ 已邀请: {invitee_email}")
+                    elif not invite_ok:
+                        print(f"  [invite][WARN] {invite_msg}")
+                except Exception as e:
+                    print(f"  [invite][WARN] 邀请流程异常: {str(e)[:100]}")
+
+        invite_suffix = f" invitee={result['invitee_email']}" if result.get("invitee_email") else ""
         print(
             f"  [OK] {masked} -> "
             f"{'SUB2API #' + str(result['sub2api_account_id']) if result['sub2api_account_id'] else 'local credentials'} "
-            f"plan={result['plan_type'] or 'unknown'} phone={result['phone_status']}"
+            f"plan={result['plan_type'] or 'unknown'} phone={result['phone_status']}{invite_suffix}"
         )
     except Exception as exc:
         result["message"] = str(exc)[:240]
@@ -475,6 +494,10 @@ def build_parser():
                         help="不执行手机号验证；适合只保存凭据或导出 token")
     parser.add_argument("--no-import", action="store_true",
                         help="只保存或输出 OAuth 凭据，不创建 SUB2API 账号")
+    parser.add_argument("--invite-friend", action="store_true",
+                        help="OAuth 成功后邀请新用户(从邮箱池抽未注册号),触发 banked reset 奖励")
+    parser.add_argument("--invite-timeout", type=int, default=45,
+                        help="邀请流程超时秒数")
     parser.add_argument("--results", default="", help="结果 JSONL 路径")
     parser.add_argument("--delete-input", action="store_true")
     parser.add_argument("--keep-on-fail", action="store_true")

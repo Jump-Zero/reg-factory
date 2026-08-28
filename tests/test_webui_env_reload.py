@@ -86,6 +86,20 @@ class WebUIEnvReloadTests(unittest.TestCase):
         self.assertEqual(claude["HTTPS_PROXY"], "http://home.test:9000")
         self.assertEqual(claude["REG_FACTORY_PLATFORM"], "claude")
 
+    def test_child_env_applies_github_proxy_override(self):
+        path = self._env_file("unused")
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(
+                "PROXY_MODE=clash_auto\n"
+                "CLASH_PROXY=http://127.0.0.1:7897\n"
+                "GITHUB_PROXY_MODE=residential\n"
+                "REG_FACTORY_PROXY=http://github.test:9000\n"
+            )
+        with patch.object(server, "ENV_PATH", path), patch.object(server, "BOOT_ENV", {}):
+            github = server._child_env("github")
+        self.assertEqual(github["HTTPS_PROXY"], "http://github.test:9000")
+        self.assertEqual(github["REG_FACTORY_PLATFORM"], "github")
+
     def test_child_env_uses_saved_chatgpt_proxy_over_stale_boot_value(self):
         path = self._env_file("unused")
         with open(path, "a", encoding="utf-8") as handle:

@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import glob
 import json
+import math
 import os
 import random
 import re
@@ -66,6 +67,9 @@ KEY_COOKIES = ["user_session", "__Host-user_session_same_site", "_gh_sess"]
 REGISTER_TIMEOUT = 600
 POOL_DIR = "_outlook_pool"
 SCREENSHOT_DIR = "screenshots_github"
+RESTRICTED = "RESTRICTED"
+PAGE_BLANK = "PAGE_BLANK"
+CLIENT_INTEGRITY = "CLIENT_INTEGRITY"
 
 # GitHub 验证 = Arkose Labs FunCaptcha（实测抓到的固定参数）
 # 触发: 填完表 -> idle 几秒等 enforcement 初始化 -> 点 Create account -> "Verify your account"
@@ -75,6 +79,283 @@ ARKOSE_API_SUBDOMAIN = "github-api.arkoselabs.com"
 # GitHub 发件人 / launch code 邮件特征
 GH_SENDER = ("github.com", "noreply@github.com", "notifications@github.com")
 GH_SUBJECT = ("launch code", "github", "verify", "verification", "code")
+
+DATADOME_CHALLENGE_MARKERS = (
+    "slide to protect your access",
+    "向右滑动以保护您的访问",
+    "captcha__frame",
+    "captcha__puzzle",
+    "ddv1-captcha-container",
+)
+
+
+def parse_github_restriction(text, url=""):
+    """Parse GitHub's device/network restriction page into a safe diagnostic."""
+    body = str(text or "")
+    lowered = body.lower()
+    markers = (
+        "access is temporarily restricted",
+        "we detected unusual activity from your device or network",
+        "automated (bot) activity on your network",
+        "use of developer or inspection tools",
+        "too many requests",
+        "secondary rate limit",
+        "abuse detection mechanism",
+    )
+    if not any(marker in lowered for marker in markers):
+        return None
+    restriction = re.search(
+        r"(?:\bID\b|restriction\s*id)\s*[:#]\s*([a-f0-9]{8,}(?:-[a-f0-9]{4,}){2,})",
+        body,
+        flags=re.IGNORECASE,
+    )
+    address = re.search(r"\bIP\s+((?:\d{1,3}\.){3}\d{1,3})\b", body, flags=re.IGNORECASE)
+    return {
+        "reason": "GitHub 暂时限制了当前设备或网络",
+        "restriction_id": restriction.group(1) if restriction else "",
+        "ip": address.group(1) if address else "",
+        "url": str(url or ""),
+    }
+
+
+async def detect_github_restriction(page):
+    """Inspect the rendered page without making another request or retry."""
+    try:
+        body = await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        body = ""
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    restriction = parse_github_restriction(f"{title}\n{body}", page.url)
+    if restriction:
+        return restriction
+    # DataDome/Arkose can render the restriction explanation in a cross-origin
+    # iframe while leaving the top-level GitHub document body empty.
+    for frame in page.frames:
+        if frame == page.main_frame:
+            continue
+        try:
+            frame_title = await frame.title()
+        except Exception:
+            frame_title = ""
+        try:
+            frame_body = await frame.locator("body").inner_text(timeout=1500)
+        except Exception:
+            frame_body = ""
+        restriction = parse_github_restriction(
+            f"{frame_title}\n{frame_body}", frame.url
+        )
+        if restriction:
+            return restriction
+    return None
+
+
+async def detect_github_challenge(page):
+    """Return whether a DataDome/Arkose challenge is currently actionable."""
+    for frame in page.frames:
+        frame_url = (frame.url or "").lower()
+        if any(marker in frame_url for marker in (
+            "captcha-delivery.com",
+            "octocaptcha.com",
+            "octocaptcha.com/datadome",
+            "datadome",
+        )):
+            return True
+        try:
+            body = await frame.locator("body").inner_text(timeout=1500)
+        except Exception:
+            body = ""
+        lowered = str(body or "").lower()
+        if any(marker.lower() in lowered for marker in DATADOME_CHALLENGE_MARKERS[:2]):
+            return True
+        try:
+            if await frame.locator(
+                '#captcha__frame, #ddv1-captcha-container, '
+                '[data-dd-captcha-container], [data-dd-ddv1-captcha-container]'
+            ).count() > 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def solve_datadome_slider(page, max_rounds=2):
+    """Try the visible DataDome right-slide challenge and classify its result."""
+    for attempt in range(max(1, int(max_rounds or 1))):
+        slider = target = None
+        for frame in list(page.frames)[1:]:
+            try:
+                candidate = frame.locator(".slider").first
+                destination = frame.locator(".sliderTarget").first
+                if await candidate.count() and await candidate.is_visible() \
+                        and await destination.count() and await destination.is_visible():
+                    slider, target = candidate, destination
+                    break
+            except Exception:
+                continue
+
+        if slider is None:
+            # DataDome initially shows a retry state before mounting the slider.
+            retry = None
+            for frame in list(page.frames)[1:]:
+                try:
+                    candidate = frame.locator(
+                        'button.retryLink, button[aria-label*="Retry" i]'
+                    ).first
+                    if await candidate.count() and await candidate.is_visible():
+                        retry = candidate
+                        break
+                except Exception:
+                    continue
+            if retry is None:
+                return "UNAVAILABLE"
+            try:
+                await retry.click(timeout=5000)
+                print(f"  [datadome] retry clicked ({attempt + 1}/{max_rounds})")
+            except Exception as exc:
+                print(f"  [datadome] retry failed: {str(exc)[:80]}")
+                continue
+            await page.wait_for_timeout(500)
+            continue
+
+        try:
+            slider_box = await slider.bounding_box(timeout=3000)
+            target_box = await target.bounding_box(timeout=3000)
+            if not slider_box or not target_box:
+                continue
+            start_x = slider_box["x"] + slider_box["width"] / 2
+            start_y = slider_box["y"] + slider_box["height"] / 2
+            end_x = target_box["x"] + target_box["width"] / 2
+            await page.mouse.move(start_x, start_y)
+            await page.mouse.down()
+            for step in range(1, 41):
+                progress = step / 40
+                eased = progress * progress * (3 - 2 * progress)
+                await page.mouse.move(
+                    start_x + (end_x - start_x) * eased,
+                    start_y + math.sin(progress * math.pi) * 1.5,
+                )
+                await page.wait_for_timeout(20)
+            await page.mouse.up()
+            print("  [datadome] right-slide drag executed")
+        except Exception as exc:
+            print(f"  [datadome] slider drag failed: {str(exc)[:80]}")
+            continue
+
+        await page.wait_for_timeout(3500)
+        if not await detect_github_challenge(page):
+            return "PASSED"
+        restriction = await detect_github_restriction(page)
+        if restriction:
+            has_control = False
+            for frame in list(page.frames)[1:]:
+                try:
+                    has_control = await frame.locator(
+                        ".slider, button.retryLink, button[aria-label*='Retry' i]"
+                    ).count() > 0
+                except Exception:
+                    pass
+                if has_control:
+                    break
+            if not has_control:
+                return "RESTRICTED"
+    return "FAILED"
+
+
+
+def classify_github_entry(
+    body, *, title="", html_length=0, url="", http_status=None,
+    has_signup_form=False,
+):
+    """Classify a normal, restricted, or blank signup entry page."""
+    if has_signup_form:
+        return "READY", {
+            "initial_http_status": int(http_status or 0) or None,
+            "recovered_after_js": int(http_status or 0) in {401, 403, 429},
+        }
+    if "please enable js and disable any ad blocker" in str(body or "").lower():
+        return CLIENT_INTEGRITY, {
+            "reason": "GitHub 未通过浏览器 JavaScript 或完整性检查",
+            "http_status": int(http_status or 0) or None,
+            "title": str(title or ""),
+            "response_excerpt": re.sub(r"\s+", " ", str(body or ""))[:240],
+            "url": str(url or ""),
+        }
+    restriction = parse_github_restriction(f"{title}\n{body}", url)
+    if restriction:
+        return RESTRICTED, restriction
+    if int(http_status or 0) in {401, 403, 429}:
+        return RESTRICTED, {
+            "reason": f"GitHub 返回 HTTP {int(http_status)}，拒绝当前设备或网络",
+            "http_status": int(http_status),
+            "title": str(title or ""),
+            "response_excerpt": re.sub(r"\s+", " ", str(body or ""))[:240],
+            "url": str(url or ""),
+        }
+    if not str(body or "").strip():
+        return PAGE_BLANK, {
+            "reason": "浏览器已导航但页面没有渲染任何可见内容",
+            "title": str(title or ""),
+            "html_length": int(html_length or 0),
+            "url": str(url or ""),
+        }
+    return "READY", {}
+
+
+async def inspect_github_entry(page, *, response_body="", http_status=None):
+    """Wait briefly for visible content and return a diagnostic classification."""
+    email_selector = 'input#email, input[name="user[email]"], input[type="email"]'
+    try:
+        # GitHub commonly returns a short HTTP 403 challenge shell first, then
+        # mounts the real signup form after its JavaScript integrity check. Do
+        # not treat the shell's "Skip to content" text as a final page state.
+        await page.locator(email_selector).first.wait_for(
+            state="visible",
+            timeout=20_000 if int(http_status or 0) in {401, 403, 429} else 8_000,
+        )
+    except Exception:
+        pass
+    try:
+        await page.wait_for_function(
+            "document.body && document.body.innerText.trim().length > 0",
+            timeout=12_000,
+        )
+    except Exception:
+        pass
+    try:
+        body = await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        body = ""
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    try:
+        html_length = len(await page.content())
+    except Exception:
+        html_length = 0
+    try:
+        email_input = page.locator(
+            'input#email, input[name="user[email]"], input[type="email"]'
+        ).first
+        has_signup_form = await email_input.count() > 0 and await email_input.is_visible()
+    except Exception:
+        has_signup_form = False
+    # DataDome can mount its challenge iframe before the signup form. In that
+    # state the top-level body is empty, so classify the challenge first.
+    if await detect_github_challenge(page):
+        return "CHALLENGE", {"challenge": "datadome"}
+    combined = "\n".join(value for value in (response_body, body) if value)
+    return classify_github_entry(
+        combined,
+        title=title,
+        html_length=html_length,
+        url=page.url,
+        http_status=http_status,
+        has_signup_form=has_signup_form,
+    )
 
 
 def _solve_funcaptcha_yescaptcha(public_key, page_url, subdomain, blob=None, max_wait=200):
@@ -330,6 +611,62 @@ def rand_username():
     return f"{adj}{noun}{random.randint(1000, 9999)}"
 
 
+def should_close_github_profile(provider, *, keep, skip_variant=False, restricted=False, page_blank=False):
+    """Return whether this task owns enough lifecycle to close the profile."""
+    normalized = str(provider or "").strip().lower()
+    # Cloak contexts are owned by this process' event loop and cannot survive
+    # process exit. BitBrowser/bundled profiles can remain available for a
+    # manual handoff unless deletion was explicitly requested.
+    return bool(
+        normalized == "cloak"
+        or not keep
+        or skip_variant
+        or restricted
+        or page_blank
+    )
+
+
+def prepare_github_egress(requested="auto"):
+    """Select a responsive configured egress without probing GitHub itself."""
+    target = str(requested or "auto").strip()
+    mode = proxy_switch.proxy_mode()
+    if mode == "residential":
+        proxy = proxy_switch.effective_proxy_url()
+        if not proxy:
+            raise RuntimeError("GitHub 住宅代理模式没有可用代理")
+        print(f"  [node] GitHub residential egress ready: {proxy_switch.current_node()}")
+        return proxy_switch.current_node()
+    if mode == "clash_fixed":
+        applied = proxy_switch.ensure_proxy_mode()
+        print(f"  [node] GitHub fixed node: {applied.get('node') or '-'}")
+        return applied.get("node")
+    if target and target.lower() not in {"auto", "any"}:
+        proxy_switch.pin_fixed_node(target, "github")
+        print(f"  [node] GitHub requested node: {target}")
+        return target
+    if mode == "direct":
+        print("  [node] GitHub direct egress")
+        return "direct"
+
+    try:
+        current = proxy_switch.current_node()
+    except Exception:
+        current = None
+    latency = proxy_switch.node_delay(
+        current,
+        url="https://www.google.com/generate_204",
+        timeout_ms=5000,
+    ) if current else None
+    if latency is not None:
+        print(f"  [node] GitHub current node responsive: {current} ({latency} ms)")
+        return current
+    selected = proxy_switch.rotate_proxy()
+    if not selected.get("ok"):
+        raise RuntimeError(selected.get("error") or "GitHub 没有可用的 Clash 节点")
+    print(f"  [node] GitHub selected responsive node: {selected.get('node') or '-'}")
+    return selected.get("node")
+
+
 def load_pool_accounts():
     """读 _outlook_pool/*.json -> [(email, password, cookies)]，最新优先。"""
     files = sorted(glob.glob(os.path.join(POOL_DIR, "*.json")), reverse=True)
@@ -400,8 +737,16 @@ async def detect_captcha(page, max_wait=20):
 async def trigger_verify(page, max_clicks=4):
     """点 Create account 触发验证。实测要点两下：第一下 priming，第二下才弹 octocaptcha。
     每点一次等几秒看 octocaptcha frame 是否出现，出现即停。返回是否触发成功。"""
+    initial_url = page.url
     for attempt in range(max_clicks):
-        await click_create_account(page)
+        clicked = await click_create_account(page)
+        if not clicked:
+            # Do not repeat clicks after a blocked or stale form.
+            print("  [verify] Create account click was not confirmed")
+            return False
+        if page.url != initial_url:
+            print(f"  [verify] signup navigated after {attempt+1} click(s)")
+            return True
         # 点完等 octocaptcha 子 frame 冒出来
         if await detect_captcha(page, max_wait=8):
             print(f"  [verify] octocaptcha triggered after {attempt+1} click(s)")
@@ -438,30 +783,102 @@ async def fill_step(page, selector, value, label, settle=0.5):
 
 
 async def select_country(page, country="United States of America"):
+    # GitHub's current signup form uses a visible native <select> and often
+    # preselects the United States. Handle it before the legacy custom-menu
+    # code below; that code can otherwise click a hidden menu item and time out.
+    def _normalized(value):
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+    wanted = _normalized(country)
+    try:
+        selects = page.locator("select")
+        for index in range(await selects.count()):
+            select = selects.nth(index)
+            if not await select.is_visible():
+                continue
+            options = select.locator("option")
+            selected_label = ""
+            selected = select.locator("option:checked").first
+            if await selected.count() > 0:
+                selected_label = (await selected.inner_text()).strip()
+            target_value = None
+            target_label = None
+            for option_index in range(await options.count()):
+                option = options.nth(option_index)
+                label = (await option.inner_text()).strip()
+                value = await option.get_attribute("value")
+                if _normalized(label) == wanted or _normalized(value) == wanted:
+                    target_value = value
+                    target_label = label
+                    break
+            if target_label is None:
+                continue
+            if _normalized(selected_label) == wanted:
+                print(f"  [form] country already selected: {target_label}")
+                return True
+            if target_value is not None:
+                await select.select_option(value=target_value, timeout=4000)
+            else:
+                await select.select_option(label=target_label, timeout=4000)
+            selected = select.locator("option:checked").first
+            selected_text = (await selected.inner_text()).strip()
+            if _normalized(selected_text) == wanted:
+                print(f"  [form] country selected: {selected_text}")
+                await asyncio.sleep(0.5)
+                return True
+    except Exception as e:
+        print(f"  [form] native country select failed: {str(e)[:70]}")
     """选 Country/Region 自定义下拉：点开下拉 -> 过滤框输入 -> 点国家项。
     GitHub 这是个自定义 button+listbox（非原生 select），国家项是带 id=item-* 的 button。"""
     try:
         # 打开下拉：通常是 label 'Your Country/Region' 旁的 button，或含 'Country' 的按钮
-        opener = page.locator('button:has-text("Country"), button:has-text("Region"), [aria-label*="Country" i]').first
-        if await opener.count() == 0:
+        open_dialog = page.locator('dialog[open], [role="dialog"][open]').last
+        if await open_dialog.count() == 0:
+            opener = page.locator(
+            'button.country-select-button:visible, '
+            'button[aria-haspopup="dialog"][aria-controls*="country" i]:visible, '
+            'button:has-text("Country"):visible, '
+            'button:has-text("Region"):visible, '
+            '[aria-label*="Country" i]:visible'
+            ).first
+            if await opener.count() == 0:
             # 退化：找 combobox 角色
-            opener = page.get_by_role("combobox").first
-        if await opener.count() > 0:
+                opener = page.get_by_role("combobox").first
+            if await opener.count() == 0 or not await opener.is_visible():
+                return False
             await opener.click(timeout=4000)
             await asyncio.sleep(1)
         # 过滤框
-        filt = page.locator('input[placeholder*="Filter" i], input[aria-label*="Filter" i]').first
+        filt = page.locator(
+            'input#country-dropdown-panel-filter:visible, '
+            'input[name="filter"]:visible, '
+            'input[placeholder*="Filter" i]:visible, '
+            'input[aria-label*="Filter" i]:visible'
+        ).first
         if await filt.count() > 0:
-            await filt.fill(country[:12])
-            await asyncio.sleep(1)
+            await filt.fill(country[:24])
+            await asyncio.sleep(0.5)
         # 点国家项（按钮文本完全等于国家名）
-        item = page.get_by_role("button", name=country, exact=True).first
-        if await item.count() == 0:
-            item = page.locator(f'button:has-text("{country}")').first
-        if await item.count() > 0:
+        dialog = page.locator('dialog[open], [role="dialog"][open]').last
+        items = dialog.get_by_role("option", name=country, exact=True)
+        if await items.count() == 0:
+            items = page.locator(f'button:has-text("{country}"):visible')
+        if await items.count() > 0:
+            item = items.first
+            if await item.get_attribute("aria-selected") == "true":
+                close = dialog.locator('[aria-label="Close"], [data-close-dialog-id]').first
+                if await close.count() > 0 and await close.is_visible():
+                    await close.click(timeout=4000)
+                else:
+                    await page.keyboard.press("Escape")
+                print(f"  [form] country already selected: {country}")
+                return True
             await item.click(timeout=4000)
+            close = page.locator('dialog[open] [aria-label="Close"], dialog[open] [data-close-dialog-id]').first
+            if await close.count() > 0 and await close.is_visible():
+                await close.click(timeout=4000)
             print(f"  [form] country selected: {country}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             return True
     except Exception as e:
         print(f"  [form] select_country failed: {str(e)[:70]}")
@@ -503,12 +920,15 @@ async def register_one(
     username = rand_username()
     print(
         f"\n>>> github signup #{index}/{total}: "
-        f"email={email} user={username} pass={gh_password}"
+        f"email={email} user={username} pass=[hidden]"
     )
 
     name = f"github_{time.strftime('%m%d_%H%M%S')}_{index}"
     bb = pid = None
     skip_variant = False
+    restricted = False
+    page_blank = False
+    client_integrity = False
     try:
         bb, pid, browser, ctx, page = await open_and_connect(
             name=name,
@@ -520,9 +940,17 @@ async def register_one(
         # Step 1: 打开注册页（带重试）
         print("  [1] goto signup")
         goto_ok = False
+        goto_status = None
+        goto_response_body = ""
         for attempt in range(4):
             try:
-                await page.goto(SIGNUP_URL, timeout=60000, wait_until="domcontentloaded")
+                response = await page.goto(SIGNUP_URL, timeout=60000, wait_until="domcontentloaded")
+                goto_status = response.status if response is not None else None
+                if response is not None:
+                    try:
+                        goto_response_body = await response.text()
+                    except Exception:
+                        goto_response_body = ""
                 goto_ok = True
                 break
             except Exception as e:
@@ -531,13 +959,93 @@ async def register_one(
         if not goto_ok:
             print("  goto failed after retries")
             return None
-        await asyncio.sleep(5)
+        state, diagnostic = await inspect_github_entry(
+            page,
+            response_body=goto_response_body,
+            http_status=goto_status,
+        )
+        if state == "CHALLENGE":
+            print("  [github] signup 前检测到 DataDome 滑块，开始自动处理")
+            slider_result = await solve_datadome_slider(page, max_rounds=3)
+            if slider_result == "PASSED":
+                print("  [github] DataDome 滑块通过，重新等待注册表单")
+                state, diagnostic = await inspect_github_entry(
+                    page,
+                    response_body="",
+                    http_status=None,
+                )
+            elif slider_result == "RESTRICTED":
+                restricted = True
+                print("  [github][RESTRICTED] DataDome 滑块后仍被限制")
+                await dump_state(page, "00_restricted")
+                return RESTRICTED
+            else:
+                print(f"  [github] DataDome 滑块未通过: {slider_result}")
+                await dump_state(page, "00_datadome_failed")
+                return "CAPTCHA_REACHED"
+        if state == "READY" and diagnostic.get("recovered_after_js"):
+            print(
+                "  [github] 初始响应为 HTTP "
+                f"{diagnostic.get('initial_http_status')}，但注册表单已由 JS 正常渲染，继续"
+            )
+        if state == RESTRICTED:
+            restricted = True
+            excerpt = re.sub(r"\s+", " ", str(diagnostic.get("response_excerpt") or ""))[:180]
+            print(
+                "  [github][RESTRICTED] GitHub 暂时限制当前设备或网络; "
+                f"ID={diagnostic.get('restriction_id') or '未知'} "
+                f"IP={diagnostic.get('ip') or '未知'} "
+                f"HTTP={diagnostic.get('http_status') or goto_status or '未知'}"
+            )
+            if excerpt:
+                print(f"  [github][RESTRICTED] 响应摘要: {excerpt}")
+            await dump_state(page, "00_restricted")
+            print("  [github][RESTRICTED] 停止重试，请先用正常浏览器完成 GitHub 反馈/验证")
+            return RESTRICTED
+        if state == CLIENT_INTEGRITY:
+            client_integrity = True
+            print(
+                "  [github][CLIENT_INTEGRITY] GitHub 未通过当前浏览器的 JS/完整性检查; "
+                f"provider={getattr(bb, 'provider_name', 'bitbrowser')} "
+                f"HTTP={diagnostic.get('http_status') or goto_status or '未知'}"
+            )
+            await dump_state(page, "00_client_integrity")
+            print(
+                "  [github][CLIENT_INTEGRITY] 停止重试。请使用可正常加载注册页的浏览器会话，"
+                "不要继续使用当前受拒绝的 profile。"
+            )
+            return CLIENT_INTEGRITY
+        if state == PAGE_BLANK:
+            page_blank = True
+            provider = str(getattr(bb, "provider_name", "bitbrowser"))
+            print(
+                "  [github][PAGE_BLANK] 注册页未渲染，停止重试; "
+                f"provider={provider} title={diagnostic.get('title')!r} "
+                f"html_length={diagnostic.get('html_length')} http_status={goto_status} "
+                f"url={diagnostic.get('url')}"
+            )
+            await dump_state(page, "00_page_blank")
+            return PAGE_BLANK
         await dump_state(page, "01_after_load")
 
         # Step 2: 单页表单 —— Email + Password + Username 一起填
         print("  [2] fill single-page form")
         email_sel = 'input#email, input[name="user[email]"], input[type="email"]'
         if await page.locator(email_sel).count() == 0:
+            state, diagnostic = await inspect_github_entry(page)
+            if state == RESTRICTED:
+                restricted = True
+                print(
+                    "  [github][RESTRICTED] 注册表单未加载，因为 GitHub 返回了限制页; "
+                    f"ID={diagnostic.get('restriction_id') or '未知'}"
+                )
+                await dump_state(page, "00_restricted")
+                return RESTRICTED
+            if state == PAGE_BLANK:
+                page_blank = True
+                print("  [github][PAGE_BLANK] 注册表单未加载，页面仍为空白，停止重试")
+                await dump_state(page, "00_page_blank")
+                return PAGE_BLANK
             print("  email input not found — GitHub 布局可能变了，dump 后停下")
             await dump_state(page, "02_no_email")
             return None
@@ -562,7 +1070,11 @@ async def register_one(
 
         # 国家/地区下拉（不选则 Create account 保持 disabled）
         print("  [3] select country")
-        await select_country(page, "United States of America")
+        if not await select_country(page, "United States of America"):
+            # Do not submit a form when the required country field is unknown.
+            print("  [github] country selection failed; aborting this attempt")
+            await dump_state(page, "04_country_failed")
+            return None
 
         # marketing 勾选框：默认未勾，无需动；这里确保不勾（opt-out）
         try:
@@ -582,16 +1094,51 @@ async def register_one(
         print("  [4] click Create account -> trigger verify")
         triggered = await trigger_verify(page)
         await asyncio.sleep(3)
+        if page.url.startswith("chrome-error://"):
+            page_blank = True
+            print(
+                "  [github][PAGE_BLANK] submit 后代理返回浏览器错误页，"
+                "未收到 GitHub 响应"
+            )
+            await dump_state(page, "05_page_blank")
+            return PAGE_BLANK
+        interactive_challenge = await detect_github_challenge(page)
+        post_submit_restriction = await detect_github_restriction(page)
+        if interactive_challenge:
+            slider_result = await solve_datadome_slider(page)
+            if slider_result in {"PASSED", "RESTRICTED"}:
+                interactive_challenge = False
+                if slider_result == "PASSED":
+                    triggered = False
+                post_submit_restriction = await detect_github_restriction(page)
+        if post_submit_restriction and not interactive_challenge:
+            restricted = True
+            print(
+                "  [github][RESTRICTED] submit 后 GitHub 要求设备/网络验证; "
+                f"ID={post_submit_restriction.get('restriction_id') or '未知'} "
+                f"IP={post_submit_restriction.get('ip') or '未知'}"
+            )
+            await dump_state(page, "05_restricted")
+            return RESTRICTED
         await dump_state(page, "05_after_submit")
         check_timeout()
 
         # Step 5: 验证 —— Arkose FunCaptcha
         print("  [5] verification challenge")
-        has_captcha = triggered or await detect_captcha(page)
+        # ``trigger_verify`` also returns true for a normal navigation to
+        # /account_verifications. Only an actual challenge frame should enter
+        # the CAPTCHA branch.
+        has_captcha = interactive_challenge or await detect_captcha(page)
         if has_captcha:
             print("  [!!!] Arkose 验证出现，启用视觉投票求解器")
             await dump_state(page, "06_CAPTCHA")
             if auto:
+                if interactive_challenge:
+                    print(
+                        "  [github] 检测到 DataDome 向右滑动挑战；"
+                        "当前自动 Arkose 求解器不兼容该挑战，保留窗口"
+                    )
+                    return "CAPTCHA_REACHED"
                 # 视觉投票求解器：内部等 PoW→点 Visual puzzle→逐轮投票→提交
                 solved = await solve_puzzle_voting(page, shot_dir=SCREENSHOT_DIR, max_rounds=12)
                 if solved == "SKIP_VARIANT":
@@ -667,10 +1214,25 @@ async def register_one(
         return None
     finally:
         # 探索默认保留窗口（keep=True）；但遇到难变体跳过时必须删窗口好换新的
-        if bb and pid and (skip_variant or not keep):
+        provider = str(getattr(bb, "provider_name", ""))
+        close_required = should_close_github_profile(
+            provider,
+            keep=keep,
+            skip_variant=skip_variant,
+            restricted=restricted,
+            page_blank=page_blank,
+        )
+        if bb and pid and close_required:
             await teardown(bb, pid, delete=True)
+            if restricted:
+                print(f"  [github][RESTRICTED] 已删除受限 profile: {name}")
+            elif page_blank:
+                print(f"  [github][PAGE_BLANK] 已关闭未渲染 profile: {name}")
+            elif client_integrity:
+                print(f"  [github][CLIENT_INTEGRITY] 已关闭受拒绝 profile: {name}")
         elif bb and pid:
-            print(f"  [keep] 窗口保留: {name} (id={pid}) — 在 BitBrowser 里可手动操作")
+            reason = "完整性检查未通过，保留窗口供手动检查" if client_integrity else "任务配置要求保留窗口"
+            print(f"  [keep] 窗口保留: {name} (id={pid}) — {reason}")
 
 
 async def main():
@@ -682,10 +1244,12 @@ async def main():
     parser.add_argument("--auto", action="store_true", help="尝试走完整流程（含取 launch code）")
     parser.add_argument("--no-keep", action="store_true", help="结束后删除窗口（默认保留以便研究）")
     parser.add_argument("--timeout", "-t", type=int, default=600)
+    parser.add_argument("--node", default="auto", help="GitHub Clash 节点；auto 仅做连通性选择")
     args = parser.parse_args()
 
     global REGISTER_TIMEOUT
     REGISTER_TIMEOUT = args.timeout
+    prepare_github_egress(args.node)
     return await _run_batch(args)
 
 
@@ -753,14 +1317,24 @@ async def _run_batch(args):
         for index, account in enumerate(accounts, 1)
     ))
     if args.auto:
-        completed = sum(bool(result and result != "SKIP_VARIANT") for result in results)
+        completed = sum(
+            bool(result and result not in {"SKIP_VARIANT", RESTRICTED, PAGE_BLANK, CLIENT_INTEGRITY})
+            for result in results
+        )
         label = "success"
     else:
         # Explore mode deliberately keeps the profile at the registration
         # checkpoint; reaching it is a completed diagnostic, not an account.
         completed = sum(result in {"CAPTCHA_REACHED", "FORM_DONE"} for result in results)
         label = "checkpoints reached"
-    print(f"\n{'='*56}\n  {label}: {completed}/{len(results)}\n{'='*56}")
+    restricted_count = sum(result == RESTRICTED for result in results)
+    blank_count = sum(result == PAGE_BLANK for result in results)
+    integrity_count = sum(result == CLIENT_INTEGRITY for result in results)
+    print(
+        f"\n{'='*56}\n  {label}: {completed}/{len(results)}"
+        f"\n  restricted: {restricted_count}\n  page_blank: {blank_count}"
+        f"\n  client_integrity: {integrity_count}\n{'='*56}"
+    )
     return 0 if completed == len(results) else 1
 
 

@@ -77,6 +77,11 @@ def build_command(platform, args, account):
             cmd += ["--token", token]
         if client_id:
             cmd += ["--client-id", client_id]
+        auth_mode = getattr(args, "claude_auth_mode", "magic")
+        if auth_mode:
+            cmd += ["--auth-mode", auth_mode]
+        if getattr(args, "claude_google_manual_timeout", 0):
+            cmd += ["--google-manual-timeout", str(max(0, args.claude_google_manual_timeout))]
         if getattr(args, "skip_claude_validation", False):
             cmd.append("--no-auto-validate")
         cmd += [
@@ -244,11 +249,20 @@ async def run_platform(platform, cmd, run_id, child_env=None, retries=0):
 
 def parse_account(args):
     if args.from_pool:
+        google_claude = (
+            len(args.platforms) == 1
+            and args.platforms[0] == "claude"
+            and getattr(args, "claude_auth_mode", "magic") == "google"
+        )
         em = email_pool.latest_email(
-            "tri", require_token=True, validate_token=True
+            "tri", require_token=not google_claude, validate_token=not google_claude
         )
         if not em:
-            raise SystemExit("no readable Outlook mailbox available in emails.txt")
+            raise SystemExit(
+                "no usable imported mailbox available in emails.txt"
+                if google_claude else
+                "no readable Outlook mailbox available in emails.txt"
+            )
         return em
 
     if not args.email:
@@ -406,6 +420,14 @@ async def main():
     parser.add_argument("--claude-challenge-wait", type=int, default=45)
     parser.add_argument("--claude-challenge-node-retries", type=int, default=3)
     parser.add_argument("--claude-captcha-manual-timeout", type=int, default=0)
+    parser.add_argument(
+        "--claude-auth-mode", choices=("magic", "google"), default="magic",
+        help="Claude 登录方式：magic 邮箱链接或 Google OAuth",
+    )
+    parser.add_argument(
+        "--claude-google-manual-timeout", type=int, default=0,
+        help="Google 安全验证人工接管等待秒数",
+    )
     parser.add_argument("--no-claude-auto-validate", action="store_true",
                         help="skip Claude's full historical session validation scan")
     # broker + loop

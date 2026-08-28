@@ -251,6 +251,8 @@ class ChatGPTPlusTests(unittest.TestCase):
         self.assertTrue(methods["paypal"]["batch_enabled"])
         self.assertTrue(methods["paypal"]["batch_payment_enabled"])
         self.assertEqual(methods["paypal"]["payment_execution"], "paypal_auto")
+        self.assertTrue(methods["gopay"]["batch_payment_enabled"])
+        self.assertEqual(methods["gopay"]["payment_execution"], "gopay_wallet")
         self.assertTrue(methods["momo"]["batch_enabled"])
         self.assertFalse(methods["blik"]["batch_enabled"])
         self.assertEqual(methods["blik"]["payment_execution"], "single_code")

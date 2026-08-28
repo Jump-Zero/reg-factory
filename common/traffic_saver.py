@@ -187,9 +187,9 @@ def bitbrowser_profile_defaults(environ=None) -> dict:
 def bitbrowser_open_payload(profile_id, environ=None) -> dict:
     """Suppress Chromium background traffic on metered BitBrowser profiles."""
     payload = {"id": profile_id}
-    # ChatGPT's Cloudflare/Turnstile bootstrap relies on browser background
-    # networking; keep the request filter safe but omit these startup switches.
-    if configured_mode(environ) == "extreme" and _platform(environ) != "chatgpt":
+    # ChatGPT auth and GitHub signup both rely on browser integrity checks.
+    # GitHub explicitly rejects sessions that look like JS/ad blocking.
+    if configured_mode(environ) == "extreme" and _platform(environ) not in {"chatgpt", "github"}:
         payload["args"] = list(_EXTREME_BITBROWSER_ARGS)
     return payload
 
@@ -209,6 +209,9 @@ async def install(context, environ=None) -> str:
         platform = proxy_switch.platform_name(env) or "global"
     except Exception:
         platform = str(env.get("REG_FACTORY_PLATFORM") or "global").strip().lower()
+    if platform == "github":
+        print("  [traffic] GitHub signup requires full JS/resources; traffic saver disabled")
+        return "off"
     if mode == "extreme" and platform == "chatgpt":
         # Keep heavy assets filtered, but do not abort prefetch/telemetry
         # requests that are part of the auth bootstrap on this platform.

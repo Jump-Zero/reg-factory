@@ -80,7 +80,7 @@ class ChatGPTFlowTests(unittest.TestCase):
         )
         fallback.assert_not_called()
 
-    def test_chatgpt_icloud_mailbox_uses_cheap_submail(self):
+    def test_chatgpt_icloud_mailbox_uses_openai_code_mailbox(self):
         with patch.object(
             register_chatgpt,
             "create_mailbox",
@@ -89,7 +89,9 @@ class ChatGPTFlowTests(unittest.TestCase):
             mailbox = register_chatgpt.create_chatgpt_icloud_mailbox()
 
         self.assertEqual(mailbox["email"], "code@example.com")
-        create.assert_called_once_with(provider="icloud", mail_type="icloud")
+        create.assert_called_once_with(
+            provider="icloud", mail_type="icloud-code", service="openai"
+        )
 
     def test_chatgpt_remail_mailbox_uses_generic_provider(self):
         with patch.object(

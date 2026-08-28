@@ -92,7 +92,7 @@ http://username:password@host:port
 
 ### 平台出口覆盖
 
-网络页可以让 Outlook、Claude、ChatGPT、Grok 和 Kiro 继承全局出口，也可以单独覆盖。例如 Outlook 使用住宅代理，ChatGPT 使用固定 Clash。保存后逐个平台执行 IP 测试，确认显示的出口符合预期。
+网络页可以让 Outlook、Claude、ChatGPT、Grok、Kiro 和 GitHub 继承全局出口，也可以单独覆盖。例如 Outlook 使用住宅代理，GitHub 使用固定 Clash。保存后逐个平台执行 IP 测试，确认显示的出口符合预期。
 
 ## 4. 配置指纹浏览器
 

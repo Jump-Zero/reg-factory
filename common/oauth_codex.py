@@ -19,10 +19,12 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import re
 import struct
 import sys
 import time
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode
 
 import requests
@@ -1435,3 +1437,165 @@ async def authorize_with_retry(page, gen_auth_url, account_email="", phone_skip_
         print(f"  [codex] 第 {attempt+1} 次未成({str(msg)[:50]})，重试...")
         await asyncio.sleep(1.5)
     return None, None, None, last_msg or "授权重试用尽"
+async def handle_codex_invite_friend(page, inviter_email: str, timeout=30):
+    """Plus/Pro 账号邀请全新用户,提交邀请邮箱(从池子抽未注册号)。
+
+    返回 (success: bool, invitee_email: str | None, message: str)
+    - success=True: 邀请已提交(或无邀请资格,都是正常情况)
+    - success=False: 遇到错误但不致命
+    - invitee_email: 成功填入的邀请邮箱,供调用方记录或标记占用
+    """
+    from common import emails as email_pool
+
+    deadline = time.time() + timeout
+
+    # 1. 检测个人资料菜单 "Invite a friend" / "Invite a coworker" 入口
+    # 根据 OpenAI learn.chatgpt.com 文档: "Eligible users can also send Codex invitations from the profile menu"
+    # 入口在右上角个人资料菜单(profile menu)内,点击账号头像/名称后弹出的菜单
+    invite_entry_selectors = [
+        # profile menu 展开后的 "Invite a friend" / "Invite a coworker" 项
+        '[role="menuitem"]:has-text("Invite a friend")',
+        '[role="menuitem"]:has-text("Invite a coworker")',
+        'a:has-text("Invite a friend")',
+        'a:has-text("Invite a coworker")',
+        '[data-testid*="invite"]',
+        # 多语言兜底
+        '[role="menuitem"]:has-text("邀请好友")',
+        '[role="menuitem"]:has-text("邀请同事")',
+    ]
+
+    invite_button = None
+    try:
+        for sel in invite_entry_selectors:
+            try:
+                candidate = page.locator(sel).first
+                if await candidate.count() > 0 and await candidate.is_visible(timeout=1000):
+                    invite_button = candidate
+                    print(f"  [invite] 发现邀请入口: {sel}")
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if not invite_button:
+        # 无邀请资格,正常退出(free 账号或不在活动期内)
+        print("  [invite] 未检测到邀请入口,当前号可能无邀请资格(非 Plus/Pro 或活动未开放)")
+        return True, None, "no_invite_entry"
+
+    # 2. 从邮箱池抽一个未被 chatgpt 占用的全新号(OpenAI 邀请要求被邀请人是 new to ChatGPT)
+    invitee = email_pool.next_email("chatgpt")
+    if not invitee:
+        print("  [invite] 邮箱池已空,无可用邮箱用于邀请")
+        return False, None, "no_available_email"
+    invitee_email = invitee[0]
+    print(f"  [invite] 从池子取未注册邮箱用于邀请: {invitee_email}")
+
+    # 3. 点击邀请入口
+    try:
+        await invite_button.click(timeout=5000)
+        await asyncio.sleep(1.5)
+    except Exception as e:
+        email_pool.mark_error("chatgpt", invitee_email, invitee[1], "invite_click_failed")
+        return False, None, f"点击邀请入口失败: {str(e)[:60]}"
+
+    # 4. 填写邀请邮箱(可能是弹窗/侧边栏/新页面)
+    email_input_selectors = [
+        'input[type="email"]',
+        'input[placeholder*="email" i]',
+        'input[placeholder*="邮箱" i]',
+        'input[name="email"]',
+        'input[id*="email"]',
+        'textarea[placeholder*="email" i]',
+    ]
+
+    email_field = None
+    try:
+        for sel in email_input_selectors:
+            try:
+                candidate = page.locator(sel).first
+                if await candidate.count() > 0 and await candidate.is_visible(timeout=2000):
+                    email_field = candidate
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if not email_field:
+        email_pool.mark_error("chatgpt", invitee_email, invitee[1], "invite_no_email_input")
+        return False, None, "未找到邮箱输入框"
+
+    try:
+        await email_field.fill(invitee_email, timeout=3000)
+        await asyncio.sleep(0.5)
+        print(f"  [invite] 已填入邀请邮箱: {invitee_email}")
+    except Exception as e:
+        email_pool.mark_error("chatgpt", invitee_email, invitee[1], "invite_fill_failed")
+        return False, None, f"填写邮箱失败: {str(e)[:60]}"
+
+    # 5. 提交(查找 Submit/Send/Invite 等按钮)
+    submit_selectors = [
+        'button:has-text("Send")',
+        'button:has-text("Submit")',
+        'button:has-text("Invite")',
+        'button:has-text("发送")',
+        'button:has-text("提交")',
+        'button:has-text("邀请")',
+        'button[type="submit"]',
+        'button:has-text("Confirm")',
+        'button:has-text("确认")',
+    ]
+
+    submit_button = None
+    try:
+        for sel in submit_selectors:
+            try:
+                candidate = page.locator(sel).first
+                if await candidate.count() > 0 and await candidate.is_visible(timeout=1000):
+                    submit_button = candidate
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if not submit_button:
+        email_pool.mark_error("chatgpt", invitee_email, invitee[1], "invite_no_submit_button")
+        return False, None, "未找到提交按钮"
+
+    try:
+        await submit_button.click(timeout=3000)
+        await asyncio.sleep(2)
+        print(f"  [invite] 已提交邀请")
+    except Exception as e:
+        email_pool.mark_error("chatgpt", invitee_email, invitee[1], "invite_submit_failed")
+        return False, None, f"点击提交失败: {str(e)[:60]}"
+
+    # 6. 检测成功提示(可选,不阻塞)
+    success_indicators = [
+        ':has-text("success")',
+        ':has-text("sent")',
+        ':has-text("invited")',
+        ':has-text("成功")',
+        ':has-text("已发送")',
+    ]
+
+    success_detected = False
+    try:
+        for sel in success_indicators:
+            if await page.locator(sel).first.count() > 0:
+                success_detected = True
+                break
+    except Exception:
+        pass
+
+    if success_detected:
+        print(f"  [invite] ✅ 邀请已提交: {inviter_email} -> {invitee_email}")
+    else:
+        print(f"  [invite] 邀请已提交(未检测到明确成功提示)")
+
+    # 7. 标记被邀请邮箱为 chatgpt 已占用(不能再被其他流程注册,等接受邀请)
+    email_pool.mark_used("chatgpt", invitee_email, invitee[1])
+
+    return True, invitee_email, "invite_sent"

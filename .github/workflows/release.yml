@@ -18,11 +18,11 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - name: Prepare build environment
@@ -35,7 +35,7 @@ jobs:
         run: |
           $version = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.version }}" } else { "${{ github.ref_name }}" }
           .\scripts\build_release.ps1 -Version $version -SkipInstall
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: release-windows-x64
           path: |
@@ -46,11 +46,11 @@ jobs:
   build-macos-arm64:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - name: Verify Apple Silicon runner
@@ -64,7 +64,7 @@ jobs:
           version="${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}"
           chmod +x scripts/build_release.sh
           scripts/build_release.sh "$version" --skip-install
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: release-macos-arm64
           path: |
@@ -77,8 +77,8 @@ jobs:
     needs: [build-windows, build-macos-arm64]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v7
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: dist

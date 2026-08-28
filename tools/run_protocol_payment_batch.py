@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a token-backed protocol link extraction or explicit PayPal payment task."""
+"""Run token-backed protocol link extraction or an integrated payment task."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,10 @@ import os
 import re
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -243,6 +247,107 @@ def _execute_paypal_payment(
             pass
 
 
+def _gopay_api(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout: int = 15) -> dict[str, Any]:
+    base = os.environ.get("REG_FACTORY_GOPAY_API_BASE", "").strip().rstrip("/")
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("主 WebUI 未提供安全的本地 GoPay 支付接口")
+    raw = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        f"{base}{path}",
+        data=raw,
+        method=method,
+        headers={"Content-Type": "application/json"} if raw is not None else {},
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(body).get("error") or body
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = body
+        raise RuntimeError(f"GoPay API HTTP {exc.code}: {_safe_text(detail)}") from exc
+    try:
+        value = json.loads(body)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("GoPay API 返回了无效 JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("GoPay API 返回结构不正确")
+    return value
+
+
+def _execute_gopay_payment(
+    item: dict[str, str],
+    *,
+    payment_link: dict[str, Any],
+    timeout: int,
+) -> dict[str, Any]:
+    midtrans_url = str(payment_link.get("url") or "").strip()
+    if not midtrans_url:
+        return _public_result(item["email"], {
+            "ok": False,
+            "operation": "execute_payment",
+            "error": "GoPay 协议提链没有返回 Midtrans URL",
+            "error_code": "missing_midtrans_url",
+        })
+    started = _gopay_api(
+        "/api/gopay/payments",
+        method="POST",
+        payload={
+            "midtrans_url": midtrans_url,
+            "context_email": item["email"],
+            "context_run_id": os.environ.get("REG_FACTORY_RUN_ID", ""),
+            "confirm_payment": True,
+        },
+        timeout=min(60, timeout),
+    )
+    job_id = str(started.get("id") or "")
+    if not job_id:
+        raise RuntimeError("GoPay 支付接口没有返回任务 ID")
+    deadline = time.time() + timeout
+    previous = None
+    while time.time() < deadline:
+        job = _gopay_api(
+            f"/api/gopay/payments/{urllib.parse.quote(job_id, safe='')}",
+            timeout=15,
+        )
+        state = str(job.get("status") or "")
+        message = _safe_text(job.get("message") or "")
+        marker = (state, message)
+        if marker != previous:
+            print(f"[protocol][gopay] {item['email']} {state or 'running'} {message}", flush=True)
+            previous = marker
+        if state in {"success", "failed"}:
+            result = job.get("result") if isinstance(job.get("result"), dict) else {}
+            success = state == "success" and bool(result.get("success", True))
+            return {
+                "email": item["email"],
+                "ok": success,
+                "status": state,
+                "operation": "execute_payment",
+                "url": "",
+                "qr_data": "",
+                "error": "" if success else _safe_text(result.get("detail") or message or "GoPay 支付失败"),
+                "error_code": "" if success else str(result.get("failure_label") or "gopay_payment_failed"),
+                "payment_status": str(result.get("transaction_status") or state),
+            }
+        time.sleep(2)
+    return {
+        "email": item["email"],
+        "ok": False,
+        "status": "timeout",
+        "operation": "execute_payment",
+        "url": "",
+        "qr_data": "",
+        "error": "等待 GoPay 支付任务完成超时；任务仍可在 Plus 支付区查看",
+        "error_code": "gopay_payment_timeout",
+        "payment_status": "timeout",
+    }
+
+
 def _paypal_runtime_config(
     engine_root: Path,
     payment_config: dict[str, Any],
@@ -316,8 +421,8 @@ def main() -> int:
     if not spec["batch_enabled"]:
         raise SystemExit(f"[protocol][FAIL] {spec['label']} 上游协议不支持批量")
     if args.operation == "pay":
-        if spec["id"] != "paypal":
-            raise SystemExit("[protocol][FAIL] 当前只有 PayPal 支持批量协议直接支付")
+        if spec.get("payment_execution") not in {"paypal_auto", "gopay_wallet"}:
+            raise SystemExit(f"[protocol][FAIL] {spec['label']} 当前只支持提链，不能自动支付")
         if not args.payment_confirmed:
             raise SystemExit("[protocol][FAIL] 缺少真实支付确认，任务未执行")
 
@@ -325,7 +430,7 @@ def main() -> int:
     index_paths: tuple[Path, ...] = ()
     try:
         accounts, payment_config = _load_task(input_path)
-        if args.operation == "pay" and not (
+        if args.operation == "pay" and spec.get("payment_execution") == "paypal_auto" and not (
             paypal_payment_config_ready(payment_config) or paypal_payment_ready(engine_root)
         ):
             raise SystemExit("[protocol][FAIL] 未提供可用的 PayPal 卡片、地址和手机号接码资料")
@@ -342,7 +447,7 @@ def main() -> int:
         config = _runtime_config(engine_root, spec["id"], checkout_proxy, approve_proxy, timeout)
         route_options = _route_options(spec, checkout_proxy, approve_proxy, timeout)
         paypal_config: dict[str, Any] = {}
-        if args.operation == "pay":
+        if args.operation == "pay" and spec.get("payment_execution") == "paypal_auto":
             paypal_config, index_paths = _paypal_runtime_config(engine_root, payment_config, input_path)
         operation_label = "协议支付" if args.operation == "pay" else "协议提链"
         print(f"[protocol] 操作={operation_label} 渠道={spec['label']} {spec['country']}/{spec['currency']} 账号={len(accounts)} 并发={workers}", flush=True)
@@ -372,6 +477,8 @@ def main() -> int:
                     failed = _public_result(item["email"], link)
                     failed["operation"] = "execute_payment"
                     return failed
+                if spec.get("payment_execution") == "gopay_wallet":
+                    return _execute_gopay_payment(item, payment_link=link, timeout=timeout)
                 return _execute_paypal_payment(
                     item,
                     runtime_config=_paypal_config_for_route(paypal_config, spec, routed),

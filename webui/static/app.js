@@ -11,6 +11,8 @@ let plusRun = null;
 let plusEventSource = null;
 let plusAfterImport = null;
 let plusProtocolStatus = null;
+let gopayTimer = null;
+let gopayOtpTarget = null;
 let proxyMode = 'clash_auto';
 let assetPickMode = 'sequence';
 let assetScanData = null;
@@ -220,7 +222,7 @@ async function showView(v){
     network:loadProxyPanel,
     mailpool:loadMailpool,
     k12:openK12Channel,
-    plus:loadPlusImportStatus,
+    plus:loadPlusPanel,
   };
   const loader = loaders[v];
   if(!loader) return Promise.resolve();
@@ -312,6 +314,7 @@ async function loadProxyPanel(includeNodes=false){
     $('#proxy-mode-chatgpt').value = config.CHATGPT_PROXY_MODE || 'inherit';
     $('#proxy-mode-grok').value = config.GROK_PROXY_MODE || 'inherit';
     $('#proxy-mode-kiro').value = config.KIRO_PROXY_MODE || 'inherit';
+    $('#proxy-mode-github').value = config.GITHUB_PROXY_MODE || 'inherit';
     updateProxyFieldVisibility();
     renderProxyNodes(data.nodes, config.CLASH_FIXED_NODE || data.current);
     $('#network-current').textContent = `${data.current || '未连接'} · ${config.PROXY_MODE || 'clash_auto'}`;
@@ -331,6 +334,7 @@ function collectProxyConfig(){
     CHATGPT_PROXY_MODE: $('#proxy-mode-chatgpt').value,
     GROK_PROXY_MODE: $('#proxy-mode-grok').value,
     KIRO_PROXY_MODE: $('#proxy-mode-kiro').value,
+    GITHUB_PROXY_MODE: $('#proxy-mode-github').value,
     CLASH_API: $('#proxy-clash-api').value.trim(),
     CLASH_SECRET: $('#proxy-clash-secret').value.trim(),
     CLASH_PROXY: $('#proxy-clash-proxy').value.trim(),
@@ -1295,6 +1299,357 @@ async function openK12Channel(){
 $('#btn-k12-start').onclick = startK12Service;
 $('#btn-k12-retry').onclick = openK12Channel;
 
+// ---------------------------------------------------------------- GoPay registration, account pool and Midtrans payment
+
+async function gopayApi(path, options={}){
+  const response = await fetch(`/api/gopay${path}`, options);
+  const data = await readJsonResponse(response);
+  if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+function setGopayMessage(id, text, kind=''){
+  const node = $(`#${id}`);
+  if(!node) return;
+  node.textContent = text || '';
+  node.className = kind;
+}
+
+function renderGopayStatus(status){
+  const ready = !!status.ready;
+  $('#gopay-stat-accounts').textContent = status.accounts ?? '--';
+  $('#gopay-stat-available').textContent = status.available_accounts ?? '--';
+  $('#gopay-stat-balance').textContent = status.balance_rp == null ? '--' : `${status.balance_rp} Rp`;
+  $('#gopay-stat-phones').textContent = status.available_phones ?? '--';
+  const state = $('#gopay-state');
+  state.textContent = ready
+    ? `引擎就绪 · 运行数据 ${status.data_root || '-'}`
+    : `引擎不可用 · ${status.error || '请安装 GoPay 依赖'}`;
+  state.className = ready ? 'ok' : 'bad';
+}
+
+function gopayStatusPill(status){
+  const value = String(status || 'unknown');
+  return `<span class="gopay-status ${escapeHtml(value)}">${escapeHtml(value)}</span>`;
+}
+
+function renderGopayAccounts(rows){
+  const body = $('#gopay-account-rows');
+  body.innerHTML = (rows || []).map(item=>{
+    const phone = String(item.phone || '');
+    const encoded = encodeURIComponent(phone);
+    return `<tr>
+      <td title="${escapeHtml(phone)}">${escapeHtml(phone || '-')}</td>
+      <td>${Number(item.balance || 0)} Rp</td>
+      <td>${gopayStatusPill(item.use_status || item.use_label)}</td>
+      <td title="${escapeHtml(item.customer_id || '')}">${escapeHtml(item.customer_id || '-')}</td>
+      <td><div class="gopay-row-actions">
+        <button type="button" data-gopay-account-action="balance" data-phone="${encoded}">余额</button>
+        <button type="button" data-gopay-account-action="relogin" data-phone="${encoded}">登录</button>
+        <button class="danger" type="button" data-gopay-account-action="delete" data-phone="${encoded}">删除</button>
+      </div></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5">暂无 GoPay 账号</td></tr>';
+}
+
+async function loadGopayAccounts(){
+  const data = await gopayApi('/accounts', {cache:'no-store'});
+  renderGopayAccounts(data.accounts || []);
+  return data.accounts || [];
+}
+
+function renderGopayPhones(pool){
+  const body = $('#gopay-phone-rows');
+  body.innerHTML = (pool.records || []).map(item=>{
+    const phone = String(item.phone || '');
+    return `<tr>
+      <td>${escapeHtml(phone || '-')}</td>
+      <td>${gopayStatusPill(item.status)}</td>
+      <td title="${escapeHtml(item.record_url || '')}">${escapeHtml(item.record_url || '-')}</td>
+      <td><div class="gopay-row-actions"><button class="danger" type="button" data-gopay-phone-delete="${encodeURIComponent(phone)}" ${item.status==='leased'?'disabled':''}>删除</button></div></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="4">号码池为空</td></tr>';
+  $('#gopay-stat-phones').textContent = pool.available ?? 0;
+}
+
+async function loadGopayPhones(){
+  const pool = await gopayApi('/phones', {cache:'no-store'});
+  renderGopayPhones(pool);
+  return pool;
+}
+
+function gopayJobProgress(job){
+  if(job.kind==='batch'){
+    return `完成 ${job.finished || 0}/${job.count || 0} · 成功 ${job.succeeded || 0} · 已有 ${job.existing || 0} · 失败 ${job.failed || 0}`;
+  }
+  return String(job.message || '-');
+}
+
+function renderGopayJobs(rows, kind){
+  const body = kind==='payment' ? $('#gopay-payment-job-rows') : $('#gopay-register-job-rows');
+  body.innerHTML = (rows || []).slice(0, 50).map(job=>{
+    const waiting = job.status === 'waiting_otp';
+    const phone = String(job.phone || '-');
+    return `<tr>
+      <td title="${escapeHtml(job.id || '')}">${escapeHtml(job.id || '-')}</td>
+      <td>${escapeHtml(phone)}</td>
+      <td>${gopayStatusPill(job.status)}</td>
+      <td title="${escapeHtml(gopayJobProgress(job))}">${escapeHtml(gopayJobProgress(job))}</td>
+      <td><div class="gopay-row-actions">${waiting ? `<button type="button" data-gopay-otp-kind="${kind}" data-job="${escapeHtml(job.id)}" data-phone="${encodeURIComponent(phone)}">输入 OTP</button>` : ''}</div></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5">暂无任务</td></tr>';
+}
+
+async function loadGopayJobs(){
+  const data = await gopayApi('/register/jobs', {cache:'no-store'});
+  renderGopayJobs(data.jobs || [], 'register');
+  return data.jobs || [];
+}
+
+async function loadGopayPayments(){
+  const data = await gopayApi('/payments', {cache:'no-store'});
+  renderGopayJobs(data.jobs || [], 'payment');
+  return data.jobs || [];
+}
+
+async function refreshGopayJobs(){
+  if(!$('#gopay-wallet-dialog').open) return;
+  try{
+    await Promise.all([loadGopayJobs(), loadGopayPayments()]);
+  }catch(error){
+    setGopayMessage('gopay-register-message', error.message || String(error), 'bad');
+  }
+}
+
+async function loadGopaySms(){
+  const data = await gopayApi('/sms', {cache:'no-store'});
+  $('#gopay-sms-base').value = data.api_base_url || 'https://smsbower.page';
+  $('#gopay-sms-service').value = data.service || 'ni';
+  $('#gopay-sms-country').value = data.country || '6';
+  $('#gopay-sms-summary').textContent = data.api_key_configured ? `API Key 已配置 ${data.api_key || ''}` : 'API Key 未配置';
+  return data;
+}
+
+async function loadGopayPanel(){
+  setGopayMessage('gopay-register-message', '读取中…');
+  try{
+    const status = await gopayApi('/status', {cache:'no-store'});
+    renderGopayStatus(status);
+    const work = [loadGopayPhones()];
+    if(status.ready) work.push(loadGopayAccounts(), loadGopayJobs(), loadGopayPayments(), loadGopaySms());
+    const results = await Promise.allSettled(work);
+    const failed = results.find(item=>item.status==='rejected');
+    setGopayMessage('gopay-register-message', failed ? failed.reason.message : '', failed ? 'bad' : '');
+    if($('#gopay-wallet-dialog').open && !gopayTimer) gopayTimer = setInterval(refreshGopayJobs, 3000);
+    return status;
+  }catch(error){
+    renderGopayStatus({ready:false,error:error.message});
+    try{ await loadGopayPhones(); }catch(_ignored){}
+    return {ready:false};
+  }
+}
+
+function gopayRegistrationPayload(){
+  return {
+    source:$('#gopay-register-source').value,
+    phone:$('#gopay-register-phone').value.trim(),
+    pin:$('#gopay-register-pin').value.trim(),
+    country_code:$('#gopay-country-code').value.trim() || '62',
+    login_existing:$('#gopay-register-mode').value === 'login',
+    proxy:$('#gopay-register-proxy').value.trim(),
+  };
+}
+
+async function startGopayRegistration(batch=false){
+  const button = batch ? $('#btn-gopay-batch') : $('#btn-gopay-register');
+  const payload = gopayRegistrationPayload();
+  if(batch){
+    payload.count = Number($('#gopay-register-count').value || 1);
+    payload.workers = Number($('#gopay-register-workers').value || 1);
+    if(payload.source === 'manual'){
+      setGopayMessage('gopay-register-message', '手动手机号只能启动单个任务', 'bad');
+      return;
+    }
+  }
+  button.disabled = true;
+  setGopayMessage('gopay-register-message', batch ? '正在创建批量任务…' : '正在创建任务…');
+  try{
+    const job = await gopayApi(batch ? '/register/batch' : '/register', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
+    });
+    setGopayMessage('gopay-register-message', `任务 ${job.id} 已启动`, 'ok');
+    await Promise.all([loadGopayJobs(), loadGopayPhones()]);
+  }catch(error){
+    setGopayMessage('gopay-register-message', error.message || String(error), 'bad');
+  }finally{
+    button.disabled = false;
+  }
+}
+
+async function importGopayPhones(){
+  const text = $('#gopay-phone-input').value.trim();
+  if(!text){ setGopayMessage('gopay-phone-message', '请先粘贴号码与记录 URL', 'bad'); return; }
+  const button = $('#btn-gopay-import-phones');
+  button.disabled = true;
+  try{
+    const result = await gopayApi('/phones/import', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text}),
+    });
+    $('#gopay-phone-input').value = '';
+    setGopayMessage('gopay-phone-message', `新增 ${result.added} · 更新 ${result.updated} · 格式错误 ${result.bad}`, result.bad ? 'bad' : 'ok');
+    renderGopayPhones(result);
+  }catch(error){
+    setGopayMessage('gopay-phone-message', error.message || String(error), 'bad');
+  }finally{
+    button.disabled = false;
+  }
+}
+
+async function saveGopaySms(){
+  const button = $('#btn-gopay-save-sms');
+  button.disabled = true;
+  try{
+    await gopayApi('/sms', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+        api_key:$('#gopay-sms-key').value.trim(),
+        api_base_url:$('#gopay-sms-base').value.trim(),
+        service:$('#gopay-sms-service').value.trim(),
+        country:$('#gopay-sms-country').value.trim(),
+      }),
+    });
+    $('#gopay-sms-key').value = '';
+    await loadGopaySms();
+  }catch(error){
+    $('#gopay-sms-summary').textContent = error.message || String(error);
+  }finally{
+    button.disabled = false;
+  }
+}
+
+function openGopayOtp(kind, jobId, phone){
+  gopayOtpTarget = {kind, jobId};
+  $('#gopay-otp-detail').textContent = `${kind==='payment'?'支付':'注册 / 登录'}任务 ${jobId} · ${phone}`;
+  $('#gopay-otp-code').value = '';
+  $('#gopay-otp-message').textContent = '';
+  $('#gopay-otp-dialog').showModal();
+  setTimeout(()=>$('#gopay-otp-code').focus(), 0);
+}
+
+async function submitGopayOtp(){
+  if(!gopayOtpTarget) return;
+  const code = $('#gopay-otp-code').value.trim();
+  const {kind, jobId} = gopayOtpTarget;
+  const button = $('#btn-gopay-otp-submit');
+  button.disabled = true;
+  try{
+    const prefix = kind==='payment' ? '/payments' : '/register/jobs';
+    await gopayApi(`${prefix}/${encodeURIComponent(jobId)}/otp`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code}),
+    });
+    $('#gopay-otp-dialog').close();
+    gopayOtpTarget = null;
+    await refreshGopayJobs();
+  }catch(error){
+    $('#gopay-otp-message').textContent = error.message || String(error);
+  }finally{
+    button.disabled = false;
+  }
+}
+
+$('#gopay-register-source').onchange = event=>{
+  $('#gopay-manual-phone-field').hidden = event.target.value !== 'manual';
+};
+$('#btn-gopay-register').onclick = ()=>startGopayRegistration(false);
+$('#btn-gopay-batch').onclick = ()=>startGopayRegistration(true);
+$('#btn-gopay-import-phones').onclick = importGopayPhones;
+$('#btn-gopay-save-sms').onclick = saveGopaySms;
+$('#btn-gopay-refresh').onclick = loadGopayPanel;
+$('#btn-gopay-close').onclick = ()=>$('#gopay-wallet-dialog').close();
+$('#btn-gopay-otp-close').onclick = ()=>$('#gopay-otp-dialog').close();
+$('#btn-gopay-otp-submit').onclick = submitGopayOtp;
+$('#gopay-otp-code').onkeydown = event=>{ if(event.key==='Enter') submitGopayOtp(); };
+
+$('#gopay-account-rows').onclick = async event=>{
+  const button = event.target.closest('[data-gopay-account-action]');
+  if(!button) return;
+  const action = button.dataset.gopayAccountAction;
+  const phone = decodeURIComponent(button.dataset.phone || '');
+  button.disabled = true;
+  try{
+    if(action === 'balance'){
+      const result = await gopayApi(`/accounts/${encodeURIComponent(phone)}/balance`, {method:'POST'});
+      setGopayMessage('gopay-account-message', `${phone} 当前余额 ${result.balance || 0} Rp`, 'ok');
+    }else if(action === 'relogin'){
+      if(!window.confirm(`重新登录 ${phone} 并刷新 GoPay token？`)) return;
+      const result = await gopayApi(`/accounts/${encodeURIComponent(phone)}/relogin`, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({}),
+      });
+      setGopayMessage('gopay-account-message', `登录任务 ${result.id} 已启动`, 'ok');
+    }else if(action === 'delete'){
+      if(!window.confirm(`删除 ${phone} 的全部 GoPay 凭据？此操作不可恢复。`)) return;
+      await gopayApi(`/accounts/${encodeURIComponent(phone)}/delete`, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({confirm:true}),
+      });
+      setGopayMessage('gopay-account-message', `${phone} 已删除`, 'ok');
+    }
+    await Promise.all([loadGopayAccounts(), loadGopayJobs()]);
+  }catch(error){
+    setGopayMessage('gopay-account-message', error.message || String(error), 'bad');
+  }finally{
+    button.disabled = false;
+  }
+};
+
+$('#gopay-phone-rows').onclick = async event=>{
+  const button = event.target.closest('[data-gopay-phone-delete]');
+  if(!button) return;
+  const phone = decodeURIComponent(button.dataset.gopayPhoneDelete || '');
+  if(!window.confirm(`从共享号码池删除 ${phone}？`)) return;
+  button.disabled = true;
+  try{
+    await gopayApi(`/phones/${encodeURIComponent(phone)}/delete`, {method:'POST'});
+    await loadGopayPhones();
+  }catch(error){
+    setGopayMessage('gopay-phone-message', error.message || String(error), 'bad');
+  }finally{
+    button.disabled = false;
+  }
+};
+
+$('#gopay-register-job-rows').onclick = $('#gopay-payment-job-rows').onclick = event=>{
+  const button = event.target.closest('[data-gopay-otp-kind]');
+  if(!button) return;
+  openGopayOtp(button.dataset.gopayOtpKind, button.dataset.job, decodeURIComponent(button.dataset.phone || ''));
+};
+
+$$('[data-gopay-job-tab]').forEach(button=>button.onclick=()=>{
+  $$('[data-gopay-job-tab]').forEach(item=>item.classList.toggle('active', item===button));
+  $$('[data-gopay-job-panel]').forEach(panel=>panel.hidden = panel.dataset.gopayJobPanel !== button.dataset.gopayJobTab);
+});
+
+$('#btn-gopay-clear-phones').onclick = async ()=>{
+  if(!window.confirm('清空共享号码池中所有未占用号码？正在运行的号码会保留。')) return;
+  try{
+    const result = await gopayApi('/phones/clear', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});
+    setGopayMessage('gopay-phone-message', `已删除 ${result.removed || 0} 个号码`, 'ok');
+    await loadGopayPhones();
+  }catch(error){ setGopayMessage('gopay-phone-message', error.message || String(error), 'bad'); }
+};
+
+$('#btn-gopay-clear-accounts').onclick = async ()=>{
+  if(!window.confirm('删除全部 GoPay 账号凭据？此操作不可恢复。')) return;
+  try{
+    const result = await gopayApi('/accounts/clear', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});
+    setGopayMessage('gopay-account-message', `已删除 ${result.removed || 0} 个账号`, 'ok');
+    await loadGopayAccounts();
+  }catch(error){ setGopayMessage('gopay-account-message', error.message || String(error), 'bad'); }
+};
+
+$('#gopay-wallet-dialog').addEventListener('close', ()=>{
+  if(gopayTimer){ clearInterval(gopayTimer); gopayTimer=null; }
+  loadPlusProtocolStatus();
+});
+
 // ---------------------------------------------------------------- Existing Plus accounts -> Codex OAuth -> SUB2API
 
 function setPlusImportState(text, kind=''){
@@ -1342,11 +1697,17 @@ function setPlusRunControls(running){
   $('#custom-sms-input').disabled = running;
   $('#btn-custom-sms-import').disabled = running;
   $('#btn-plus-payment-config').disabled = running;
+  $('#btn-plus-gopay-config').disabled = false;
 }
 
 function renderCustomSmsSummary(pool, summaryId='custom-sms-summary'){
   const summary = $(`#${summaryId}`);
   if(summary) summary.textContent = `可用 ${pool.available || 0} / 占用 ${pool.leased || 0} / 已用 ${pool.used || 0}`;
+}
+
+async function loadPlusPanel(){
+  const [status] = await Promise.all([loadPlusImportStatus(), loadPlusProtocolStatus()]);
+  return status;
 }
 
 async function loadCustomSmsPool(summaryId='custom-sms-summary'){
@@ -1425,6 +1786,10 @@ async function loadPlusProtocolStatus(){
       if(!option) return;
       option.disabled = !method.available || !method.batch_enabled;
       option.title = method.reason || '';
+      option.dataset.paymentExecution = method.payment_execution || '';
+      option.dataset.paymentAvailable = String(!!method.payment_available);
+      option.dataset.paymentConfigured = String(!!method.payment_configured);
+      option.dataset.paymentReason = method.payment_reason || '';
     });
     if(select.selectedOptions[0] && select.selectedOptions[0].disabled){
       const fallback = [...select.options].find(option=>!option.disabled);
@@ -1433,11 +1798,6 @@ async function loadPlusProtocolStatus(){
     const poolOption = $('#plus-protocol-source').querySelector('option[value="pool"]');
     if(poolOption) poolOption.textContent = `号池有资格账号（${data.pool_eligible_count || 0}）`;
     plusProtocolStatus = data;
-    const payOption = $('#plus-protocol-action').querySelector('option[value="pay"]');
-    if(payOption){
-      payOption.disabled = !data.payment_ready;
-      payOption.title = data.payment_ready ? '' : data.payment_message || 'PayPal 支付资料未配置';
-    }
     setPlusProtocolState(
       `${data.message} · 已授权 ${data.account_count || 0} · 号池有资格 ${data.pool_eligible_count || 0}`,
       data.engine_ready ? 'ok' : 'bad',
@@ -1460,7 +1820,7 @@ function protocolRequestPayload(emails=[]){
     confirm_payment: operation === 'pay' && $('#plus-payment-confirm').checked,
     emails,
   };
-  if(operation === 'pay' && hasInlinePaymentDetails()){
+  if(operation === 'pay' && $('#plus-protocol-method').value === 'paypal' && hasInlinePaymentDetails()){
     payload.payment_details = {
       cards: $('#plus-payment-cards').value,
       addresses: $('#plus-payment-addresses').value,
@@ -1485,13 +1845,26 @@ function syncPaymentDetailsState(){
   if(hasCompleteInlinePaymentDetails()){
     state.textContent = '本次资料已录入';
     state.className = 'ok';
-  }else if(plusProtocolStatus?.payment_configured){
+  }else if(selectedProtocolPayment().configured){
     state.textContent = '使用引擎默认资料';
     state.className = '';
   }else{
     state.textContent = '需要录入本次资料';
     state.className = 'bad';
   }
+}
+
+function selectedProtocolPayment(){
+  const option = $('#plus-protocol-method').selectedOptions[0];
+  const id = option?.value || '';
+  return {
+    id,
+    execution:option?.dataset.paymentExecution || (id==='paypal' ? 'paypal_auto' : id==='gopay' ? 'gopay_wallet' : ''),
+    available:option?.dataset.paymentAvailable === 'true',
+    configured:option?.dataset.paymentConfigured === 'true',
+    reason:option?.dataset.paymentReason || (plusProtocolStatus ? '' : '正在读取支付执行器状态'),
+    label:(option?.textContent || '').split(' · ')[0],
+  };
 }
 
 function clearInlinePaymentDetails(){
@@ -1505,13 +1878,28 @@ function clearInlinePaymentDetails(){
 function syncPlusProtocolAction(){
   const operation = $('#plus-protocol-action').value;
   const paying = operation === 'pay';
+  const method = selectedProtocolPayment();
   const confirmRow = $('#plus-payment-confirm-row');
   confirmRow.hidden = !paying;
+  $('#btn-plus-payment-config').hidden = !paying || method.execution !== 'paypal_auto';
+  $('#btn-plus-gopay-config').hidden = !paying || method.execution !== 'gopay_wallet';
+  const payOption = $('#plus-protocol-action').querySelector('option[value="pay"]');
+  if(payOption){
+    payOption.disabled = !method.available;
+    payOption.title = method.available ? '' : method.reason || '该渠道不支持自动支付';
+  }
   if(paying){
-    $('#plus-protocol-method').value = 'paypal';
     $('#plus-protocol-concurrency').value = '1';
-    $('#plus-protocol-note').textContent = 'PayPal 支付资料可在本次任务临时录入；每个账号支付前仍会实时复检 Plus 优惠。';
-    syncPaymentDetailsState();
+    $('#plus-payment-confirm-label').textContent = `确认执行真实 ${method.label || ''} 支付`;
+    if(method.execution === 'gopay_wallet'){
+      const state = $('#plus-payment-details-state');
+      state.textContent = method.reason || '读取 GoPay 钱包池状态';
+      state.className = method.configured ? 'ok' : 'bad';
+      $('#plus-protocol-note').textContent = '现有协议引擎生成 Midtrans 链接后，自动从 GoPay 钱包池选择可用账号支付；支付 OTP 在钱包池任务中提交。';
+    }else{
+      $('#plus-protocol-note').textContent = 'PayPal 支付资料可在本次任务临时录入；每个账号支付前仍会实时复检 Plus 优惠。';
+      syncPaymentDetailsState();
+    }
   }else{
     $('#plus-payment-confirm').checked = false;
     $('#plus-protocol-note').textContent = '号池来源只载入缓存为有资格的账号；所有账号执行前都会再次实时复检。';
@@ -1523,21 +1911,32 @@ async function startPlusProtocolBatch(emails=[]){
   if(plusRun) return;
   const operation = $('#plus-protocol-action').value || 'extract';
   const method = $('#plus-protocol-method').selectedOptions[0];
+  const payment = selectedProtocolPayment();
   if(!method || method.disabled){
     setPlusProtocolState(method?.title || '请选择可执行的提链渠道', 'bad');
     return;
   }
   if(operation === 'pay'){
-    if(!hasCompleteInlinePaymentDetails() && !plusProtocolStatus?.payment_configured){
+    if(!payment.available){
+      setPlusProtocolState(payment.reason || '该渠道不能自动支付', 'bad');
+      return;
+    }
+    if(payment.execution === 'paypal_auto' && !hasCompleteInlinePaymentDetails() && !payment.configured){
       setPlusProtocolState('请先录入本次 PayPal 支付资料', 'bad');
       $('#plus-payment-dialog').showModal();
+      return;
+    }
+    if(payment.execution === 'gopay_wallet' && !payment.configured){
+      setPlusProtocolState(payment.reason || 'GoPay 钱包池没有可用账号', 'bad');
+      $('#gopay-wallet-dialog').showModal();
+      await loadGopayPanel();
       return;
     }
     if(!$('#plus-payment-confirm').checked){
       setPlusProtocolState('执行真实支付前必须勾选支付确认', 'bad');
       return;
     }
-    if(!window.confirm('将对选中的 Plus 优惠账号执行真实 PayPal 支付。确认继续？')) return;
+    if(!window.confirm(`将对选中的 Plus 优惠账号执行真实 ${payment.label} 支付。确认继续？`)) return;
   }
   const label = method.textContent.split(' · ')[0];
   const operationLabel = operation === 'pay' ? '批量支付' : '批量提链';
@@ -1553,7 +1952,7 @@ async function startPlusProtocolBatch(emails=[]){
     if(!response.ok) throw new Error(data.error || `协议任务创建失败 (${response.status})`);
     const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
     if(skipped) appendPlusLog(`[protocol] 资格不符或状态未知，跳过 ${skipped} 个账号`);
-    if(operation === 'pay') clearInlinePaymentDetails();
+    if(operation === 'pay' && payment.execution === 'paypal_auto') clearInlinePaymentDetails();
     setPlusProtocolState(`已创建 ${data.accepted} 个账号的 ${label} ${operationLabel}任务`, 'ok');
     monitorPlusRun(data.run_id, data.accepted, operation === 'pay' ? 'payment' : 'protocol');
   }catch(error){
@@ -1622,10 +2021,23 @@ async function startPlusCodexImport(){
     setPlusProtocolState($('#plus-protocol-method').selectedOptions[0]?.title || '请选择可执行的提链渠道', 'bad');
     return;
   }
-  if($('#plus-protocol-action').value === 'pay' && !hasCompleteInlinePaymentDetails() && !plusProtocolStatus?.payment_configured){
-    setPlusProtocolState('请先录入本次 PayPal 支付资料', 'bad');
-    $('#plus-payment-dialog').showModal();
-    return;
+  const payment = selectedProtocolPayment();
+  if($('#plus-protocol-action').value === 'pay'){
+    if(!payment.available){
+      setPlusProtocolState(payment.reason || '该渠道不能自动支付', 'bad');
+      return;
+    }
+    if(payment.execution === 'paypal_auto' && !hasCompleteInlinePaymentDetails() && !payment.configured){
+      setPlusProtocolState('请先录入本次 PayPal 支付资料', 'bad');
+      $('#plus-payment-dialog').showModal();
+      return;
+    }
+    if(payment.execution === 'gopay_wallet' && !payment.configured){
+      setPlusProtocolState(payment.reason || 'GoPay 钱包池没有可用账号', 'bad');
+      $('#gopay-wallet-dialog').showModal();
+      await loadGopayPanel();
+      return;
+    }
   }
   if($('#plus-protocol-action').value === 'pay' && !$('#plus-payment-confirm').checked){
     setPlusProtocolState('授权后执行真实支付前必须勾选支付确认', 'bad');
@@ -1680,10 +2092,15 @@ $('#btn-plus-import').onclick = startPlusCodexImport;
 $('#btn-plus-stop').onclick = stopPlusCodexImport;
 $('#btn-plus-protocol-run').onclick = ()=>startPlusProtocolBatch();
 $('#plus-protocol-action').onchange = syncPlusProtocolAction;
+$('#plus-protocol-method').onchange = syncPlusProtocolAction;
 $('#plus-protocol-source').onchange = ()=>loadPlusProtocolStatus();
 $('#btn-plus-payment-config').onclick = ()=>{
   $('#plus-payment-dialog-message').textContent = '';
   $('#plus-payment-dialog').showModal();
+};
+$('#btn-plus-gopay-config').onclick = async ()=>{
+  $('#gopay-wallet-dialog').showModal();
+  await loadGopayPanel();
 };
 $('#btn-plus-payment-close').onclick = ()=>$('#plus-payment-dialog').close();
 $('#btn-plus-payment-apply').onclick = ()=>{

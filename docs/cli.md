@@ -46,6 +46,9 @@ python register_chatgpt.py --count 1 --node auto --country JP
 # 已开通 Plus 账号：手机号接码验证 -> Codex OAuth -> SUB2API
 python tools/import_plus_codex.py --accounts-file accounts.txt --sms-provider auto --phone-attempts 3
 
+# 已开通 Plus 账号 + 邀请新用户(从邮箱池抽未注册号),触发 banked reset 奖励
+python tools/import_plus_codex.py --accounts-file accounts.txt --invite-friend
+
 # Grok 指纹浏览器流程
 python register_grok.py --count 1
 python register_grok.py --count 1 --sub2api --sub2api-group grok
@@ -65,6 +68,12 @@ python register.py --count 1 --node auto --provider remail
 
 # Claude 指定 Outlook；refresh token 与 client_id 必须配套
 python register.py --email a@outlook.com --password xxx --token <refresh_token> --client-id <client_id> --node auto
+
+# Claude 使用 Google OAuth；批量文件每行可写 email----Google密码，支持企业/教育域名
+python register.py --auth-mode google --emails google_accounts.txt --node auto
+
+# Google 账号遇到 2FA/CAPTCHA 时允许人工在浏览器中完成（秒）；密码可留空后在浏览器输入
+python register.py --auth-mode google --emails google_accounts.txt --google-manual-timeout 180 --node auto
 
 # Kiro Builder ID；默认从 Outlook 资产池读取 Graph refresh token
 python register_kiro.py --count 1

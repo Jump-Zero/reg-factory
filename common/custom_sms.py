@@ -273,7 +273,14 @@ def _fetch_record(url: str) -> str:
     raise requests.TooManyRedirects("record URL redirected too many times")
 
 
-def get_code(pkey: str, max_wait: int = 180, interval: int = 5) -> str | None:
+def get_code(
+    pkey: str,
+    max_wait: int = 180,
+    interval: int = 5,
+    *,
+    consume: bool = True,
+    seen: set[str] | None = None,
+) -> str | None:
     url = _record_url(pkey)
     if not url:
         return None
@@ -286,8 +293,11 @@ def get_code(pkey: str, max_wait: int = 180, interval: int = 5) -> str | None:
     while time.time() - started < max_wait:
         try:
             code = extract_code(_fetch_record(url))
-            if code:
-                _mark_used(pkey)
+            if code and (seen is None or code not in seen):
+                if seen is not None:
+                    seen.add(code)
+                if consume:
+                    _mark_used(pkey)
                 print(f"  [custom-sms] code: {code}")
                 return code
         except requests.RequestException as exc:
@@ -296,6 +306,11 @@ def get_code(pkey: str, max_wait: int = 180, interval: int = 5) -> str | None:
         print(f"  [custom-sms] waiting... ({elapsed}s/{max_wait}s)")
         time.sleep(interval)
     return None
+
+
+def complete(pkey: str) -> bool:
+    """Mark a leased number used after a multi-code workflow succeeds."""
+    return _mark_used(pkey)
 
 
 def _mark_used(pkey: str) -> bool:
@@ -333,6 +348,42 @@ def release(pkey: str) -> bool:
         pool["records"].append(record)
         _save(path, pool)
         return True
+
+
+def delete(phone: str) -> bool:
+    """Delete one number from the pool when it is not actively leased."""
+    normalized = _normalize_phone(phone)
+    path = pool_path()
+    with file_lock(path):
+        pool = _load(path)
+        record = next(
+            (item for item in pool["records"] if item.get("phone") == normalized),
+            None,
+        )
+        if record is None:
+            return False
+        if record.get("status") == "leased":
+            raise ValueError("phone is currently leased")
+        pool["records"].remove(record)
+        _save(path, pool)
+        return True
+
+
+def clear(*, include_leased: bool = False) -> int:
+    """Remove pool records, preserving active leases unless explicitly requested."""
+    path = pool_path()
+    with file_lock(path):
+        pool = _load(path)
+        before = len(pool["records"])
+        if include_leased:
+            pool["records"] = []
+        else:
+            pool["records"] = [
+                item for item in pool["records"] if item.get("status") == "leased"
+            ]
+        removed = before - len(pool["records"])
+        _save(path, pool)
+        return removed
 
 
 def _redact_url(url: str) -> str:
