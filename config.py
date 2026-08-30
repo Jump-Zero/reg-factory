@@ -364,3 +364,21 @@ SMSMAN_TOKEN = _env("SMSMAN_TOKEN", "")  # sms-man.com API key（profile 页获�
 SMSMAN_APP_ID_OPENAI = _env("SMSMAN_APP_ID_OPENAI", "openai")  # 数字 application_id 或 code/名(自动解析)
 SMSMAN_COUNTRY_ID_OPENAI = _env("SMSMAN_COUNTRY_ID_OPENAI", "0")  # 0=随机国家
 SMSMAN_MAXPRICE_OPENAI = _env("SMSMAN_MAXPRICE_OPENAI", "")  # 价格上限（sms-man 币种），空=不限
+
+# ---------------------------------------------------------------- 接码平台 (LIYE 卡密式)
+# liye.5x20.cn：无账号纯卡密(CDK)，一卡一次取号收码；取消成功退回次数；国家系统自动分配。
+# 卡密两处配置(自动合并去重)：.env LIYE_CARDS 逗号分隔 + runtime/state/liye_cards.txt 每行一张。
+# 服务: chatai(OpenAI, 卡密前缀 GPT-/CZ-) | google(GOO-)。CLI: python -m common.liye_sms status|stats
+LIYE_API_BASE = _env("LIYE_API_BASE", "https://liye.5x20.cn").strip() or "https://liye.5x20.cn"
+LIYE_SERVICE = _env("LIYE_SERVICE", "chatai").strip().lower() or "chatai"
+LIYE_CARDS = _env("LIYE_CARDS", "")  # 卡密池(逗号分隔)，如 GPT-XXXX-XXXX-XXXX-XXXX,CZ-XXXX-...
+# 取号后等号码分配的超时(秒)；queued/purchasing 在途时轮询
+LIYE_ALLOC_TIMEOUT = _env_int("LIYE_ALLOC_TIMEOUT", 90)
+# in_use 卡密的租期(秒)：超过后 claim 时查上游实际状态做懒回收(默认 20 分钟)
+LIYE_LEASE_SECONDS = _env_int("LIYE_LEASE_SECONDS", 1200)
+# 号段黑名单(拨号前缀，逗号分隔)：分到黑名单国家的号会取消退回换卡重试；空=不过滤
+LIYE_COUNTRY_BLACKLIST = [c.strip() for c in _env("LIYE_COUNTRY_BLACKLIST", "").split(",") if c.strip()]
+# 单次取号最多消耗几张卡(前几张异常时顺延)
+LIYE_MAX_CARDS_PER_CLAIM = _env_int("LIYE_MAX_CARDS_PER_CLAIM", 3)
+# auto 模式下 LIYE 的接入位置：last=排在所有平台之后(默认，兜底) | first=优先用 LIYE
+LIYE_AUTO_POSITION = _env("LIYE_AUTO_POSITION", "last").strip().lower() or "last"

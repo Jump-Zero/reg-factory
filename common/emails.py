@@ -29,6 +29,13 @@ _CHATGPT_RETRYABLE_ERROR_MARKERS = (
     "entry_",
 )
 
+# 永久性失败：账号侧状态，重试无意义；该平台永久跳过，其他平台不受影响。
+_PERMANENT_ERROR_MARKERS = (
+    "account_deactivated",
+    "account_suspended",
+    "account_banned",
+)
+
 
 def _used_file(platform):
     return f"emails_used_{platform}.txt"
@@ -57,6 +64,44 @@ def _exclude_from_outlook_sale(platform, email):
     if str(platform or "").strip().lower() in {"", "email", "outlook"}:
         return
     append_line(_outlook_registration_file(), str(email or "").strip().lower())
+
+
+def registration_root(email):
+    """母邮箱 root（去掉 +alias）。fount+abc@outlook.com -> fount@outlook.com。
+
+    Outlook 的 +alias 都指向同一收件箱，一旦某个子别名在某平台报 user_already_exists，
+    该母邮箱下所有子别名在该平台也几乎必然已存在，应整族拉黑。"""
+    local, separator, domain = str(email or "").strip().lower().partition("@")
+    if not separator:
+        return ""
+    return f"{local.split('+', 1)[0]}@{domain}"
+
+
+def _root_blocked_file(platform):
+    return f"emails_root_blocked_{platform}.txt"
+
+
+def _load_blocked_roots(platform):
+    roots = set()
+    path = _root_blocked_file(platform)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip().lower()
+                if line and not line.startswith("#"):
+                    roots.add(line)
+    return roots
+
+
+def mark_root_blocked(platform, email):
+    """把 email 的母邮箱 root 拉黑：该母邮箱下所有 +alias 子邮箱都不再被该平台分配。"""
+    platform = str(platform or "").strip().lower()
+    if platform in {"", "email", "outlook"}:
+        return
+    root = registration_root(email)
+    if not root:
+        return
+    append_line(_root_blocked_file(platform), root)
 
 
 def mark_registration_started(platform, email, password=""):
@@ -94,6 +139,7 @@ def next_email(platform):
             print(f"  [email] {EMAILS_FILE} not found")
             return None
         used = _load_used(platform)
+        blocked_roots = _load_blocked_roots(platform)
         with open(EMAILS_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -102,6 +148,8 @@ def next_email(platform):
                 parts = line.split("----")
                 email = parts[0].strip()
                 if email.lower() in used:
+                    continue
+                if blocked_roots and registration_root(email) in blocked_roots:
                     continue
                 password = parts[1].strip() if len(parts) >= 2 else ""
                 token = parts[2].strip() if len(parts) >= 3 else ""
@@ -121,12 +169,15 @@ def latest_email(platform, require_token=False, validate_token=False):
             print(f"  [email] {EMAILS_FILE} not found")
             return None
         used = _load_used(platform)
+        blocked_roots = _load_blocked_roots(platform)
         with open(EMAILS_FILE, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
         for line in reversed(lines):
             parts = line.split("----")
             email = parts[0].strip()
             if email.lower() in used:
+                continue
+            if blocked_roots and registration_root(email) in blocked_roots:
                 continue
             password = parts[1].strip() if len(parts) >= 2 else ""
             token = parts[2].strip() if len(parts) >= 3 else ""
@@ -204,6 +255,7 @@ def retryable_email(platform, require_token=False, validate_token=False):
             email
             for email, reason in latest_errors.items()
             if any(marker in reason for marker in _CHATGPT_RETRYABLE_ERROR_MARKERS)
+            and not any(marker in reason for marker in _PERMANENT_ERROR_MARKERS)
         ]
         if not retry_candidates:
             return None
@@ -217,8 +269,11 @@ def retryable_email(platform, require_token=False, validate_token=False):
                 records[parts[0].strip().lower()] = (parts, raw)
         from common.mailbox import check_mailbox_access
         retry_claim = _retry_claim_status()
+        blocked_roots = _load_blocked_roots(platform)
         for email in reversed(retry_candidates):
             if latest_status.get(email) in {"ok", retry_claim}:
+                continue
+            if blocked_roots and registration_root(email) in blocked_roots:
                 continue
             record = records.get(email)
             if not record:
@@ -375,3 +430,7 @@ def recycle_reserved(platforms=None):
 def mark_error(platform, email, password="", reason=""):
     append_line(_error_file(platform), f"{email}----{password}----{reason}")
     _exclude_from_outlook_sale(platform, email)
+    # 账号已存在（user_already_exists）时，把母邮箱 root 一并拉黑：
+    # 该母邮箱下所有 +alias 子邮箱都指向同一收件箱，整族都不可再注册。
+    if "user_already_exists" in str(reason or "").lower():
+        mark_root_blocked(platform, email)

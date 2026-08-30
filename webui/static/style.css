@@ -631,6 +631,8 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .plus-payment-dialog-body textarea{height:82px;padding:9px;resize:vertical;font:11px/1.5 var(--mono)}
 .plus-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 14px;margin-top:14px}
 .custom-sms-import{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.custom-sms-import[hidden]{display:none}
+.custom-sms-import>summary span.bad{color:var(--red)}
 .custom-sms-import>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px;color:#d9dce1;font-size:11px;font-weight:650;cursor:pointer}
 .custom-sms-import>summary span{color:var(--quiet);font:10.5px var(--mono)}
 .custom-sms-import .plus-field{margin-top:10px}
@@ -778,6 +780,28 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .gopay-otp-dialog>.gopay-field{padding:15px}
 .gopay-otp-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 15px;border-top:1px solid var(--line)}
 #gopay-otp-message{flex:1;color:var(--red);font-size:10.5px}
+
+.oauth-pending{margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:6px;background:var(--surface-raised)}
+.oauth-pending-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px;color:var(--text);font-size:12px;font-weight:650}
+.oauth-pending-head small{min-width:0;color:var(--muted);font-size:10.5px;font-weight:400;overflow-wrap:anywhere;text-align:right}
+.oauth-pending-head small.ok{color:var(--green)}
+.oauth-pending-head small.bad{color:var(--red)}
+.oauth-pending-actions{display:flex;flex-wrap:wrap;gap:8px}
+.oauth-pending-list{margin-top:10px;max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:6px}
+.oauth-pending-row{display:grid;grid-template-columns:auto minmax(0,1.6fr) auto auto auto minmax(0,1.1fr);align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line);font-size:11px;cursor:pointer}
+.oauth-pending-row:last-child{border-bottom:none}
+.oauth-pending-row:hover{background:var(--surface-hover)}
+.oauth-pending-row input{width:15px;height:15px;margin:0;accent-color:var(--accent);flex:0 0 auto}
+.oauth-pending-row .email{min-width:0;color:var(--text);overflow-wrap:anywhere;font-family:var(--mono);font-size:10.5px}
+.oauth-pending-row .tag{padding:2px 7px;border:1px solid var(--line);border-radius:999px;color:var(--muted);white-space:nowrap;font-size:9.5px}
+.oauth-pending-row .tag.oauth,.oauth-pending-row .tag.session{border-color:rgba(65,184,120,.5);color:var(--green)}
+.oauth-pending-row .tag.cookies{border-color:rgba(229,168,75,.5);color:var(--amber)}
+.oauth-pending-row .tag.pool{border-color:rgba(67,182,178,.5);color:var(--cyan)}
+.oauth-pending-row .tag.none{border-color:rgba(226,100,85,.5);color:var(--red)}
+.oauth-pending-row .plus-tag{color:var(--muted);white-space:nowrap;font-size:10px}
+.oauth-pending-row .plus-tag.eligible{color:var(--green);font-weight:650}
+.oauth-pending-row .cookie{min-width:0;color:var(--muted);font-size:10px;overflow-wrap:anywhere}
+.oauth-pending-row .cookie.missing{color:var(--red)}
 
 @media (max-width:1100px){
   .gopay-grid{grid-template-columns:1fr}

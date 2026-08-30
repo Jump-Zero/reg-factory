@@ -131,7 +131,7 @@ cp .env.example .env
 | 通用视觉 | `VISION_*`、`VOTE_*`、`IMAGE_EDIT_*` | 多模型视觉投票 |
 | ChatGPT iCloud 邮箱 | `CHATGPT_EMAIL_PROVIDER`、`ICLOUD_MAIL_*` | ChatGPT 不使用 Outlook 池时 |
 | 临时邮箱 | `YYDS_API_KEY` 等 provider 配置 | Claude/Grok 不使用 Outlook 池时 |
-| 接码 | `SMSMAN_*`、`SMS_API_NAME`、`SMS_TOKEN`、`HERO_SMS_*` | 手机验证；firefox.fun 使用 APIName 标识账号，token + 项目 ID 调用接口 |
+| 接码 | `SMSMAN_*`、`SMS_API_NAME`、`SMS_TOKEN`、`HERO_SMS_*`、`LIYE_*` | 手机验证；firefox.fun 使用 APIName 标识账号，token + 项目 ID 调用接口；LIYE 为卡密式平台，配置卡密即可启用 |
 | SUB2API | `SUB2API_*` | Codex / Grok 下游导入 |
 | CPA | `CPA_URL`、`CPA_MGMT_KEY`、`CODEX_AUTH_URL_SOURCE` | Codex 授权地址与凭据导入 |
 | chatgpt2api | `CHATGPT2API_URL`、`CHATGPT2API_KEY` | 普通 ChatGPT 网页号导入 |
@@ -155,5 +155,26 @@ python -m common.proxy_switch current
 python -m common.proxy_switch rotate
 python _clash_verge.py ping
 ```
+
+## LIYE 卡密式接码平台
+
+LIYE（liye.5x20.cn）是无账号的卡密式接码平台：一卡一次取号收码，15 分钟内无验证码可取消退回次数，换号不消耗次数，国家由平台随机分配。适合作为 sms-man / firefox.fun / hero-sms 之后的兜底链路。
+
+启用方式：在 `LIYE_CARDS`（逗号分隔）或 `runtime/state/liye_cards.txt`（每行一张，推荐批量导入用）任一处填入卡密。卡密前缀 `GPT-`/`CZ-` 对应 OpenAI（service=chatai），`GOO-` 对应 Google。配置了卡密后 `provider=auto` 自动把 liye 纳入轮换（默认排最后，`LIYE_AUTO_POSITION=first` 可改为优先）。
+
+```bash
+python -m common.liye_sms status              # 卡池概览(available/in_use/cooldown/exhausted/invalid)
+python -m common.liye_sms stats               # 平台各国实时成功率
+python -m common.liye_sms reset GPT-XXXX-...  # 确认上游已退回时强制回收卡密
+python -m common.liye_sms stats google        # Google 服务成功率
+```
+
+行为要点：
+
+- **一卡一次**：收到验证码即标记 exhausted；取消（release）成功则退回 available，可再次取号。
+- **黑名单过滤**：`LIYE_COUNTRY_BLACKLIST`（拨号前缀，逗号分隔）或上层传入的 `SMS_COUNTRY_BLACKLIST_OPENAI` 生效时，分到黑名单国家的号优先走平台换号（不耗次数），换号失败再取消退回换下一张卡。
+- **冷却**：平台对取消/换号有短冷却；冷却中的卡标记 cooldown，到期后自动回收，不阻塞其他卡。
+- **并发安全**：多任务同时取卡由文件锁保证一卡一任务；进程崩溃遗留的 in_use 卡在租期（`LIYE_LEASE_SECONDS`，默认 20 分钟）后懒回收。
+- **会话**：卡密登录会话 10 分钟不活动过期，客户端自动重登，无需干预。
 
 配置问题的常见表现和处理方式见 [常见问题](troubleshooting.md)。

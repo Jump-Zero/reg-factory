@@ -294,6 +294,17 @@ def _read_config_val(key, default="", allow_empty=False):
     return default
 
 
+def _liye_cards_file_has_cards():
+    """runtime/state/liye_cards.txt 里是否有非注释行（LIYE 卡密批量导入入口）。"""
+    root = _read_config_val("REG_FACTORY_DATA_DIR", "").strip() or os.path.dirname(ENV_PATH)
+    path = os.path.join(root, "runtime", "state", "liye_cards.txt")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return any(line.strip() and not line.strip().startswith("#") for line in handle)
+    except OSError:
+        return False
+
+
 def _http_alive(url, timeout=3, headers=None, verify_tls=True):
     try:
         req = urllib.request.Request(url, headers=headers or {})
@@ -389,6 +400,8 @@ def _plus_status(message=""):
         providers.append("firefox")
     if _read_config_val("HERO_SMS_API_KEY", "").strip():
         providers.append("hero")
+    if _read_config_val("LIYE_CARDS", "").strip() or _liye_cards_file_has_cards():
+        providers.append("liye")
     active = sum(
         1 for rec in RUNS.values()
         if rec.get("script") == "plus_codex_import" and not rec.get("done")
@@ -1092,6 +1105,25 @@ def _test_firefox():
         return False, f"firefox.fun 请求失败：{str(e)[:80]}"
 
 
+def _test_liye():
+    """测 LIYE 卡池：只读卡池状态文件统计，不登录平台、不消耗卡密次数。"""
+    try:
+        from common import liye_sms
+    except Exception as e:
+        return False, f"liye_sms 模块导入失败：{str(e)[:100]}"
+    try:
+        if not liye_sms.has_cards():
+            return False, "未配置 LIYE 卡密（LIYE_CARDS 或 runtime/state/liye_cards.txt）"
+        s = liye_sms.summary()
+        detail = (f"共 {s.get('total', 0)} 张：可用 {s.get('available', 0)}、使用中 {s.get('in_use', 0)}、"
+                  f"冷却 {s.get('cooldown', 0)}、已用尽 {s.get('exhausted', 0)}、无效 {s.get('invalid', 0)}")
+        if not s.get("available", 0):
+            return False, f"LIYE 卡池已配置但无可用卡密（{detail}）；新卡密可追加到 runtime/state/liye_cards.txt"
+        return True, f"LIYE 卡池就绪 ✓ {detail}"
+    except Exception as e:
+        return False, f"LIYE 卡池读取失败：{str(e)[:120]}"
+
+
 def _test_yyds():
     """Create one YYDS inbox using the values currently shown in the config form."""
     key = _read_config_val("YYDS_API_KEY", "").strip()
@@ -1140,6 +1172,7 @@ _TESTERS = {
     "bitbrowser": _test_bitbrowser,
     "smsman": _test_smsman,
     "firefox": _test_firefox,
+    "liye": _test_liye,
     "yyds": _test_yyds,
     "outlook-recovery": _test_outlook_recovery_mailbox,
 }
@@ -1607,6 +1640,98 @@ async def api_chatgpt_plus_start():
     return _plus_status()
 
 
+def _plus_credential_sources(email: str) -> list[str]:
+    """Return available local credential sources for a chatgpt email.
+
+    Order matters: oauth > session > cookies > pool. Used for display in the
+    pending-accounts list.
+    """
+    from common import asset_store
+
+    key = str(email or "").strip().lower()
+    if not key:
+        return []
+    sources = []
+    token_dir = asset_store._token_root() / "chatgpt"
+    for name, tag in (
+        (f"oauth-{email.strip()}.session.json", "oauth"),
+        (f"{email.strip()}.session.json", "session"),
+    ):
+        if (token_dir / name).is_file():
+            sources.append(tag)
+    for record in asset_store._cookie_records("chatgpt"):
+        if str(record.get("email") or "").strip().lower() == key:
+            sources.append("cookies")
+            break
+    if key in asset_store._mailbox_map():
+        sources.append("pool")
+    return sources
+
+
+def _pending_cookie_file(email: str) -> str:
+    """Latest cookie file (full_*.json) mapped to the chatgpt email, or ''."""
+    from common import asset_store
+
+    key = str(email or "").strip().lower()
+    if not key:
+        return ""
+    best = ""
+    best_mtime = -1.0
+    for record in asset_store._cookie_records("chatgpt"):
+        if str(record.get("email") or "").strip().lower() != key:
+            continue
+        path = record["path"]
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best = str(path)
+    return best
+
+
+@app.get("/api/oauth-codex/pending-accounts")
+async def api_oauth_codex_pending_accounts():
+    """List chatgpt accounts from the asset report that are not yet in SUB2API,
+    with the cookie file each one would use for the oauth_codex flow."""
+    from common import asset_scanner
+
+    def build():
+        report = asset_scanner.get_report()
+        accounts = []
+        imported = 0
+        for item in report.get("items", []):
+            if item.get("platform") != "chatgpt":
+                continue
+            email = str(item.get("email") or "").strip()
+            if not email:
+                continue
+            if item.get("sub2api_uploaded"):
+                imported += 1
+                continue
+            cookie_file = _pending_cookie_file(email)
+            accounts.append({
+                "email": email,
+                "status": item.get("status", "unknown"),
+                "detail": item.get("detail", ""),
+                "plus_trial": item.get("plus_trial", "unknown"),
+                "plan_type": item.get("plan_type", ""),
+                "codex_phone_status": item.get("codex_phone_status", ""),
+                "credentials": _plus_credential_sources(email),
+                "cookie_file": cookie_file,
+                "checked_at": item.get("checked_at", ""),
+                "last_scan_at": report.get("last_scan_at", ""),
+            })
+        accounts.sort(key=lambda a: (not a["cookie_file"], a["email"]))
+        return {"accounts": accounts, "imported": imported, "total": len(accounts) + imported}
+
+    try:
+        return await asyncio.to_thread(build)
+    except Exception as exc:
+        return JSONResponse({"error": f"资产报告读取失败：{str(exc)[:160]}"}, status_code=500)
+
+
 @app.post("/api/chatgpt-plus/import-codex")
 async def api_chatgpt_plus_import_codex(request: Request):
     data = await request.json()
@@ -1646,7 +1771,7 @@ async def api_chatgpt_plus_import_codex(request: Request):
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     sms_provider = str((data or {}).get("sms_provider") or "auto").strip().lower()
-    if sms_provider not in {"auto", "custom", "smsman", "firefox", "hero"}:
+    if sms_provider not in {"auto", "custom", "smsman", "firefox", "hero", "liye"}:
         return JSONResponse({"error": "未知手机号接码平台"}, status_code=400)
     skip_phone = bool((data or {}).get("skip_phone"))
     no_import = bool((data or {}).get("no_import"))
@@ -1718,6 +1843,7 @@ async def api_chatgpt_plus_import_codex(request: Request):
             **started,
             "accepted": len(records),
             "accepted_emails": [str(record.get("email") or "").strip().lower() for record in records],
+            "skipped": skipped[:20],
         }
     except Exception as exc:
         with contextlib.suppress(OSError):
@@ -3178,6 +3304,36 @@ async def api_custom_sms_import(request: Request):
     from common import custom_sms
 
     return await asyncio.to_thread(custom_sms.import_text, text)
+
+
+@app.get("/api/sms/liye")
+async def api_liye_cards_get():
+    from common import liye_sms
+
+    return await asyncio.to_thread(liye_sms.summary)
+
+
+@app.post("/api/sms/liye")
+async def api_liye_cards_import(request: Request):
+    data = await request.json()
+    text = str((data or {}).get("text") or "")
+    if not text.strip():
+        return JSONResponse({"error": "请粘贴至少一张 LIYE 卡密"}, status_code=400)
+    if len(text) > 100_000:
+        return JSONResponse({"error": "卡密批量内容不能超过 100 KB"}, status_code=413)
+    if len([line for line in text.splitlines() if line.strip()]) > 500:
+        return JSONResponse({"error": "单批最多导入 500 张卡密"}, status_code=400)
+    from common import liye_sms
+
+    return await asyncio.to_thread(liye_sms.import_text, text)
+
+
+@app.post("/api/sms/liye/recover")
+async def api_liye_cards_recover():
+    from common import liye_sms
+
+    result = await asyncio.to_thread(liye_sms.recover_all)
+    return {"result": result, "summary": await asyncio.to_thread(liye_sms.summary)}
 
 
 def _gopay_error(exc: Exception):

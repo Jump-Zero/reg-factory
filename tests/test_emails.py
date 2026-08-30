@@ -263,6 +263,82 @@ class EmailPoolTests(unittest.TestCase):
         self.assertIsNone(duplicate)
         self.assertEqual(next_batch, expected)
 
+    def test_registration_root_strips_plus_alias(self):
+        self.assertEqual(emails.registration_root("Fount+abc@outlook.com"), "fount@outlook.com")
+        self.assertEqual(
+            emails.registration_root("fountmbugua9660@outlook.com"),
+            "fountmbugua9660@outlook.com",
+        )
+        self.assertEqual(emails.registration_root("plain@example.com"), "plain@example.com")
+        self.assertEqual(emails.registration_root(""), "")
+
+    def test_mark_error_user_already_exists_blocks_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roots_path = os.path.join(tmp, "roots.txt")
+            with (
+                patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")),
+                patch.object(emails, "_root_blocked_file", return_value=roots_path),
+                patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")),
+            ):
+                emails.mark_error(
+                    "chatgpt", "fountmbugua9660+xufvkn@outlook.com", "pw",
+                    "user_already_exists: account exists",
+                )
+            with open(roots_path, encoding="utf-8") as f:
+                self.assertIn("fountmbugua9660@outlook.com", f.read().strip())
+
+    def test_mark_error_other_reason_does_not_block_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roots_path = os.path.join(tmp, "roots.txt")
+            with (
+                patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")),
+                patch.object(emails, "_root_blocked_file", return_value=roots_path),
+                patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")),
+            ):
+                emails.mark_error("chatgpt", "fountmbugua9660+xufvkn@outlook.com", "pw", "no_code")
+            self.assertFalse(os.path.exists(roots_path))
+
+    def test_next_email_skips_blocked_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.join(tmp, "emails.txt")
+            roots = os.path.join(tmp, "roots.txt")
+            with open(pool, "w", encoding="utf-8") as f:
+                f.write("fount@outlook.com----pw----rt----cid\n")
+                f.write("fount+abc@outlook.com----pw2----rt2----cid2\n")
+                f.write("clean@outlook.com----pw3----rt3----cid3\n")
+            with open(roots, "w", encoding="utf-8") as f:
+                f.write("fount@outlook.com\n")
+            with (
+                patch.object(emails, "EMAILS_FILE", pool),
+                patch.object(emails, "_used_file", return_value=os.path.join(tmp, "used.txt")),
+                patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")),
+                patch.object(emails, "_root_blocked_file", return_value=roots),
+                patch.object(emails, "_outlook_sale_file", return_value=os.path.join(tmp, "sold.txt")),
+                patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")),
+            ):
+                selected = emails.next_email("chatgpt")
+            self.assertEqual(selected[0], "clean@outlook.com")
+
+    def test_latest_email_skips_blocked_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = os.path.join(tmp, "emails.txt")
+            roots = os.path.join(tmp, "roots.txt")
+            with open(pool, "w", encoding="utf-8") as f:
+                f.write("fount+abc@outlook.com----pw----rt----cid\n")
+                f.write("clean@outlook.com----pw2----rt2----cid2\n")
+            with open(roots, "w", encoding="utf-8") as f:
+                f.write("fount@outlook.com\n")
+            with (
+                patch.object(emails, "EMAILS_FILE", pool),
+                patch.object(emails, "_used_file", return_value=os.path.join(tmp, "used.txt")),
+                patch.object(emails, "_error_file", return_value=os.path.join(tmp, "errors.txt")),
+                patch.object(emails, "_root_blocked_file", return_value=roots),
+                patch.object(emails, "_outlook_sale_file", return_value=os.path.join(tmp, "sold.txt")),
+                patch.object(emails, "_outlook_registration_file", return_value=os.path.join(tmp, "registration.txt")),
+            ):
+                selected = emails.latest_email("chatgpt", require_token=True)
+            self.assertEqual(selected[0], "clean@outlook.com")
+
 
 if __name__ == "__main__":
     unittest.main()

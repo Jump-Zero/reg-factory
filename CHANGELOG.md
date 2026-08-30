@@ -1,5 +1,23 @@
 ﻿# 更新日志
 
+## 2026-08-30 - 资产账号查询导入 SUB2API
+
+- WebUI「已开通 Plus 导入 SUB2API」页新增「资产账号查询」区块：一键列出资产报告中未导入 SUB2API 的 ChatGPT 账号（含凭据类型、账号状态、Plus 资格标签），支持全选/清空，勾选后直接发起授权导入，无需手动粘贴账号。
+- 新增 `GET /api/chatgpt-plus/pending-accounts`：从 `asset_scanner.get_report()` 过滤 chatgpt 平台且 `sub2api_uploaded=false` 的账号，复用 Sub2API 数据库 API 的 60 秒缓存；服务端探测每账号可用凭据并按 oauth → session → cookies → 邮箱池 排序。
+- `POST /api/chatgpt-plus/import-codex` 新增 `emails` 参数：与现有 `accounts` 文本合并去重；每个邮箱按四段优先级从本地凭据解析账号（oauth-*.session.json → *.session.json → cookie 记录 → 邮箱池四段行），无法解析的账号跳过并在响应 `skipped` 中说明原因。
+- 前端：`index.html` 查询区块 + `style.css` 列表样式 + `app.js` 加载/渲染/勾选逻辑；无凭据账号复选框禁用防误选。
+
+## 2026-08-30 - LIYE 卡密式接码平台接入
+
+- 新增 `common/liye_sms.py`：LIYE（liye.5x20.cn）卡密式接码客户端，支持卡密池管理（`.env LIYE_CARDS` + `runtime/state/liye_cards.txt` 双来源自动合并）、取号/收码/取消退回/换号全流程、会话过期自动重登、崩溃后懒回收。
+- `common/sms.py` 统一入口接入 liye：`provider=liye` 指定使用，`provider=auto` 时配了卡密即纳入轮换（默认排最后兜底，`LIYE_AUTO_POSITION=first` 可改为优先）；pkey 前缀 `liye_<order_id>` 路由。
+- 号段黑名单（`LIYE_COUNTRY_BLACKLIST` 或上层 `SMS_COUNTRY_BLACKLIST_OPENAI`）：分到黑名单国家的号优先平台换号（不耗卡密次数），失败再取消退回换卡。
+- `oauth_codex.py --sms-provider` 新增 `liye` 选项。
+- 新增 CLI：`python -m common.liye_sms status|stats|reset|test`（卡池概览/各国实时成功率/强制回收卡密/全流程测试）。
+- 验证：状态机离线测试 16 项、并发取卡测试 4 线程互斥全部通过。
+- LIYE 覆盖 ChatGPT 全部接码入口：WebUI「短信接码」配置组新增 LIYE 配置项与「测试 LIYE 卡池」按钮（只读统计，不耗卡密）；`webui/scripts.py` 5 处接码平台选项、`register_chatgpt.py`/`run_full_flow.py`/`register_three_platforms.py`/`oauth_codex.py`/`tools/import_plus_codex.py` CLI choices 均含 `liye`。
+- 卡密前缀服务过滤：`GPT-`/`CZ-`→chatai、`GOO-`→google，ChatGPT 取号固定 `service=chatai` 并跳过 `GOO-` 卡，避免错拿 Gmail 卡导致登录失败；`tests/test_liye_sms.py` 15 项离线测试通过。
+
 ## 2026-08-28 - 2.0.8
 
 **GoPay 钱包支付**

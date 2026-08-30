@@ -76,7 +76,7 @@ EXTRACT_CODEX = False  # 注册成功后顺手走 Codex OAuth 提取 rt 导入 S
 ENABLE_2FA = CHATGPT_ENABLE_2FA
 CODEX_GROUP = None  # SUB2API 目标分组（默认取 config.SUB2API_GROUP）
 CODEX_MANUAL_PHONE = False  # add-phone 手动模式（不接码，自己在浏览器填号收码）
-CODEX_SMS_PROVIDER = "auto"  # auto / custom / smsman / firefox / hero
+CODEX_SMS_PROVIDER = "auto"  # auto / custom / smsman / firefox / hero / liye
 CODEX_PHONE = ""
 CODEX_TIMEOUT = 120  # Codex 授权捕获超时秒
 CHATGPT_NODE = "auto"
@@ -2069,6 +2069,92 @@ async def extract_codex(
         return False
 
 
+_LOGIN_CODE_LINK_LABELS = [
+    "使用验证码登录", "使用验证码", "通过电子邮件发送登录代码", "发送登录代码",
+    "Email me a login code", "Send code", "Continue with code", "Use a verification code",
+]
+
+
+async def _login_existing_with_email_code(page, email, index, fetch_code, auth_monitor=None):
+    """user_already_exists 兜底：账号已存在时改走邮箱验证码直接登录。
+
+    about-you 提交 create_account 报 user_already_exists，说明该邮箱已是完整账号
+    （常见于历史批次注册成功但邮箱池未标成功）。此时重走 auth/login：无密码账号
+    会直接落在验证码页，输码即完成登录，随后复用主流程 Step 6（存 cookie/2FA/导出）。
+    返回 False 表示登录兜底不可用，由上层按原错误处理。"""
+    if fetch_code is None:
+        print("  [5][login] 无取码回调，无法走邮箱验证码登录")
+        return False
+    try:
+        await page.goto(SIGNUP_URL, timeout=60000, wait_until="domcontentloaded")
+        await asyncio.sleep(4)
+        await dismiss_cookie_banner(page)
+        email_input = page.locator('input[type="email"], input[name="email"]').first
+        if await email_input.count() == 0:
+            print("  [5][login] 登录页无邮箱框")
+            return False
+        if not await fill_email_verified(page, email_input, email):
+            print("  [5][login] 邮箱未提交成功")
+            return False
+        login_requested_at = time.time()
+        if not await submit_chatgpt_email_form(page):
+            print("  [5][login] 邮箱 Continue 未生效")
+            return False
+        await asyncio.sleep(5)
+        step = await wait_for_chatgpt_auth_step(page, timeout=20)
+        print(f"  [5][login] auth step after email: {step}")
+        if step == "password":
+            # 有密码账号：找"验证码登录"入口；找不到就放弃（随机注册密码对已有账号无效）
+            clicked = await click_any_exact(page, _LOGIN_CODE_LINK_LABELS)
+            if not clicked:
+                try:
+                    link = page.locator(
+                        'a:has-text("code"), button:has-text("code"), '
+                        'a:has-text("验证码"), button:has-text("验证码")'
+                    ).first
+                    if await link.count() > 0:
+                        await link.click(timeout=4000)
+                        clicked = True
+                except Exception:
+                    pass
+            if not clicked:
+                print("  [5][login] 密码页且无验证码登录入口，放弃登录兜底")
+                return False
+            await asyncio.sleep(5)
+            step = await wait_for_chatgpt_auth_step(page, timeout=20)
+        code_sel = ('input[inputmode="numeric"], input[name="code"], '
+                    'input[autocomplete="one-time-code"], input[type="text"]')
+        if step != "code" and await page.locator(code_sel).first.count() == 0:
+            print("  [5][login] 未落到验证码页")
+            return False
+        code = await fetch_code(received_after=login_requested_at, allow_browser_fallback=True)
+        if not code:
+            print("  [5][login] 未取到登录验证码")
+            return False
+        print(f"  [5][login] got code: {code}")
+        try:
+            await submit_email_verification_code(
+                page, code_sel, code, auth_monitor=auth_monitor
+            )
+        except Exception as error:
+            print(f"  [5][login] 验证码提交失败: {str(error)[:80]}")
+            return False
+        current_url = (page.url or "").lower()
+        if "about-you" in current_url or "onboarding" in current_url:
+            print("  [5][login] 登录后仍停在 about-you（账号半注册态），放弃")
+            return False
+        if any(marker in current_url for marker in (
+            "/mfa-challenge", "multi-factor", "two-factor", "authenticator"
+        )):
+            print("  [5][login] 登录后遇到 MFA 挑战（历史 2FA），放弃")
+            return False
+        print("  [5][login] 邮箱验证码登录成功")
+        return True
+    except Exception as error:
+        print(f"  [5][login] 登录兜底异常: {str(error)[:80]}")
+        return False
+
+
 async def register_one(index, total, p):
     start = time.time()
 
@@ -2591,8 +2677,20 @@ async def register_one(index, total, p):
 
         # Step 5: onboarding（名字/生日）。账号 auth session 建立后禁止切换出口。
         assert_chatgpt_node("before_onboarding")
-        await handle_onboarding(page, index, auth_monitor=auth_monitor)
-        if "about-you" in page.url.lower():
+        logged_in_existing = False
+        try:
+            await handle_onboarding(page, index, auth_monitor=auth_monitor)
+        except OnboardingRejected as error:
+            if "user_already_exists" not in str(error):
+                raise
+            print("  [5] user_already_exists：邮箱已是注册账号，改走邮箱验证码登录...")
+            logged_in_existing = await _login_existing_with_email_code(
+                page, email, index, fetch_email_code_for_reauth,
+                auth_monitor=auth_monitor,
+            )
+            if not logged_in_existing:
+                raise
+        if not logged_in_existing and "about-you" in page.url.lower():
             raise RuntimeError("onboarding_not_completed")
         check_timeout()
 
@@ -3562,8 +3660,8 @@ async def main():
                         help="SUB2API 目标分组名 (默认取 config.SUB2API_GROUP)")
     parser.add_argument("--codex-manual-phone", action="store_true",
                         help="Codex add-phone 手动模式: 不接码, 自己在浏览器填号收码")
-    parser.add_argument("--codex-sms-provider", choices=["auto", "custom", "smsman", "firefox", "hero"], default="auto",
-                        help="Codex 自动接码平台；auto 按默认顺序")
+    parser.add_argument("--codex-sms-provider", choices=["auto", "custom", "smsman", "firefox", "hero", "liye"], default="auto",
+                        help="Codex 自动接码平台；auto 按默认顺序(含 liye,配卡密才启用)")
     parser.add_argument("--codex-phone", default="",
                         help="自定义手机号(E.164)：自动填写并等待手动输入验证码")
     parser.add_argument("--codex-timeout", type=int, default=120,

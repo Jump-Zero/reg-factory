@@ -8,12 +8,15 @@ common/sms.py — 参数化接码客户端(sms-man.com 主用 + firefox.fun + he
 provider 路由靠 pkey 前缀：
   smsman_<request_id>  -> sms-man.com  (Codex add-phone 主用)
   hero_<activation_id> -> hero-sms.com
+  liye_<order_id>      -> liye.5x20.cn (卡密式，一卡一次；见 common/liye_sms.py)
   其余                 -> firefox.fun
 
 firefox.fun: act=getPhone/getPhoneCode/cancelPhone, iid=项目号
 hero-sms(sms-activate 兼容): action=getNumber/getStatus/setStatus, service=服务码(OpenAI 默认 dr)
 sms-man(API v2.0): /get-number /get-sms /set-status, token 鉴权, JSON; number 已含国家码。
   application_id 支持数字 或 code/名(运行时查 /applications 自动解析)。
+LIYE(卡密式): /api/card/login 建会话 → /api/orders 取号 → /api/orders/<id>/status 收码
+  → /api/orders/<id>/action cancel 取消退回。卡密池+状态见 common/liye_sms.py。
 
 ⚠️ WIP：自动接码主要被 common/oauth_codex.handle_add_phone(Codex add-phone)调用。
 register.py 自带一套独立接码(get_phone_number)，两边暂未统一；全自动接码版完善时一并收口。
@@ -35,6 +38,7 @@ from config import (
     HERO_SMS_API_BASE, HERO_SMS_API_KEY, HERO_SMS_COUNTRY_PREFER,
     HERO_SMS_MAXPRICE_OPENAI, HERO_SMS_MINPRICE_OPENAI, HERO_SMS_COUNTRY_OPENAI,
     SMSMAN_API_BASE, SMSMAN_TOKEN,
+    LIYE_COUNTRY_BLACKLIST, LIYE_MAX_CARDS_PER_CLAIM, LIYE_AUTO_POSITION,
 )
 
 
@@ -46,13 +50,14 @@ def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=
     smsman_app: sms-man 的 application_id(数字)或 code/名(自动解析)；None=不启用 sms-man。
     smsman_country: sms-man country_id，'0'=自动按价格升序逐国试；smsman_maxprice: 价格上限(USD)，''=不限。
     smsman_blacklist: sms-man country_id 黑名单(自动逐国时跳过)。
-    provider: auto / smsman / firefox / hero；非 auto 时只使用指定平台。"""
+    provider: auto / smsman / firefox / hero / liye；非 auto 时只使用指定平台。"""
     # Auto rotates the configured vendors and falls through immediately on
     # no-stock/configuration errors. Explicit providers remain single-vendor.
     provider = str(provider or "auto").strip().lower().replace("-", "")
-    aliases = {"smsman": "smsman", "firefoxfun": "firefox", "hero": "hero", "herosms": "hero", "custom": "custom", "auto": "auto"}
+    aliases = {"smsman": "smsman", "firefoxfun": "firefox", "hero": "hero", "herosms": "hero",
+               "liye": "liye", "custom": "custom", "auto": "auto"}
     provider = aliases.get(provider, provider)
-    if provider not in {"auto", "smsman", "firefox", "hero", "custom"}:
+    if provider not in {"auto", "smsman", "firefox", "hero", "liye", "custom"}:
         raise ValueError(f"unknown SMS provider: {provider}")
 
     if provider == "custom":
@@ -146,6 +151,8 @@ def get_phone(project_id, hero_service, country_prefer=("",), country_blacklist=
         if res:
             full_phone, pkey = res
             return full_phone, "", pkey
+    if provider == "liye":
+        return _liye_get_phone(list(country_blacklist) or list(LIYE_COUNTRY_BLACKLIST))
     raise RuntimeError("get phone failed: 所有平台都没号")
 
 
@@ -158,6 +165,8 @@ def get_code(pkey, max_wait=180, interval=5):
         return _smsman_get_code(pkey, max_wait, interval)
     if str(pkey).startswith("hero_"):
         return _hero_get_code(pkey, max_wait, interval)
+    if str(pkey).startswith("liye_"):
+        return _liye_get_code(pkey, max_wait, interval)
     start = time.time()
     while time.time() - start < max_wait:
         try:
@@ -185,6 +194,9 @@ def release(pkey):
         return
     if str(pkey).startswith("hero_"):
         _hero_release(pkey)
+        return
+    if str(pkey).startswith("liye_"):
+        _liye_release(pkey)
         return
     try:
         requests.get(SMS_API_BASE, params={"act": "cancelPhone", "token": SMS_TOKEN, "pkey": pkey}, timeout=10)
@@ -381,6 +393,51 @@ def _hero_release(pkey):
         pass
 
 
+# ---------------- LIYE (liye.5x20.cn, 卡密式) ----------------
+def _liye_get_phone(country_blacklist=()):
+    """LIYE 取号(ChatGPT/Codex 专用，service=chatai)：claim 卡密 → 取号 →
+    黑名单号段优先 replace 换号(不耗次数)，失败再取消换卡。"""
+    from common import liye_sms
+
+    if not liye_sms.has_cards():
+        raise RuntimeError("get phone failed: liye 未配置卡密（LIYE_CARDS 或 runtime/state/liye_cards.txt）")
+    blacklist = {str(b) for b in (country_blacklist or ()) if str(b).strip()}
+    phone, _, pkey = liye_sms.claim(max_cards=1, service="chatai")
+    for _ in range(max(1, LIYE_MAX_CARDS_PER_CLAIM)):
+        if not blacklist or not any(phone.startswith(b) for b in blacklist):
+            return phone, "", pkey
+        print(f"  [liye] +{phone} 号段命中黑名单({','.join(sorted(blacklist))})，换号重试")
+        res = liye_sms.replace(pkey)
+        if res:
+            phone, _, pkey = res
+            continue
+        print("  [liye] 换号失败(冷却/无号)，取消退回换下一张卡")
+        _liye_release(pkey)
+        try:
+            phone, _, pkey = liye_sms.claim(max_cards=1, service="chatai")
+        except RuntimeError:
+            break
+    if not blacklist or not any(phone.startswith(b) for b in blacklist):
+        return phone, "", pkey
+    _liye_release(pkey)
+    raise RuntimeError(f"get phone failed: liye 分到的号(+{phone})均在黑名单，已退回")
+
+
+def _liye_get_code(pkey, max_wait=180, interval=5):
+    from common import liye_sms
+
+    return liye_sms.get_code(pkey, max_wait, interval)
+
+
+def _liye_release(pkey):
+    from common import liye_sms
+
+    try:
+        liye_sms.release(pkey)
+    except Exception as e:
+        print(f"  [liye] release err: {str(e)[:80]}")
+
+
 # ---------------- sms-man.com (API v2.0) ----------------
 _SMSMAN_APP_CACHE = {}  # 原始 app 值(str) -> 解析出的数字 application_id
 _SMSMAN_FALLBACK_CURSOR = 0
@@ -396,6 +453,19 @@ def _auto_provider_order(project_id, smsman_app, hero_service):
         configured.append("smsman")
     if HERO_SMS_API_KEY and hero_service:
         configured.append("hero")
+    liye_on = False
+    try:
+        from common import liye_sms
+
+        liye_on = liye_sms.has_cards()
+    except Exception:
+        liye_on = False
+    if liye_on:
+        # LIYE 卡密式：默认排最后兜底；LIYE_AUTO_POSITION=first 时优先消耗卡密
+        if str(LIYE_AUTO_POSITION).strip().lower() == "first":
+            configured.insert(0, "liye")
+        else:
+            configured.append("liye")
     if not configured:
         return []
     global _AUTO_PROVIDER_CURSOR

@@ -2193,6 +2193,270 @@ function selectScript(id){
   restoreScriptDraft(curSrc);
 }
 
+// ---------------------------------------------------------------- Codex OAuth task: pending asset accounts
+
+const OAUTH_PENDING_CREDENTIAL_LABELS = {
+  oauth:'OAuth Token', session:'Session', cookies:'Cookie', pool:'邮箱池', none:'无凭据',
+};
+
+let oauthPendingAccounts = [];
+
+function setOauthPendingState(text, kind=''){
+  const state = $('#oauth-pending-state');
+  if(!state) return;
+  state.textContent = text;
+  state.className = kind;
+}
+
+function selectedOauthPendingAccounts(){
+  const emails = new Set(
+    Array.from(document.querySelectorAll('#oauth-pending-list input[type="checkbox"]:checked'))
+      .map(item=>item.dataset.email).filter(Boolean)
+  );
+  return oauthPendingAccounts.filter(account=>emails.has(account.email));
+}
+
+function syncOauthPendingControls(){
+  const rows = Array.from(document.querySelectorAll('#oauth-pending-list input[type="checkbox"]'));
+  const checked = rows.filter(item=>item.checked).length;
+  const allBtn = $('#btn-oauth-pending-all');
+  const clearBtn = $('#btn-oauth-pending-clear');
+  const runBtn = $('#btn-oauth-pending-run');
+  if(allBtn) allBtn.disabled = !rows.some(item=>!item.disabled) || checked === rows.filter(item=>!item.disabled).length;
+  if(clearBtn) clearBtn.disabled = !checked;
+  if(runBtn) runBtn.disabled = !checked;
+}
+
+function renderOauthPendingAccounts(accounts){
+  const list = $('#oauth-pending-list');
+  if(!list) return;
+  oauthPendingAccounts = Array.isArray(accounts) ? accounts : [];
+  list.innerHTML = '';
+  if(!oauthPendingAccounts.length){
+    list.hidden = true;
+    setOauthPendingState('没有未导入 SUB2API 的 ChatGPT 账号', 'ok');
+    syncOauthPendingControls();
+    return;
+  }
+  for(const account of oauthPendingAccounts){
+    const hasCookie = !!account.cookie_file;
+    const row = document.createElement('label');
+    row.className = 'oauth-pending-row';
+    const type = (account.credentials && account.credentials[0]) || 'none';
+    const trial = account.plus_trial || 'unknown';
+    const trialLabel = trial === 'eligible' ? 'Plus 0元资格' : (trial === 'ineligible' ? '无Plus资格' : `Plus:${trial}`);
+    const cookieName = hasCookie ? String(account.cookie_file).split(/[\\/]/).pop() : '无 Cookie 文件';
+    const escaped = String(account.email).replace(/"/g,'&quot;');
+    row.innerHTML = `<input type="checkbox" data-email="${escaped}" ${hasCookie ? '' : 'disabled'}>` +
+      `<span class="email" title="${escaped}">${account.email}</span>` +
+      `<span class="tag ${type}">${OAUTH_PENDING_CREDENTIAL_LABELS[type] || type}</span>` +
+      `<span class="plus-tag ${trial === 'eligible' ? 'eligible' : ''}">${trialLabel}</span>` +
+      `<span class="plus-tag">${account.status || 'unknown'}</span>` +
+      `<span class="cookie ${hasCookie ? '' : 'missing'}" title="${hasCookie ? String(account.cookie_file).replace(/"/g,'&quot;') : 'oauth_codex 需要 cookie 文件登录'}">${cookieName}</span>`;
+    list.appendChild(row);
+  }
+  list.hidden = false;
+  list.querySelectorAll('input[type="checkbox"]').forEach(item=>{
+    item.addEventListener('change', syncOauthPendingControls);
+  });
+  syncOauthPendingControls();
+}
+
+async function loadOauthPendingAccounts(){
+  const button = $('#btn-oauth-pending-query');
+  if(!button) return;
+  button.disabled = true;
+  setOauthPendingState('正在查询资产报告…');
+  try{
+    const response = await fetch('/api/oauth-codex/pending-accounts');
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `查询失败 (${response.status})`);
+    renderOauthPendingAccounts(data.accounts || []);
+    const imported = data.imported || 0;
+    const total = data.total || (data.accounts || []).length + imported;
+    setOauthPendingState(
+      `未导入 ${(data.accounts || []).length} / 共 ${total}（已导入 ${imported}）`,
+      (data.accounts || []).length ? 'ok' : ''
+    );
+  }catch(error){
+    setOauthPendingState(error.message || String(error), 'bad');
+  }finally{
+    button.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------- LIYE 卡密池 (oauth_codex 表单)
+
+function renderLiyeCardsSummary(pool, summaryId='oauth-liye-summary'){
+  const summary = $(`#${summaryId}`);
+  if(!summary) return;
+  const total = pool.total || 0;
+  if(!total){
+    summary.textContent = '卡池为空';
+    summary.className = 'bad';
+    return;
+  }
+  summary.className = (pool.available || 0) ? '' : 'bad';
+  summary.textContent = `总 ${total} · 可用 ${pool.available || 0} / 占用 ${pool.in_use || 0} / 冷却 ${pool.cooldown || 0} / 已用尽 ${pool.exhausted || 0}`
+    + (pool.invalid ? ` / 无效 ${pool.invalid}` : '');
+}
+
+async function loadLiyeCardsPool(summaryId='oauth-liye-summary'){
+  try{
+    const response = await fetch('/api/sms/liye');
+    const pool = await readJsonResponse(response);
+    if(!response.ok) throw new Error(pool.error || `HTTP ${response.status}`);
+    renderLiyeCardsSummary(pool, summaryId);
+    return pool;
+  }catch(error){
+    const summary = $(`#${summaryId}`);
+    if(summary){ summary.textContent = '读取失败'; summary.className = 'bad'; }
+    return null;
+  }
+}
+
+async function importLiyeCards(inputId, summaryId, messageId, buttonId){
+  const input = $(`#${inputId}`);
+  const message = $(`#${messageId}`);
+  const text = input.value.trim();
+  message.className = '';
+  if(!text){
+    message.textContent = '请先粘贴卡密（每行一张，可多张）';
+    message.className = 'bad';
+    return;
+  }
+  const button = $(`#${buttonId}`);
+  button.disabled = true;
+  try{
+    const response = await fetch('/api/sms/liye', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text}),
+    });
+    const result = await readJsonResponse(response);
+    if(!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    renderLiyeCardsSummary(result, summaryId);
+    message.textContent = `新增 ${result.added}，已存在 ${result.skipped}，格式错误 ${result.bad}`;
+    message.className = result.bad ? 'bad' : '';
+    if(result.added) input.value = '';
+  }catch(error){
+    message.textContent = error.message || String(error);
+    message.className = 'bad';
+  }finally{
+    button.disabled = false;
+  }
+}
+
+async function recoverLiyeCards(summaryId, messageId, buttonId){
+  const message = $(`#${messageId}`);
+  const button = $(`#${buttonId}`);
+  button.disabled = true;
+  message.className = '';
+  message.textContent = '正在逐张核对平台订单状态，可能需要几十秒...';
+  try{
+    const response = await fetch('/api/sms/liye/recover', {method:'POST'});
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const result = data.result || {};
+    renderLiyeCardsSummary(data.summary || {}, summaryId);
+    const parts = [`核对 ${result.checked || 0} 张`];
+    if(result.recovered) parts.push(`恢复可用 ${result.recovered}`);
+    if(result.exhausted) parts.push(`确认已用尽 ${result.exhausted}`);
+    if(result.still_busy) parts.push(`仍在冷却 ${result.still_busy}`);
+    if(result.skipped_active) parts.push(`任务使用中跳过 ${result.skipped_active}`);
+    if(result.failed) parts.push(`核对失败 ${result.failed}`);
+    message.textContent = parts.join('，');
+    message.className = (result.failed || result.still_busy) ? 'bad' : '';
+  }catch(error){
+    message.textContent = error.message || String(error);
+    message.className = 'bad';
+  }finally{
+    button.disabled = false;
+  }
+}
+
+function streamOauthPendingRun(runId, log){
+  return new Promise(resolve=>{
+    const stream = new EventSource(`/api/logs/${runId}`);
+    evtSrc = stream;
+    stream.onmessage = e=>{
+      log.textContent += e.data+'\n';
+      log.scrollTop = log.scrollHeight;
+    };
+    stream.addEventListener('done', e=>{
+      let result = {};
+      try{ result = JSON.parse(e.data); }catch(err){}
+      stream.close();
+      if(evtSrc === stream){ evtSrc = null; curRun = null; }
+      $('#btn-stop').disabled = true;
+      resolve(result);
+    });
+    stream.onerror = ()=>{
+      stream.close();
+      const interrupted = evtSrc === stream;
+      if(interrupted){ evtSrc = null; curRun = null; }
+      $('#btn-stop').disabled = true;
+      resolve({returncode: interrupted ? -1 : null, interrupted});
+    };
+  });
+}
+
+async function runOauthPendingAccounts(){
+  if(curRun && evtSrc){ evtSrc.close(); evtSrc = null; curRun = null; }
+  const selected = selectedOauthPendingAccounts().filter(account=>account.cookie_file);
+  if(!selected.length){ setOauthPendingState('请先勾选带 Cookie 文件的账号', 'bad'); return; }
+  if(curSrc?.id !== 'oauth_codex') return;
+  const baseArgs = collectArgs(curSrc);
+  delete baseArgs['--cookie'];
+  const log = $('#log');
+  log.textContent = '';
+  $('#log-title').textContent = `运行日志 — ${curSrc.title}（批量授权导入 ${selected.length} 个账号）`;
+  setRunState('running', `批量运行中 0/${selected.length}`);
+  let successCount = 0;
+  let failCount = 0;
+  let stopped = false;
+  for(let i=0; i<selected.length; i++){
+    const account = selected[i];
+    log.textContent += `\n===== [${i+1}/${selected.length}] ${account.email} =====\n`;
+    log.scrollTop = log.scrollHeight;
+    const args = Object.assign({}, baseArgs, {'--cookie': account.cookie_file});
+    let launch;
+    try{
+      launch = await (await fetch('/api/run', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({script:'oauth_codex', args}),
+      })).json();
+    }catch(error){
+      log.textContent += `启动失败: ${error.message || error}\n`;
+      failCount++;
+      continue;
+    }
+    if(launch.error){
+      log.textContent += `启动失败: ${launch.error}\n`;
+      failCount++;
+      continue;
+    }
+    curRun = launch.run_id;
+    $('#cmd-preview').textContent = '$ '+launch.cmd;
+    $('#btn-stop').disabled = false;
+    const result = await streamOauthPendingRun(launch.run_id, log);
+    if(result.stopped){ stopped = true; break; }
+    if(result.returncode === 0) successCount++;
+    else failCount++;
+    setRunState('running', `批量运行中 ${i+1}/${selected.length}`);
+    pollStatus();
+  }
+  $('#btn-stop').disabled = true;
+  if(stopped) setRunState('stopped', '已停止');
+  else if(failCount === 0) setRunState('success', `全部完成 (${successCount})`);
+  else setRunState('failed', `成功 ${successCount} / 失败 ${failCount}`);
+  log.textContent += `\n[webui] 批量授权导入结束：成功 ${successCount}，失败 ${failCount}${stopped ? '，已手动停止' : ''}\n`;
+  log.scrollTop = log.scrollHeight;
+  pollStatus();
+  loadOauthPendingAccounts();
+}
+
 // ---------------------------------------------------------------- 渲染表单
 function renderArgField(a){
   const f = document.createElement('div');
@@ -2279,6 +2543,69 @@ function renderForm(s){
     custom.querySelector('#single-custom-sms-import').onclick = ()=>importCustomSmsPoolInto(
       'single-custom-sms-input', 'single-custom-sms-summary',
       'single-custom-sms-message', 'single-custom-sms-import'
+    );
+  }
+
+  // Codex OAuth task: query asset accounts not yet imported to SUB2API and run
+  // the authorization flow for the selected ones (sequentially, one per cookie).
+  if(s.id === 'oauth_codex'){
+    const pending = document.createElement('div');
+    pending.className = 'oauth-pending';
+    pending.innerHTML = `<div class="oauth-pending-head">
+        <span>资产账号查询（未导入 SUB2API 的 ChatGPT 账号）</span>
+        <small id="oauth-pending-state">尚未查询</small>
+      </div>
+      <div class="oauth-pending-actions">
+        <button id="btn-oauth-pending-query" class="btn-secondary" type="button">查询未导入账号</button>
+        <button id="btn-oauth-pending-all" class="btn-secondary" type="button" disabled>全选</button>
+        <button id="btn-oauth-pending-clear" class="btn-secondary" type="button" disabled>清空</button>
+        <button id="btn-oauth-pending-run" class="btn-run" type="button" disabled>选中账号授权导入</button>
+      </div>
+      <div id="oauth-pending-list" class="oauth-pending-list" hidden></div>`;
+    p.appendChild(pending);
+    pending.querySelector('#btn-oauth-pending-query').onclick = loadOauthPendingAccounts;
+    pending.querySelector('#btn-oauth-pending-all').onclick = ()=>{
+      $$('#oauth-pending-list input[type="checkbox"]:not(:disabled)').forEach(item=>{ item.checked = true; });
+      syncOauthPendingControls();
+    };
+    pending.querySelector('#btn-oauth-pending-clear').onclick = ()=>{
+      $$('#oauth-pending-list input[type="checkbox"]').forEach(item=>{ item.checked = false; });
+      syncOauthPendingControls();
+    };
+    pending.querySelector('#btn-oauth-pending-run').onclick = runOauthPendingAccounts;
+
+    // LIYE card import: shown only when the sms-provider select picks "liye".
+    const liye = document.createElement('details');
+    liye.className = 'custom-sms-import';
+    liye.id = 'oauth-liye-import';
+    liye.hidden = true;
+    liye.innerHTML = `<summary>LIYE 卡密池 <span id="oauth-liye-summary">尚未读取</span></summary>
+      <label class="plus-field plus-field-wide">
+        <span>卡密（每行一张，支持多张，自动去重；GPT-/CZ-=ChatGPT，GOO-=Gmail）</span>
+        <textarea id="oauth-liye-input" spellcheck="false" autocomplete="off" placeholder="GPT-JSE5-D62M-3Q7D-CVQ2&#10;CZ-XXXX-XXXX-XXXX-XXXX"></textarea>
+      </label>
+      <div class="custom-sms-actions">
+        <button id="btn-oauth-liye-import" class="btn-secondary" type="button">导入卡密</button>
+        <button id="btn-oauth-liye-recover" class="btn-secondary" type="button">检查恢复</button>
+        <span id="oauth-liye-message" role="status" aria-live="polite"></span>
+      </div>`;
+    p.appendChild(liye);
+    const providerSelect = $('#f_sms-provider');
+    const syncLiyeVisibility = ()=>{
+      const isLiye = providerSelect && providerSelect.value === 'liye';
+      liye.hidden = !isLiye;
+      if(isLiye) loadLiyeCardsPool('oauth-liye-summary');
+    };
+    if(providerSelect) providerSelect.addEventListener('change', syncLiyeVisibility);
+    syncLiyeVisibility();
+    liye.addEventListener('toggle', event=>{
+      if(event.currentTarget.open) loadLiyeCardsPool('oauth-liye-summary');
+    });
+    liye.querySelector('#btn-oauth-liye-import').onclick = ()=>importLiyeCards(
+      'oauth-liye-input', 'oauth-liye-summary', 'oauth-liye-message', 'btn-oauth-liye-import'
+    );
+    liye.querySelector('#btn-oauth-liye-recover').onclick = ()=>recoverLiyeCards(
+      'oauth-liye-summary', 'oauth-liye-message', 'btn-oauth-liye-recover'
     );
   }
 

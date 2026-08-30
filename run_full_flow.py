@@ -501,8 +501,8 @@ def main():
     ap.add_argument("--codex-phone", default="",
                     help="自定义手机号(E.164)：自动填写并等待手动输入验证码")
     ap.add_argument("--codex-sms-provider",
-                    choices=["auto", "custom", "hero", "smsman", "firefox"],
-                    default="auto", help="Codex add-phone 接码平台")
+                    choices=["auto", "custom", "hero", "smsman", "firefox", "liye"],
+                    default="auto", help="Codex add-phone 接码平台；auto 含 liye(配卡密才启用)")
     ap.add_argument("--codex-timeout", type=int, default=120,
                     help="Codex OAuth 授权捕获超时(秒)")
     ap.add_argument("--codex-phone-skip", type=int, default=0,

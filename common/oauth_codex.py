@@ -580,7 +580,8 @@ async def handle_add_phone(
     成功(离开 add-phone)返回 True。
 
     接码 provider 顺序：sms-man.com 优先(配 SMSMAN_TOKEN 即启用，SMS 直收，匹配本函数
-    自动填号→输码路径) → firefox.fun → hero-sms。未配 sms-man 时仅走后两者，OpenAI 对普通
+    自动填号→输码路径) → firefox.fun → hero-sms → liye(卡密式，配 LIYE_CARDS 或
+    runtime/state/liye_cards.txt 即启用)。未配 sms-man 时仅走后几者，OpenAI 对普通
     虚拟号风控严，命中率低，可改用 --codex-manual-phone 手动填号收码。
     换号次数/单号等码超时可经环境变量调：CODEX_ADDPHONE_ATTEMPTS(默认2)、CODEX_SMS_TIMEOUT(默认150)。
     OpenAI 对虚拟号拒收率高，但接码花钱，默认只换 2 次(够碰运气、不烧号)。

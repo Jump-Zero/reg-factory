@@ -68,8 +68,8 @@ async def main():
                         help="add-phone 半自动:脚本填该号(E.164,如 +8618001623966)+选 WhatsApp+发送,你只手输码")
     parser.add_argument("--phone-skip", type=int, default=0,
                         help="先赌免手机直连的次数(默认0=直接一次性接码,不赌免手机)：>0 时每次关窗重开+重登重摇风控，弹手机就跳过，用尽才接码")
-    parser.add_argument("--sms-provider", choices=["auto", "custom", "smsman", "firefox", "hero"], default="auto",
-                        help="自动接码平台；auto 按 sms-man、firefox.fun、hero-sms 顺序")
+    parser.add_argument("--sms-provider", choices=["auto", "custom", "smsman", "firefox", "hero", "liye"], default="auto",
+                        help="自动接码平台；auto 按 sms-man、firefox.fun、hero-sms、liye(卡密式,配了才启用) 轮换")
     parser.add_argument("--skip-cpa", action="store_true",
                         help="不把 OAuth 凭据推到 CPA(默认 CPA 配好就推,带真 refresh_token)")
     parser.add_argument("--auth-url-source", choices=["sub2", "cpa"],

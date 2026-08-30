@@ -392,7 +392,7 @@ async def main():
     parser.add_argument("--codex-phone", default="",
                         help="自定义手机号(E.164)：自动填写并等待手动输入验证码")
     parser.add_argument("--codex-sms-provider",
-                        choices=["auto", "custom", "hero", "smsman", "firefox"],
+                        choices=["auto", "custom", "hero", "smsman", "firefox", "liye"],
                         default="auto")
     parser.add_argument("--codex-timeout", type=int, default=120)
     parser.add_argument("--codex-phone-skip", type=int, default=0)
