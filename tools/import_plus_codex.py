@@ -86,6 +86,11 @@ async def _bootstrap_session(context, page, record: dict) -> dict:
             break
         await asyncio.sleep(1.5)
     if not isinstance(session, dict) or not session.get("accessToken"):
+        # 拿不到 session 先判封禁：封禁账号要明确报错并隔离，而不是笼统报 cookie 失效
+        banned = await ox.detect_account_banned(page)
+        if banned:
+            raise RuntimeError(
+                f"账号已封禁/停用（检测到: {banned}），已停止导入并按封禁处理")
         raise RuntimeError("直接 token 不是有效的 ChatGPT session cookie；普通 access token 不能直接兑换 Codex refresh_token")
     return session
 
@@ -295,6 +300,7 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
         "plan_type": record.get("plan_type") or "",
         "sub2api_account_id": None,
         "invitee_email": "",
+        "banned": False,
         "message": "",
         "finished_at": "",
     }
@@ -398,6 +404,11 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
         )
     except Exception as exc:
         result["message"] = str(exc)[:240]
+        if ox.banned_marker_in(result["message"]):
+            result["banned"] = True
+            print(f"  [BAN] {masked} 账号封禁，隔离资产: {result['message']}")
+            await ox.quarantine_banned_account(
+                email, f"plus_codex 导入检测到封禁: {result['message']}")
         print(f"  [FAIL] {masked} stage={result['stage']}: {result['message']}")
     finally:
         result["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -467,9 +478,10 @@ async def run(args):
 
     success = sum(item["status"] == "success" for item in results)
     verified = sum(item["phone_status"] == "verified" for item in results)
+    banned = sum(bool(item.get("banned")) for item in results)
     print(
         f"\n[batch] 完成：成功 {success}/{len(results)}，本次手机接码验证 {verified}，"
-        f"失败 {len(results) - success}"
+        f"封禁 {banned}，失败 {len(results) - success}"
     )
     print(f"[batch] 结果已写入（不含密码和 token）: {result_path}")
     if output_path:

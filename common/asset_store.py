@@ -735,6 +735,37 @@ def _no_graph_mailboxes() -> list[dict]:
     return records
 
 
+def find_mailbox_credentials(email: str) -> dict | None:
+    """按账号邮箱查找邮箱凭据记录（供 Codex OAuth 邮箱取码用）。
+
+    先在 emails.txt / outlook_no_graph.txt 里精确匹配邮箱；
+    找不到再按去掉 +alias 的 root 匹配（子账号共用母邮箱收码）。
+    只返回带可用凭据的记录：password，或 refresh_token+client_id。
+    """
+    normalized = str(email or "").strip().lower()
+    if not normalized or "@" not in normalized:
+        return None
+    pool: dict[str, dict] = {}
+    for record in (*_mailboxes(), *_no_graph_mailboxes()):
+        key = str(record.get("email") or "").strip().lower()
+        if key and key not in pool:
+            pool[key] = record
+    candidates = [normalized]
+    local, sep, domain = normalized.partition("@")
+    if sep:
+        root = local.split("+", 1)[0] + "@" + domain
+        if root and root != normalized:
+            candidates.append(root)
+    for key in candidates:
+        record = pool.get(key)
+        if record and (
+            record.get("password")
+            or (record.get("refresh_token") and record.get("client_id"))
+        ):
+            return dict(record)
+    return None
+
+
 def registered_mailbox_usage() -> dict[str, tuple[str, ...]]:
     """Return mailboxes that were reserved or attempted for another platform."""
     usage: dict[str, set[str]] = {}

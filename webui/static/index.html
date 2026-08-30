@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
-<link rel="stylesheet" href="/static/style.css?v=20260830-oauth-2">
+<link rel="stylesheet" href="/static/style.css?v=20260830-oauth-5">
 </head>
 <body>
 <header class="topbar">
@@ -361,6 +361,11 @@
             title="释放各平台注册未完成而锁死在 reserved 状态的邮箱（保留已成功 ok 记录）">回收 Reserved 邮箱</button>
           <span id="mailpool-msg" class="env-msg"></span>
         </div>
+        <div>
+          <button id="btn-mailpool-stats" class="btn-secondary" type="button" aria-expanded="false"
+            aria-controls="mailpool-stats-box">查看用量统计</button>
+        </div>
+        <div id="mailpool-stats-box" class="mailpool-stats" hidden></div>
       </div>
     </section>
 
@@ -706,6 +711,6 @@
 
 <div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
 
-<script src="/static/app.js?v=20260830-oauth-3"></script>
+<script src="/static/app.js?v=20260830-oauth-9"></script>
 </body>
 </html>

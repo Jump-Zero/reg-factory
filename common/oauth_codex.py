@@ -42,6 +42,92 @@ DEFAULT_CONCURRENCY = 10
 DEFAULT_PRIORITY = 1
 DEFAULT_RATE_MULTIPLIER = 1
 
+# ChatGPT 账号封禁/停用标记（在 common/asset_scanner._BANNED_MARKERS 基础上
+# 扩充页面文案 "account has been deactivated" 与 JSON 下划线形态）。
+# 授权链路在 session 拿不到 accessToken 时无法区分「已登出」与「账号被封」，
+# 用页面文案 + session 接口响应体兜底识别，命中则按封禁处理而不是当成 cookie 失效。
+BANNED_MARKERS = (
+    "account_deactivated",
+    "account deactivated",
+    "account has been deactivated",
+    "account_disabled",
+    "account disabled",
+    "account_suspended",
+    "account suspended",
+    "your account has been suspended",
+    "your account has been banned",
+)
+
+
+def banned_marker_in(text) -> str:
+    """返回 text 中命中的第一个封禁标记；未命中返回空串。"""
+    lowered = str(text or "").lower()
+    for marker in BANNED_MARKERS:
+        if marker in lowered:
+            return marker
+    return ""
+
+
+async def detect_account_banned(page) -> str:
+    """登录态异常时检测账号是否封禁/停用，返回命中的标记（未封禁返回空串）。
+
+    依次探测：页面 URL → 页面正文 → /api/auth/session 响应体。
+    """
+    try:
+        marker = banned_marker_in(getattr(page, "url", "") or "")
+    except Exception:
+        marker = ""
+    if marker:
+        return marker
+    try:
+        body = await page.inner_text("body", timeout=3000)
+    except Exception:
+        body = ""
+    marker = banned_marker_in(body)
+    if marker:
+        return marker
+    try:
+        payload = await page.evaluate(
+            "() => fetch('/api/auth/session',{credentials:'include'}).then(r=>r.text()).catch(()=>'')")
+    except Exception:
+        return ""
+    return banned_marker_in(payload)
+
+
+async def quarantine_banned_account(email, reason: str) -> dict:
+    """把检测到封禁的 chatgpt 账号资产（cookie/token）移入隔离区，避免后续复用。
+
+    best-effort：找不到资产或归档失败都只打 WARN，不抛异常影响主流程。
+    """
+    cleaned = str(email or "").strip().lower()
+    if not cleaned:
+        return {"moved_accounts": 0}
+    try:
+        from common import asset_store
+
+        return await asyncio.to_thread(
+            asset_store.archive_asset_results,
+            [{"platform": "chatgpt", "email": cleaned, "source": ""}],
+            "quarantine",
+            str(reason or "")[:200],
+        )
+    except Exception as exc:
+        print(f"  [WARN] 封禁资产隔离失败({cleaned}): {str(exc)[:120]}")
+        return {"moved_accounts": 0, "error": str(exc)[:160]}
+
+
+async def report_banned_account(page, email="") -> str:
+    """session 不可用时的封禁处置入口：识别封禁则打印、隔离资产并返回标记。
+
+    未检测到封禁信号返回空串（调用方继续按登出/cookie 失效处理）。
+    """
+    hit = await detect_account_banned(page)
+    if not hit:
+        return ""
+    print(f"  [BAN] 账号已封禁/停用（检测到: {hit}），隔离资产并跳过后续流程")
+    await quarantine_banned_account(email, f"codex 授权检测到封禁: {hit}")
+    return hit
+
 
 def _totp_code(secret, timestamp=None):
     """Generate a six-digit RFC 6238 code without adding a dependency."""

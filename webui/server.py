@@ -2911,6 +2911,168 @@ async def api_mailpool_recycle_reserved(request: Request):
     return {"ok": True, "result": result}
 
 
+# ============================================================ 邮箱池用量统计
+_STATS_PLATFORMS = ("chatgpt", "grok", "kiro", "claude", "github")
+_PERMANENT_BAN_MARKERS = ("account_deactivated", "account_suspended", "account_banned")
+
+
+def _data_file(*parts):
+    root = os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or ROOT
+    return os.path.join(root, *parts)
+
+
+def _read_marker_status(path):
+    """读 used/error 标记文件 -> {email_lower: 最新状态}，靠后的行覆盖靠前的。"""
+    latest = {}
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("----")
+                email = parts[0].strip().lower()
+                if not email:
+                    continue
+                status = "----".join(parts[2:]).strip().lower() if len(parts) >= 3 else ""
+                latest[email] = status
+    return latest
+
+
+def _read_plain_set(path):
+    """读 root_blocked / restricted 之类的列表文件，返回邮箱（或母邮箱 root）集合。"""
+    out = set()
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip().lower()
+                if line and not line.startswith("#"):
+                    out.add(line.split("----")[0].strip())
+    return out
+
+
+def _mailpool_families():
+    """扫描 emails.txt + _outlook_pool，构建母/子邮箱结构。
+    返回 (roots, children)：
+      roots    {root_lower: {"email": 代表地址, "children": set(子邮箱)}}
+      children {子邮箱_lower: root_lower}
+    """
+    from common.emails import registration_root
+    roots = {}
+    children = {}
+    if os.path.isfile(EMAILS_FILE):
+        with open(EMAILS_FILE, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                email = line.split("----")[0].strip().lower()
+                if not email or "@" not in email:
+                    continue
+                root = registration_root(email) or email
+                info = roots.setdefault(root, {"email": email, "children": set()})
+                if email != root:
+                    children[email] = root
+                    info["children"].add(email)
+    # GitHub 专用池并入母邮箱总集合（同一邮箱自动去重）
+    pool_dir = _data_file("_outlook_pool")
+    if os.path.isdir(pool_dir):
+        for name in sorted(os.listdir(pool_dir)):
+            if not name.lower().endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(pool_dir, name), encoding="utf-8") as f:
+                    d = _json.load(f)
+            except Exception:
+                continue
+            email = str((d or {}).get("email") or "").strip().lower()
+            if not email or "@" not in email:
+                continue
+            root = registration_root(email) or email
+            roots.setdefault(root, {"email": email, "children": set()})
+    return roots, children
+
+
+def _github_usage_stats(root_set, children):
+    """GitHub 独立数据源：已注册=cookies/github/accounts.txt；已封禁=受限落盘记录。"""
+    registered = set()
+    acct_path = _data_file("cookies", "github", "accounts.txt")
+    if os.path.isfile(acct_path):
+        with open(acct_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.strip().split("|")
+                if parts and parts[0].strip():
+                    registered.add(parts[0].strip().lower())
+    restricted = _read_plain_set(_data_file("runtime", "state", "github_restricted_emails.txt"))
+    registered_roots = {e for e in registered if e in root_set}
+    restricted_roots = {e for e in restricted if e in root_set}
+    return {
+        "registered_mothers": len(registered_roots),
+        "registered_children": 0,
+        "banned_mothers": len(restricted_roots),
+        "banned_children": 0,
+        "available_mothers": len(root_set - registered_roots - restricted_roots),
+        "available_children": len(children),
+    }
+
+
+def _platform_usage_stats(platform, root_set, children):
+    """单个平台在池上的 已注册/已封禁/剩余 统计（github 走独立数据源）。"""
+    from common.emails import registration_root
+    if platform == "github":
+        return _github_usage_stats(root_set, children)
+    ok_emails = set()
+    used_paths = [_data_file(f"emails_used_{platform}.txt")]
+    if platform == "claude":
+        used_paths.append(_data_file("emails_used.txt"))  # claude 遗留的无后缀 used 文件
+    for path in used_paths:
+        for email, status in _read_marker_status(path).items():
+            if status == "ok":
+                ok_emails.add(email)
+    error_status = _read_marker_status(_data_file(f"emails_error_{platform}.txt"))
+    banned_emails = {
+        e for e, s in error_status.items()
+        if any(m in s for m in _PERMANENT_BAN_MARKERS)
+    }
+    banned_roots = _read_plain_set(_data_file(f"emails_root_blocked_{platform}.txt"))
+    for e in banned_emails:
+        root = registration_root(e)
+        if root:
+            banned_roots.add(root)
+    registered_roots = set()
+    registered_children = 0
+    for e in ok_emails:
+        root = registration_root(e)
+        if not root:
+            continue
+        if e in children:
+            registered_children += 1
+        registered_roots.add(root)
+    banned_children = sum(1 for root in children.values() if root in banned_roots)
+    return {
+        "registered_mothers": len(registered_roots & root_set),
+        "registered_children": registered_children,
+        "banned_mothers": len({r for r in banned_roots if r in root_set}),
+        "banned_children": banned_children,
+        "available_mothers": len(root_set - registered_roots - banned_roots),
+        "available_children": max(0, len(children) - registered_children - banned_children),
+    }
+
+
+@app.get("/api/mailpool/stats")
+def api_mailpool_stats():
+    """邮箱池用量统计：母/子邮箱总量 + 各平台（chatgpt/grok/kiro/claude/github）
+    的已注册 / 已封禁 / 剩余可用数量。"""
+    roots, children = _mailpool_families()
+    root_set = set(roots)
+    return {
+        "mothers_total": len(root_set),
+        "children_total": len(children),
+        "families": sum(1 for info in roots.values() if info["children"]),
+        "platforms": {p: _platform_usage_stats(p, root_set, children) for p in _STATS_PLATFORMS},
+    }
+
+
 # ============================================================ Kiro → OmniRoute 导入
 @app.post("/api/kiro/omni-import")
 async def api_kiro_omni_import(request: Request):
@@ -3334,6 +3496,20 @@ async def api_liye_cards_recover():
 
     result = await asyncio.to_thread(liye_sms.recover_all)
     return {"result": result, "summary": await asyncio.to_thread(liye_sms.summary)}
+
+
+@app.post("/api/sms/liye/delete")
+async def api_liye_card_delete(request: Request):
+    data = await request.json()
+    code = str((data or {}).get("code") or "").strip()
+    if not code:
+        return JSONResponse({"error": "缺少卡密"}, status_code=400)
+    from common import liye_sms
+
+    ok, message = await asyncio.to_thread(liye_sms.remove_card, code)
+    if not ok:
+        return JSONResponse({"error": message}, status_code=409)
+    return {"removed": code, "summary": await asyncio.to_thread(liye_sms.summary)}
 
 
 def _gopay_error(exc: Exception):

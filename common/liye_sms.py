@@ -332,9 +332,11 @@ def _recover_stale(state):
                                        "expectedGeneration": active.get("activationGeneration") or 0})
                     c.update({"status": "available", "order_id": "",
                               "cooldown_until": 0, "updated_at": now})
-                except LiyeError:
+                except LiyeError as e:
+                    # 平台不允许取消（如订单仍在排队）：30 分钟后再看，避免空轮询
+                    wait = 1800 if e.code == "ORDER_NOT_CANCELLABLE" else 600
                     c.update({"status": "cooldown",
-                              "cooldown_until": now + 600, "updated_at": now})
+                              "cooldown_until": now + wait, "updated_at": now})
         except LiyeError:
             pass
     return state
@@ -366,11 +368,45 @@ def summary():
             counts[c.get("status") or "?"] = counts.get(c.get("status") or "?", 0) + 1
     return {"total": len(state["cards"]), **counts, "cards": [
         {"code": (c.get("code") or "")[:6] + "..." + (c.get("code") or "")[-4:],
-         "status": c.get("status"), "phone": c.get("phone"),
-         "order_id": c.get("order_id"),
-         "cooldown_until": c.get("cooldown_until")}
+         "full_code": c.get("code"),
+         "status": c.get("status"), "service": c.get("service"),
+         "phone": c.get("phone"), "order_id": c.get("order_id"),
+         "cooldown_until": c.get("cooldown_until"),
+         "updated_at": c.get("updated_at")}
         for c in state["cards"] if isinstance(c, dict)
     ]}
+
+
+def remove_card(code):
+    """WebUI 删除卡密：从状态文件与 liye_cards.txt 一并移除（避免下次 sync 复活）。
+    占用中的卡拒绝删除（可能有任务正在用）；.env LIYE_CARDS 配置的卡无法在此删除。
+    返回 (ok, message)，ok=False 时 message 为可展示的拒绝原因。"""
+    code = str(code or "").strip()
+    if not code:
+        return False, "缺少卡密"
+    if code in re.split(r"[,\s]+", str(LIYE_CARDS or "")):
+        return False, "该卡密由 .env LIYE_CARDS 配置，无法在此删除"
+    sync_cards()
+    with file_lock(_state_file()):
+        state = _load_state()
+        entry = _card_entry(state, code)
+        if entry is None:
+            return False, "卡密不存在"
+        if entry.get("status") == "in_use":
+            return False, "卡密正在被任务使用，请稍后或先「检查恢复」再删除"
+        state["cards"] = [c for c in state["cards"]
+                          if not (isinstance(c, dict) and c.get("code") == code)]
+        _save_state(state)
+    txt = _cards_import_file()
+    try:
+        with open(txt, encoding="utf-8") as f:
+            lines = [ln for ln in f if ln.strip() != code]
+        with open(txt, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except FileNotFoundError:
+        pass
+    _drop_session(code)
+    return True, ""
 
 
 def claim(max_cards=3, alloc_timeout=None, service="chatai"):
@@ -609,7 +645,8 @@ def recover_all(max_cards=30):
     """WebUI「检查恢复」：遍历 冷却 + 租期已过的占用 卡，逐张查平台真实订单后回退。
     不受懒恢复的租期/冷却门槛限制（冷却卡也查），但租期内的占用卡跳过
     （可能有任务正在用，避免误取消在途订单）。网络查询单张失败不中断整体。
-    返回 {checked, recovered, exhausted, still_busy, skipped_active, failed}。"""
+    返回 {checked, recovered, exhausted, still_busy, uncancellable,
+    skipped_active, failed, reasons}，reasons 为 {平台拒绝原因: 次数}。"""
     sync_cards()
     now = time.time()
     with file_lock(_state_file()):
@@ -625,7 +662,8 @@ def recover_all(max_cards=30):
             candidates.append(dict(c))
         candidates = candidates[:max(1, max_cards)]
     result = {"checked": 0, "recovered": 0, "exhausted": 0,
-              "still_busy": 0, "skipped_active": leased, "failed": 0}
+              "still_busy": 0, "uncancellable": 0, "skipped_active": leased,
+              "failed": 0, "reasons": {}}
     for snap in candidates:
         result["checked"] += 1
         code = snap.get("code")
@@ -646,8 +684,15 @@ def recover_all(max_cards=30):
                                        "expectedActivationId": active.get("activationId"),
                                        "expectedGeneration": active.get("activationGeneration") or 0})
                     outcome = "recovered"
-                except LiyeError:
-                    outcome = "still_busy"    # 平台冷却未到/确认中：继续挂 10 分钟冷却
+                except LiyeError as e:
+                    if e.code == "ORDER_NOT_CANCELLABLE":
+                        # 平台规则不允许取消（如订单仍在排队未分号）：
+                        # 单列并拉长冷却，避免每 10 分钟空轮询
+                        outcome = "uncancellable"
+                        msg = str(e) or "平台不允许取消该订单"
+                        result["reasons"][msg] = result["reasons"].get(msg, 0) + 1
+                    else:
+                        outcome = "still_busy"    # 平台冷却未到/确认中：继续挂 10 分钟冷却
         except LiyeError:
             outcome = "failed"                # 网络/登录失败：保持原状，下次再查
         result[outcome] += 1
@@ -664,6 +709,11 @@ def recover_all(max_cards=30):
                 elif outcome == "still_busy":
                     c.update({"status": "cooldown",
                               "cooldown_until": time.time() + 600,
+                              "updated_at": time.time()})
+                elif outcome == "uncancellable":
+                    # 平台不允许取消（订单卡在排队等平台推进）：30 分钟后再看
+                    c.update({"status": "cooldown",
+                              "cooldown_until": time.time() + 1800,
                               "updated_at": time.time()})
                 _save_state(state)
     return result

@@ -558,14 +558,52 @@ function toggleAssetScanColumns(platform){
   table.classList.toggle('outlook-view', isOutlook);
 }
 
+// 非邮箱平台(ChatGPT/Grok 等)账号按母邮箱堆叠：账号邮箱去掉 +alias 的 root 相同且 ≥2 个时折叠
+function assetAccountRoot(email){
+  const value = String(email || '').trim().toLowerCase();
+  const at = value.indexOf('@');
+  if(at <= 0) return '';
+  return value.slice(0, at).split('+', 1)[0] + value.slice(at);
+}
+
+function assetItemKey(item){
+  return `${item.platform || ''}|${String(item.email || '').toLowerCase()}|${String(item.source || '')}`;
+}
+
+function buildAssetStackIndex(items){
+  const childKeys = new Set();          // 被堆叠收纳、不单独成行的项（含 outlook 子邮箱）
+  const groupParents = new Map();       // 平台组母行 key -> {root, kids}
+  const groups = {};
+  (items || []).forEach(item=>{
+    if(item.platform === 'outlook'){
+      if(item.parent_email) childKeys.add(assetItemKey(item));  // 后端已标注的邮箱子行
+      return;                                                    // outlook 用后端母/子数据
+    }
+    const root = assetAccountRoot(item.email || item.source);
+    if(!root) return;
+    const key = `${item.platform || ''}|${root}`;
+    (groups[key] = groups[key] || []).push(item);
+  });
+  Object.entries(groups).forEach(([key, members])=>{
+    if(members.length < 2) return;
+    // 母行优先选邮箱恰好等于 root 的账号，否则取第一个
+    const parent = members.find(m => assetAccountRoot(m.email || m.source) === String(m.email || '').trim().toLowerCase()) || members[0];
+    const kids = members.filter(m => m !== parent);
+    groupParents.set(assetItemKey(parent), {root: key.slice(key.indexOf('|') + 1), kids});
+    kids.forEach(m=>childKeys.add(assetItemKey(m)));
+  });
+  return {childKeys, groupParents};
+}
+
 function updateAssetStatusSummary(){
   if(!assetScanData) return;
   const platform = $('#asset-scan-platform')?.value || 'all';
   const source = $('#asset-scan-source') ? $('#asset-scan-source').value : 'all';
+  const stack = buildAssetStackIndex(assetScanData.items || []);
   const items = (assetScanData.items || []).filter(item=>
     (platform === 'all' || item.platform === platform) &&
-    // 与表格口径一致：子邮箱收纳在母邮箱下，不单独计入汇总
-    !(item.platform === 'outlook' && item.parent_email) &&
+    // 与表格口径一致：被堆叠的子账号/子邮箱收纳在母行下，不单独计入汇总
+    !stack.childKeys.has(assetItemKey(item)) &&
     (source === 'all' || item.mail_source === source)
   );
   const counts = {};
@@ -588,10 +626,11 @@ function filteredAssetScanItems(){
   const platform = $('#asset-scan-platform').value;
   const status = $('#asset-scan-status').value;
   const source = $('#asset-scan-source') ? $('#asset-scan-source').value : 'all';
+  const stack = buildAssetStackIndex(assetScanData.items || []);
   return (assetScanData.items || []).filter(item=>
     (platform === 'all' || item.platform === platform) &&
-    // 子邮箱收纳在母邮箱行下展开查看，不再作为独立行显示（含列表末尾）
-    !(item.platform === 'outlook' && item.parent_email) &&
+    // 被堆叠收纳的子项（outlook 子邮箱 + 平台组子账号）在母行下展开查看，不再单独成行
+    !stack.childKeys.has(assetItemKey(item)) &&
     (status === 'all' ||
      (status === 'sub_imported' && item.sub2api_uploaded) ||
      (status === 'sub_not_imported' && !item.sub2api_uploaded) ||
@@ -619,18 +658,27 @@ function renderAssetScanTable(){
       allChildMap[key].push(item);
     }
   });
+  // 平台组堆叠索引（ChatGPT/Grok 等：母邮箱 root 相同 ≥2 个折叠为一组）
+  const stack = buildAssetStackIndex(assetScanData?.items || []);
   // 辅助函数：创建一行（复用渲染逻辑）
-  function createScanRow(item, isChild){
+  // group: 平台组信息（母行传入 {root, kids}）；parentItem: 子行所属母行的数据
+  function createScanRow(item, isChild, group, parentItem){
     const row = document.createElement('tr');
-    const isParentWithKids = !isChild && item.is_parent && (item.child_emails || []).length > 0;
+    // 母行判定：outlook 用后端 is_parent/child_emails；其他平台按母邮箱 root 分组结果
+    const isParentWithKids = !isChild && (
+      (item.platform === 'outlook' && item.is_parent && (item.child_emails || []).length > 0) ||
+      (!!group && group.kids.length > 0)
+    );
     if(isParentWithKids){
       row.className = 'asset-scan-row-parent';
-      row.dataset.parentEmail = (item.email || '').toLowerCase();
+      // 唯一父键（平台|邮箱），避免不同平台同邮箱时互相误展开
+      row.dataset.parentEmail = `${item.platform || ''}|${String(item.email || '').toLowerCase()}`;
       row.style.cursor = 'pointer';
     }
     if(isChild){
       row.className = 'asset-scan-row-child';
-      row.dataset.parentEmail = item.parent_email.toLowerCase();
+      const parentEmail = item.parent_email || (parentItem ? parentItem.email : '');
+      row.dataset.parentEmail = `${item.platform || (parentItem ? parentItem.platform : '')}|${String(parentEmail).toLowerCase()}`;
       row.style.display = 'none';
     }
     // 复选框列
@@ -651,26 +699,28 @@ function renderAssetScanTable(){
     const account = appendAssetScanCell(row, item.email || item.source, 'asset-scan-account');
     account.classList.add('col-account');
     account.title = item.source || '';
-    // 母/子邮箱标记
-    if(item.platform === 'outlook'){
-      if(isParentWithKids){
-        const pBadge = document.createElement('span');
-        pBadge.className = 'mail-split-badge parent';
-        pBadge.textContent = `母(${item.child_count || 0})`;
-        pBadge.title = `点击展开/折叠子邮箱`;
-        account.appendChild(pBadge);
-        const arrow = document.createElement('span');
-        arrow.className = 'mail-split-arrow';
-        arrow.textContent = '▶';
-        account.insertBefore(arrow, account.firstChild);
-        row._arrow = arrow;
-      } else if(isChild || item.parent_email){
-        const cBadge = document.createElement('span');
-        cBadge.className = 'mail-split-badge child';
-        cBadge.textContent = `子`;
-        cBadge.title = `子邮箱，母邮箱: ${item.parent_email}`;
-        account.appendChild(cBadge);
-      }
+    // 母/子标记：outlook 用后端字段；其他平台按母邮箱 root 分组堆叠
+    if(isParentWithKids){
+      const pBadge = document.createElement('span');
+      pBadge.className = 'mail-split-badge parent';
+      pBadge.textContent = item.platform === 'outlook'
+        ? `母(${item.child_count || 0})`
+        : `母(${group.kids.length})`;
+      pBadge.title = item.platform === 'outlook' ? `点击展开/折叠子邮箱` : `点击展开/折叠子账号`;
+      account.appendChild(pBadge);
+      const arrow = document.createElement('span');
+      arrow.className = 'mail-split-arrow';
+      arrow.textContent = '▶';
+      account.insertBefore(arrow, account.firstChild);
+      row._arrow = arrow;
+    } else if(isChild || item.parent_email){
+      const cBadge = document.createElement('span');
+      cBadge.className = 'mail-split-badge child';
+      cBadge.textContent = `子`;
+      cBadge.title = item.parent_email
+        ? `子邮箱，母邮箱: ${item.parent_email}`
+        : `子账号，母邮箱: ${parentItem ? parentItem.email : ''}`;
+      account.appendChild(cBadge);
     }
     // 分类
     const catCell = document.createElement('td');
@@ -766,22 +816,24 @@ function renderAssetScanTable(){
   }
 
   visible.forEach(item=>{
-    const isParentWithKids = item.is_parent && (item.child_emails || []).length > 0;
-    const row = createScanRow(item, false);
+    const group = stack.groupParents.get(assetItemKey(item));
+    const row = createScanRow(item, false, group, null);
     body.appendChild(row);
-    // 母邮箱行：紧接着插入子邮箱行（从完整数据中查找），并绑定展开/折叠
-    if(isParentWithKids){
-      const parentKey = (item.email || '').toLowerCase();
-      const children = allChildMap[parentKey] || [];
-      children.forEach(childItem=>{
-        const childRow = createScanRow(childItem, true);
-        body.appendChild(childRow);
+    // 母行：紧接着插入子行并绑定展开/折叠
+    // （outlook 用后端子邮箱数据；其他平台用 root 分组子账号，同样从完整数据查找）
+    const isOutlookParent = item.platform === 'outlook' && item.is_parent && (item.child_emails || []).length > 0;
+    const kids = isOutlookParent
+      ? (allChildMap[String(item.email || '').toLowerCase()] || [])
+      : (group ? group.kids : []);
+    if(isOutlookParent || (group && group.kids.length)){
+      kids.forEach(childItem=>{
+        body.appendChild(createScanRow(childItem, true, null, item));
       });
       row.addEventListener('click', ()=>{
         const expanded = row.classList.toggle('expanded');
         if(row._arrow) row._arrow.textContent = expanded ? '▼' : '▶';
         body.querySelectorAll('tr.asset-scan-row-child').forEach(childRow=>{
-          if(childRow.dataset.parentEmail === parentKey){
+          if(childRow.dataset.parentEmail === row.dataset.parentEmail){
             childRow.style.display = expanded ? '' : 'none';
           }
         });
@@ -2199,7 +2251,15 @@ const OAUTH_PENDING_CREDENTIAL_LABELS = {
   oauth:'OAuth Token', session:'Session', cookies:'Cookie', pool:'邮箱池', none:'无凭据',
 };
 
+// 资产扫描状态 -> 中文标签（banned 红色标出，见 style.css .status-banned）
+const OAUTH_PENDING_STATUS_LABELS = {
+  normal:'正常', unlock:'需解锁', banned:'已封禁', expired:'凭据过期',
+  restricted:'受限', invalid:'缺凭据', error:'检测异常', unknown:'未检测',
+};
+
 let oauthPendingAccounts = [];
+let oauthPendingChecking = false;
+let oauthPendingCheckTimer = null;
 
 function setOauthPendingState(text, kind=''){
   const state = $('#oauth-pending-state');
@@ -2222,9 +2282,11 @@ function syncOauthPendingControls(){
   const allBtn = $('#btn-oauth-pending-all');
   const clearBtn = $('#btn-oauth-pending-clear');
   const runBtn = $('#btn-oauth-pending-run');
+  const checkBtn = $('#btn-oauth-pending-check');
   if(allBtn) allBtn.disabled = !rows.some(item=>!item.disabled) || checked === rows.filter(item=>!item.disabled).length;
   if(clearBtn) clearBtn.disabled = !checked;
   if(runBtn) runBtn.disabled = !checked;
+  if(checkBtn) checkBtn.disabled = !checked || oauthPendingChecking;
 }
 
 function renderOauthPendingAccounts(accounts){
@@ -2251,7 +2313,7 @@ function renderOauthPendingAccounts(accounts){
       `<span class="email" title="${escaped}">${account.email}</span>` +
       `<span class="tag ${type}">${OAUTH_PENDING_CREDENTIAL_LABELS[type] || type}</span>` +
       `<span class="plus-tag ${trial === 'eligible' ? 'eligible' : ''}">${trialLabel}</span>` +
-      `<span class="plus-tag">${account.status || 'unknown'}</span>` +
+      `<span class="plus-tag status-${account.status || 'unknown'}" title="检测状态: ${account.status || 'unknown'}（检测时间 ${account.checked_at || '未检测'}）">${OAUTH_PENDING_STATUS_LABELS[account.status] || account.status || '未检测'}</span>` +
       `<span class="cookie ${hasCookie ? '' : 'missing'}" title="${hasCookie ? String(account.cookie_file).replace(/"/g,'&quot;') : 'oauth_codex 需要 cookie 文件登录'}">${cookieName}</span>`;
     list.appendChild(row);
   }
@@ -2285,7 +2347,113 @@ async function loadOauthPendingAccounts(){
   }
 }
 
+// 在线检测选中的未导入账号（复用资产扫描：cookie/token 探测 ChatGPT，
+// 403+封禁文案判 banned，坏号资产自动隔离），完成后刷新列表。
+async function checkOauthPendingAccounts(){
+  if(oauthPendingChecking) return;
+  const emails = Array.from(document.querySelectorAll('#oauth-pending-list input[type="checkbox"]:checked'))
+    .map(item=>item.dataset.email).filter(Boolean);
+  if(!emails.length){
+    setOauthPendingState('请先勾选要检测的账号', 'bad');
+    return;
+  }
+  oauthPendingChecking = true;
+  syncOauthPendingControls();
+  setOauthPendingState(`正在在线检测 ${emails.length} 个账号…`);
+  const finish = async (message, kind='')=>{
+    oauthPendingChecking = false;
+    if(oauthPendingCheckTimer){ clearTimeout(oauthPendingCheckTimer); oauthPendingCheckTimer = null; }
+    syncOauthPendingControls();
+    setOauthPendingState(message, kind);
+    await loadOauthPendingAccounts();
+  };
+  try{
+    const response = await fetch('/api/assets/scan', {method:'POST', headers:assetHeaders(true), body:JSON.stringify({
+      platforms:['chatgpt'],
+      emails,
+      concurrency:1,
+      account_concurrency:4,
+      timeout:15,
+      force:true,
+      quarantine_bad:true,
+    })});
+    await readAssetResponse(response);
+  }catch(error){
+    await finish(`检测启动失败: ${error.message || error}`, 'bad');
+    return;
+  }
+  const poll = async ()=>{
+    try{
+      const data = await readAssetResponse(await fetch('/api/assets/scan?progress_only=true', {headers:assetHeaders()}));
+      const scan = data.scan || {};
+      if(scan.running){
+        const progress = scan.progress || {};
+        const done = progress.total ? ` ${progress.completed || 0}/${progress.total}` : '';
+        setOauthPendingState(`检测中${done}…`);
+        oauthPendingCheckTimer = setTimeout(poll, 1500);
+        return;
+      }
+      // 检测结束：读完整报告，统计选中账号的状态分布
+      const report = await readAssetResponse(await fetch('/api/assets/scan', {headers:assetHeaders()}));
+      const wanted = new Set(emails.map(e=>String(e).toLowerCase()));
+      const counts = {};
+      let matched = 0;
+      for(const item of (report.items || [])){
+        if(item.platform !== 'chatgpt' || !wanted.has(String(item.email || '').toLowerCase())) continue;
+        const status = item.status || 'unknown';
+        counts[status] = (counts[status] || 0) + 1;
+        matched += 1;
+      }
+      const moved = (scan.quarantine && scan.quarantine.moved_accounts) || 0;
+      const parts = Object.entries(counts).map(([status, n])=>`${OAUTH_PENDING_STATUS_LABELS[status] || status} ${n}`);
+      const quarantined = moved ? `，已隔离坏号资产 ${moved} 个` : '';
+      await finish(
+        matched ? `检测完成：${parts.join(' · ')}${quarantined}` : '检测完成，但报告中未找到所选账号',
+        matched ? 'ok' : 'bad'
+      );
+    }catch(error){
+      await finish(`检测失败: ${error.message || error}`, 'bad');
+    }
+  };
+  oauthPendingCheckTimer = setTimeout(poll, 1200);
+}
+
 // ---------------------------------------------------------------- LIYE 卡密池 (oauth_codex 表单)
+
+function liyeStatusLabel(card){
+  const status = card.status || '';
+  if(status === 'cooldown' && card.cooldown_until){
+    const mins = Math.max(0, Math.ceil((card.cooldown_until * 1000 - Date.now()) / 60000));
+    return `冷却中 · 剩 ${mins} 分钟`;
+  }
+  return {available:'可用', in_use:'占用中', cooldown:'冷却中',
+          exhausted:'已用尽', invalid:'无效'}[status] || (status || '未知');
+}
+
+function renderLiyeCardList(pool){
+  const box = $('#oauth-liye-list');
+  if(!box || box.hidden) return;   // 列表收起时不渲染，点「查看列表」才展示
+  const cards = pool.cards || [];
+  if(!cards.length){
+    box.innerHTML = '<p class="liye-card-empty">卡池为空，可先导入卡密。</p>';
+    return;
+  }
+  box.innerHTML = `<table class="gopay-table liye-card-table"><thead>
+      <tr><th>卡密</th><th>状态</th><th>号码</th><th></th></tr>
+    </thead><tbody>${cards.map(card=>{
+      const full = String(card.full_code || '');
+      const encoded = encodeURIComponent(full);
+      return `<tr>
+        <td title="${escapeHtml(full)}">${escapeHtml(card.code || '-')}</td>
+        <td>${escapeHtml(liyeStatusLabel(card))}</td>
+        <td>${escapeHtml(card.phone || '-')}</td>
+        <td><div class="gopay-row-actions">
+          <button class="danger" type="button" data-liye-delete="${encoded}"
+            ${card.status === 'in_use' ? 'disabled title="占用中，请稍后或先「检查恢复」"' : ''}>删除</button>
+        </div></td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
+}
 
 function renderLiyeCardsSummary(pool, summaryId='oauth-liye-summary'){
   const summary = $(`#${summaryId}`);
@@ -2307,11 +2475,36 @@ async function loadLiyeCardsPool(summaryId='oauth-liye-summary'){
     const pool = await readJsonResponse(response);
     if(!response.ok) throw new Error(pool.error || `HTTP ${response.status}`);
     renderLiyeCardsSummary(pool, summaryId);
+    renderLiyeCardList(pool);
     return pool;
   }catch(error){
     const summary = $(`#${summaryId}`);
     if(summary){ summary.textContent = '读取失败'; summary.className = 'bad'; }
     return null;
+  }
+}
+
+async function deleteLiyeCard(encodedCode, summaryId, messageId){
+  const code = decodeURIComponent(encodedCode || '');
+  const message = $(`#${messageId}`);
+  if(!code) return;
+  if(!confirm(`确认从卡池删除 ${code.slice(0, 6)}...${code.slice(-4)}？\n删除后状态与导入记录一并移除，需要时可重新导入。`)) return;
+  message.className = '';
+  message.textContent = '正在删除...';
+  try{
+    const response = await fetch('/api/sms/liye/delete', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({code}),
+    });
+    const result = await readJsonResponse(response);
+    if(!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    renderLiyeCardsSummary(result.summary || {}, summaryId);
+    renderLiyeCardList(result.summary || {});
+    message.textContent = `已删除 ${result.removed || code}`;
+  }catch(error){
+    message.textContent = error.message || String(error);
+    message.className = 'bad';
   }
 }
 
@@ -2339,6 +2532,7 @@ async function importLiyeCards(inputId, summaryId, messageId, buttonId){
     message.textContent = `新增 ${result.added}，已存在 ${result.skipped}，格式错误 ${result.bad}`;
     message.className = result.bad ? 'bad' : '';
     if(result.added) input.value = '';
+    await loadLiyeCardsPool(summaryId);   // 刷新卡密列表
   }catch(error){
     message.textContent = error.message || String(error);
     message.className = 'bad';
@@ -2359,14 +2553,20 @@ async function recoverLiyeCards(summaryId, messageId, buttonId){
     if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     const result = data.result || {};
     renderLiyeCardsSummary(data.summary || {}, summaryId);
+    renderLiyeCardList(data.summary || {});
     const parts = [`核对 ${result.checked || 0} 张`];
     if(result.recovered) parts.push(`恢复可用 ${result.recovered}`);
     if(result.exhausted) parts.push(`确认已用尽 ${result.exhausted}`);
     if(result.still_busy) parts.push(`仍在冷却 ${result.still_busy}`);
+    if(result.uncancellable){
+      parts.push(`排队中平台不允许取消 ${result.uncancellable}`);
+      const reasons = Object.entries(result.reasons || {});
+      if(reasons.length) parts.push(reasons.map(([msg, n]) => `${msg}${n > 1 ? ` ×${n}` : ''}`).join('；'));
+    }
     if(result.skipped_active) parts.push(`任务使用中跳过 ${result.skipped_active}`);
     if(result.failed) parts.push(`核对失败 ${result.failed}`);
     message.textContent = parts.join('，');
-    message.className = (result.failed || result.still_busy) ? 'bad' : '';
+    message.className = (result.failed || result.still_busy || result.uncancellable) ? 'bad' : '';
   }catch(error){
     message.textContent = error.message || String(error);
     message.className = 'bad';
@@ -2557,6 +2757,7 @@ function renderForm(s){
       </div>
       <div class="oauth-pending-actions">
         <button id="btn-oauth-pending-query" class="btn-secondary" type="button">查询未导入账号</button>
+        <button id="btn-oauth-pending-check" class="btn-secondary" type="button" disabled>检测选中账号</button>
         <button id="btn-oauth-pending-all" class="btn-secondary" type="button" disabled>全选</button>
         <button id="btn-oauth-pending-clear" class="btn-secondary" type="button" disabled>清空</button>
         <button id="btn-oauth-pending-run" class="btn-run" type="button" disabled>选中账号授权导入</button>
@@ -2564,6 +2765,7 @@ function renderForm(s){
       <div id="oauth-pending-list" class="oauth-pending-list" hidden></div>`;
     p.appendChild(pending);
     pending.querySelector('#btn-oauth-pending-query').onclick = loadOauthPendingAccounts;
+    pending.querySelector('#btn-oauth-pending-check').onclick = checkOauthPendingAccounts;
     pending.querySelector('#btn-oauth-pending-all').onclick = ()=>{
       $$('#oauth-pending-list input[type="checkbox"]:not(:disabled)').forEach(item=>{ item.checked = true; });
       syncOauthPendingControls();
@@ -2587,8 +2789,10 @@ function renderForm(s){
       <div class="custom-sms-actions">
         <button id="btn-oauth-liye-import" class="btn-secondary" type="button">导入卡密</button>
         <button id="btn-oauth-liye-recover" class="btn-secondary" type="button">检查恢复</button>
+        <button id="btn-oauth-liye-list" class="btn-secondary" type="button" aria-expanded="false" aria-controls="oauth-liye-list">查看列表</button>
         <span id="oauth-liye-message" role="status" aria-live="polite"></span>
-      </div>`;
+      </div>
+      <div id="oauth-liye-list" class="liye-card-list" hidden></div>`;
     p.appendChild(liye);
     const providerSelect = $('#f_sms-provider');
     const syncLiyeVisibility = ()=>{
@@ -2607,6 +2811,19 @@ function renderForm(s){
     liye.querySelector('#btn-oauth-liye-recover').onclick = ()=>recoverLiyeCards(
       'oauth-liye-summary', 'oauth-liye-message', 'btn-oauth-liye-recover'
     );
+    liye.querySelector('#btn-oauth-liye-list').onclick = async ()=>{
+      const box = liye.querySelector('#oauth-liye-list');
+      const toggle = liye.querySelector('#btn-oauth-liye-list');
+      box.hidden = !box.hidden;
+      toggle.textContent = box.hidden ? '查看列表' : '收起列表';
+      toggle.setAttribute('aria-expanded', String(!box.hidden));
+      if(!box.hidden) await loadLiyeCardsPool('oauth-liye-summary');
+    };
+    liye.querySelector('#oauth-liye-list').onclick = event=>{
+      const button = event.target.closest('[data-liye-delete]');
+      if(!button || button.disabled) return;
+      deleteLiyeCard(button.dataset.liyeDelete, 'oauth-liye-summary', 'oauth-liye-message');
+    };
   }
 
   const actions = document.createElement('div'); actions.className='form-actions';
@@ -3484,6 +3701,51 @@ $('#btn-recycle-reserved').onclick = async ()=>{
   }catch(e){ msg.textContent='回收请求失败: '+e; }
   finally{ btn.disabled=false; btn.textContent=o; }
 };
+
+// 邮箱池用量统计：默认隐藏，点按钮展开/收起
+$('#btn-mailpool-stats').onclick = async ()=>{
+  const box = $('#mailpool-stats-box');
+  const btn = $('#btn-mailpool-stats');
+  box.hidden = !box.hidden;
+  btn.textContent = box.hidden ? '查看用量统计' : '收起统计';
+  btn.setAttribute('aria-expanded', String(!box.hidden));
+  if(!box.hidden) await loadMailpoolStats();
+};
+
+async function loadMailpoolStats(){
+  const box = $('#mailpool-stats-box');
+  if(!box || box.hidden) return;
+  box.innerHTML = '<div class="liye-card-empty">统计加载中…</div>';
+  try{
+    const r = await (await fetch('/api/mailpool/stats')).json();
+    renderMailpoolStats(r);
+  }catch(e){
+    box.innerHTML = `<div class="liye-card-empty">统计加载失败: ${e}</div>`;
+  }
+}
+
+function renderMailpoolStats(d){
+  const box = $('#mailpool-stats-box');
+  if(!box || box.hidden) return;
+  const rows = Object.entries((d&&d.platforms)||{}).map(([p,s])=>`
+    <tr>
+      <td>${p}</td>
+      <td>${s.registered_mothers}</td>
+      <td>${s.available_mothers}</td>
+      <td>${s.registered_children}</td>
+      <td>${s.available_children}</td>
+      <td>${s.banned_mothers}</td>
+      <td>${s.banned_children}</td>
+    </tr>`).join('');
+  box.innerHTML = `
+    <div class="liye-card-empty">母邮箱总数 <b>${d.mothers_total}</b>，其中 <b>${d.families}</b> 个母邮箱下共有 <b>${d.children_total}</b> 个子邮箱（+alias）；封禁列为永久封禁记录，GitHub 受限账号按受限记录统计</div>
+    <div class="mailpool-stats-wrap"><table class="gopay-table mailpool-stats-table">
+      <thead><tr>
+        <th>平台</th><th>母邮箱已注册</th><th>母邮箱剩余</th><th>子邮箱已注册</th><th>子邮箱剩余</th><th>封禁母邮箱</th><th>封禁子邮箱</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
 
 // ---------------------------------------------------------------- 启动
 scriptsReady = loadScripts();

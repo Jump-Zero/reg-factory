@@ -637,7 +637,7 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .custom-sms-import>summary span{color:var(--quiet);font:10.5px var(--mono)}
 .custom-sms-import .plus-field{margin-top:10px}
 .custom-sms-import textarea{height:116px}
-.custom-sms-actions{display:flex;align-items:center;gap:10px;margin-top:9px}
+.custom-sms-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:9px}
 #custom-sms-message{min-width:0;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}
 #custom-sms-message.bad{color:var(--red)}
 .plus-toggle{display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--muted);font-size:11px}
@@ -766,6 +766,17 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .gopay-sms-config>summary span{color:var(--muted);font-size:10.5px;font-weight:400}
 .gopay-sms-config[open]>summary{margin-bottom:12px}
 .gopay-sms-config .btn-secondary{margin-top:12px}
+.liye-card-list{margin-top:10px}
+.liye-card-list .gopay-table{min-width:0}
+.liye-card-table th:nth-child(1),.liye-card-table td:nth-child(1){width:44%}
+.liye-card-table th:nth-child(2),.liye-card-table td:nth-child(2){width:28%}
+.liye-card-table th:nth-child(3),.liye-card-table td:nth-child(3){width:17%}
+.liye-card-table th:nth-child(4),.liye-card-table td:nth-child(4){width:11%}
+.liye-card-empty{margin:6px 0;color:var(--muted);font-size:10.5px}
+.mailpool-stats{margin-top:10px}
+.mailpool-stats-wrap{overflow-x:auto}
+.mailpool-stats-wrap .gopay-table{min-width:620px}
+.mailpool-stats-table th:nth-child(n+2),.mailpool-stats-table td:nth-child(n+2){text-align:right}
 .gopay-confirm{display:flex;align-items:center;gap:7px;margin:11px 0;color:#efcb91;font-size:10.5px;cursor:pointer}
 .gopay-confirm input{width:16px;height:16px;margin:0;accent-color:var(--amber)}
 .gopay-job-tabs{display:grid;grid-template-columns:1fr 1fr;margin-bottom:10px;border:1px solid var(--line);border-radius:6px;overflow:hidden}
@@ -800,6 +811,9 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .oauth-pending-row .tag.none{border-color:rgba(226,100,85,.5);color:var(--red)}
 .oauth-pending-row .plus-tag{color:var(--muted);white-space:nowrap;font-size:10px}
 .oauth-pending-row .plus-tag.eligible{color:var(--green);font-weight:650}
+.oauth-pending-row .plus-tag.status-banned{color:var(--red);font-weight:650}
+.oauth-pending-row .plus-tag.status-normal{color:var(--green)}
+.oauth-pending-row .plus-tag.status-expired,.oauth-pending-row .plus-tag.status-restricted{color:var(--amber)}
 .oauth-pending-row .cookie{min-width:0;color:var(--muted);font-size:10px;overflow-wrap:anywhere}
 .oauth-pending-row .cookie.missing{color:var(--red)}
 

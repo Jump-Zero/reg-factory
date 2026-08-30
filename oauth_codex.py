@@ -34,6 +34,7 @@ from common.uploaders import _origin, upload_cpa
 from common.session_export import build_cpa_codex_json_from_oauth
 from common import oauth_codex as ox
 from common import proxy_switch
+from common.asset_store import find_mailbox_credentials
 
 
 def _sanitize(cookies):
@@ -135,6 +136,9 @@ async def main():
                     break
                 await asyncio.sleep(3)
             if not sess or not sess.get("accessToken"):
+                # 区分「已登出」与「账号封禁」：封禁则隔离资产并返回独立退出码
+                if await ox.report_banned_account(page, cookie_email):
+                    return 3
                 print("  [FAIL] cookie 未生效/已登出，拿不到 session")
                 return 2
             email = sess.get("user", {}).get("email", "")
@@ -152,6 +156,29 @@ async def main():
                 print(f"  SUB2API: group={args.group}(#{group_id})")
             else:
                 print("  CPA: 使用管理接口生成授权地址并接收 callback")
+
+            # 邮箱取码支持：按账号邮箱(或去掉 +alias 的母邮箱)从资产库找邮箱凭据，
+            # 授权前先备好取码通道(Graph token 校验 / 浏览器预登录 Outlook)，OAuth 要码时直接读。
+            email_code_provider = None
+            mailbox_record = find_mailbox_credentials(email)
+            if mailbox_record:
+                cred_email = str(mailbox_record.get("email") or "").strip()
+                try:
+                    from tools.import_plus_codex import MailCodeProvider
+                    _mail = MailCodeProvider(mailbox_record, ctx, page, max_wait=timeout)
+
+                    async def _mail_call(account_email, received_after=None, _p=_mail, _to=cred_email):
+                        # Graph 路径不看邮箱参数，浏览器路径预登录后也不用它登录 ——
+                        # 统一固定成凭据归属邮箱，万一需要登录时用的是配好密码的母邮箱。
+                        return await _p(_to, received_after)
+
+                    mode = await _mail.prepare()
+                    email_code_provider = _mail_call
+                    print(f"  [mail] 邮箱取码已就绪: {cred_email} (mode={mode})")
+                except Exception as e:
+                    print(f"  [WARN] 邮箱取码准备失败({cred_email}): {str(e)[:120]}，继续(不依赖邮箱取码)")
+            else:
+                print(f"  [mail] 资产库未找到 {email} 的邮箱凭据(含母邮箱)，跳过邮箱取码")
 
             # 浏览器驱动授权：phone_skip>0 时先免手机直连 N 次(关窗重登重摇风控)，弹手机才接码；=0 直接一次性接码
             _mode = "，add-phone 半自动(填号+选WhatsApp+发送)" if args.phone else ("，add-phone 手动模式" if args.manual_phone else "")
@@ -177,13 +204,19 @@ async def main():
                 debug_dump="oauth_authorize_dump.html",
                 manual_phone=args.manual_phone, semi_phone=args.phone,
                 reset_page=reset_fn, sms_provider=args.sms_provider,
-                result_metadata=codex_metadata)
+                result_metadata=codex_metadata, email_code_provider=email_code_provider)
             if reset_fn is not None:
                 try:
                     await reset_fn.cleanup()
                 except Exception:
                     pass
             if not code:
+                ban_hit = ox.banned_marker_in(msg)
+                if ban_hit:
+                    print(f"  [BAN] 授权流程检测到账号封禁（{ban_hit}），隔离资产")
+                    await ox.quarantine_banned_account(
+                        email, f"codex 授权失败检测到封禁: {str(msg)[:120]}")
+                    return 3
                 print(f"  [FAIL] 授权未完成: {msg}")
                 return 2
             print(f"  捕获回调: code={code[:10]}...")

@@ -683,6 +683,50 @@ def load_pool_accounts():
     return out
 
 
+def restricted_marker_path():
+    """受限邮箱落盘文件（注册时命中 GitHub 限制页的邮箱记录）。"""
+    return os.path.join("runtime", "state", "github_restricted_emails.txt")
+
+
+def load_restricted_emails():
+    """历史受限邮箱集合，供选号排除与用量统计。"""
+    path = restricted_marker_path()
+    out = set()
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    out.add(line.split("----")[0].strip().lower())
+    return out
+
+
+def load_registered_emails():
+    """已成功注册（cookies/github/accounts.txt 有会话记录）的邮箱集合。"""
+    path = os.path.join("cookies", "github", "accounts.txt")
+    out = set()
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.strip().split("|")
+                if parts and parts[0].strip():
+                    out.add(parts[0].strip().lower())
+    return out
+
+
+def persist_restricted_emails(emails):
+    """把本次 RESTRICTED 命中的邮箱落盘，供用量统计与选号排除。"""
+    emails = [str(e).strip().lower() for e in emails if str(e or "").strip()]
+    if not emails:
+        return
+    path = restricted_marker_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    from common.file_lock import append_line
+    for email in emails:
+        append_line(path, f"{email}----{int(time.time())}----restricted")
+    print(f"  [github][RESTRICTED] 已记录 {len(emails)} 个受限邮箱 -> {path}")
+
+
 async def dump_state(page, tag=""):
     """打印当前页面状态 + 截图，便于首跑适配 GitHub 真实布局。"""
     try:
@@ -1263,6 +1307,16 @@ async def _run_batch(args):
         if not accounts:
             print(f"  no available mailbox in {POOL_DIR}")
             return 1
+        # 排除已成功注册 / 历史受限的邮箱，避免重复浪费注册次数
+        consumed = load_registered_emails() | load_restricted_emails()
+        if consumed:
+            skipped = [a for a in accounts if a[0].strip().lower() in consumed]
+            accounts = [a for a in accounts if a[0].strip().lower() not in consumed]
+            if skipped:
+                print(f"  skip {len(skipped)} mailbox(es) already registered or restricted")
+        if not accounts:
+            print(f"  no fresh mailbox in {POOL_DIR} (all registered/restricted)")
+            return 1
         random.shuffle(accounts)
         accounts = accounts[:max(1, args.count)]
         print(f"  allocated {len(accounts)} distinct mailbox(es) from the pool")
@@ -1316,6 +1370,10 @@ async def _run_batch(args):
         run_one(index, account)
         for index, account in enumerate(accounts, 1)
     ))
+    # RESTRICTED 命中的邮箱落盘（email----ts----restricted），供用量统计与选号排除
+    persist_restricted_emails(
+        accounts[idx - 1][0] for idx, result in enumerate(results, 1) if result == RESTRICTED
+    )
     if args.auto:
         completed = sum(
             bool(result and result not in {"SKIP_VARIANT", RESTRICTED, PAGE_BLANK, CLIENT_INTEGRITY})

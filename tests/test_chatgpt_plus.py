@@ -672,5 +672,174 @@ class ChatGPTPlusTests(unittest.TestCase):
                     process.wait(timeout=5)
 
 
+class _BanProbePage:
+    """Minimal async page double for oauth_codex ban detection."""
+
+    def __init__(self, url="https://chatgpt.com/", body="", session_payload=""):
+        self._url = url
+        self._body = body
+        self._session_payload = session_payload
+        self.evaluate_calls = 0
+
+    @property
+    def url(self):
+        return self._url
+
+    async def goto(self, *args, **kwargs):
+        return None
+
+    async def inner_text(self, *args, **kwargs):
+        return self._body
+
+    async def evaluate(self, *args, **kwargs):
+        self.evaluate_calls += 1
+        return self._session_payload
+
+
+class _FakeBrowserContext:
+    def __init__(self):
+        self.added_cookies = None
+
+    async def clear_cookies(self):
+        return None
+
+    async def add_cookies(self, cookies):
+        self.added_cookies = cookies
+
+
+async def _instant_sleep(*args, **kwargs):
+    return None
+
+
+class OauthCodexBanDetectionTests(unittest.TestCase):
+    """账号封禁检测：标记识别、三层探测、资产隔离与组合处置。"""
+
+    def test_banned_marker_hits_known_phrases(self):
+        from common import oauth_codex as ox
+
+        self.assertEqual(
+            ox.banned_marker_in("Sorry, your account has been deactivated."),
+            "account has been deactivated",
+        )
+        self.assertEqual(
+            ox.banned_marker_in("Account deactivated by moderation"), "account deactivated"
+        )
+        self.assertEqual(
+            ox.banned_marker_in('{"error":"account_deactivated"}'), "account_deactivated"
+        )
+        self.assertEqual(ox.banned_marker_in("Account Disabled"), "account disabled")
+        self.assertEqual(ox.banned_marker_in("welcome back to chatgpt"), "")
+
+    def test_detect_prefers_page_body_and_skips_session_probe(self):
+        from common import oauth_codex as ox
+
+        page = _BanProbePage(body="Your account has been deactivated. contact support")
+        hit = asyncio.run(ox.detect_account_banned(page))
+        self.assertEqual(hit, "account has been deactivated")
+        self.assertEqual(page.evaluate_calls, 0)
+
+    def test_detect_falls_back_to_session_payload(self):
+        from common import oauth_codex as ox
+
+        page = _BanProbePage(session_payload='{"detail": "account_suspended"}')
+        hit = asyncio.run(ox.detect_account_banned(page))
+        self.assertEqual(hit, "account_suspended")
+        self.assertEqual(page.evaluate_calls, 1)
+
+    def test_detect_clean_page_returns_empty(self):
+        from common import oauth_codex as ox
+
+        page = _BanProbePage(body="log in to continue", session_payload="{}")
+        self.assertEqual(asyncio.run(ox.detect_account_banned(page)), "")
+
+    def test_report_banned_account_quarantines_assets(self):
+        from common import oauth_codex as ox
+
+        captured = {}
+
+        async def fake_quarantine(email, reason):
+            captured["email"] = email
+            captured["reason"] = reason
+            return {"moved_accounts": 1}
+
+        page = _BanProbePage(body="account deactivated")
+        with patch.object(ox, "quarantine_banned_account", fake_quarantine):
+            hit = asyncio.run(ox.report_banned_account(page, "User@Example.com"))
+        self.assertEqual(hit, "account deactivated")
+        # report 层原样透传邮箱（大小写归一在 quarantine 内部做，由专门用例覆盖）
+        self.assertEqual(captured["email"], "User@Example.com")
+        self.assertIn("codex 授权检测到封禁", captured["reason"])
+
+    def test_report_banned_account_noop_without_signal(self):
+        from common import oauth_codex as ox
+
+        async def fail_quarantine(email, reason):
+            raise AssertionError("未封禁不应触发隔离")
+
+        page = _BanProbePage(session_payload="{}")
+        with patch.object(ox, "quarantine_banned_account", fail_quarantine):
+            self.assertEqual(asyncio.run(ox.report_banned_account(page, "a@b.com")), "")
+
+    def test_quarantine_banned_account_targets_chatgpt_assets(self):
+        from common import oauth_codex as ox
+
+        captured = {}
+
+        def fake_archive(results, bucket, reason):
+            captured["results"] = results
+            captured["bucket"] = bucket
+            captured["reason"] = reason
+            return {"moved_accounts": 2, "moved_files": 3}
+
+        with patch("common.asset_store.archive_asset_results", fake_archive):
+            result = asyncio.run(
+                ox.quarantine_banned_account("Banned@Example.com", "测试封禁隔离")
+            )
+        self.assertEqual(result["moved_accounts"], 2)
+        self.assertEqual(captured["bucket"], "quarantine")
+        self.assertEqual(
+            captured["results"],
+            [{"platform": "chatgpt", "email": "banned@example.com", "source": ""}],
+        )
+
+    def test_quarantine_empty_email_is_noop(self):
+        from common import oauth_codex as ox
+
+        with patch("common.asset_store.archive_asset_results") as mock_archive:
+            result = asyncio.run(ox.quarantine_banned_account("  ", "reason"))
+        self.assertEqual(result, {"moved_accounts": 0})
+        mock_archive.assert_not_called()
+
+
+class ImportPlusCodexBanTests(unittest.TestCase):
+    """批量导入链路的封禁处置：_bootstrap_session 明确报封禁错误而非 cookie 失效。"""
+
+    def test_bootstrap_session_reports_banned_instead_of_cookie_error(self):
+        from tools.import_plus_codex import _bootstrap_session
+
+        context = _FakeBrowserContext()
+        record = {"session_token": "fixture-session-token", "email": "banned@example.com"}
+        page = _BanProbePage(
+            session_payload='{"user":null,"message":"account_deactivated"}'
+        )
+        with patch("asyncio.sleep", _instant_sleep):
+            with self.assertRaises(RuntimeError) as raised:
+                asyncio.run(_bootstrap_session(context, page, record))
+        self.assertIn("封禁", str(raised.exception))
+        self.assertIn("account_deactivated", str(raised.exception))
+
+    def test_bootstrap_session_without_ban_keeps_cookie_error(self):
+        from tools.import_plus_codex import _bootstrap_session
+
+        context = _FakeBrowserContext()
+        record = {"session_token": "fixture-session-token", "email": "logged-out@example.com"}
+        page = _BanProbePage(session_payload="{}")
+        with patch("asyncio.sleep", _instant_sleep):
+            with self.assertRaises(RuntimeError) as raised:
+                asyncio.run(_bootstrap_session(context, page, record))
+        self.assertIn("session cookie", str(raised.exception))
+        self.assertNotIn("封禁", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

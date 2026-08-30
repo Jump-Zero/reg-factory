@@ -158,6 +158,68 @@ class ImportTextTests(unittest.TestCase):
         self.assertEqual(len(self._txt()), 3)
 
 
+class RemoveCardTests(unittest.TestCase):
+    """WebUI 删除卡密：状态文件 + txt 导入文件一并移除；占用中/不存在拒绝。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="liye_test_")
+        self._env = patch.dict(os.environ, {"REG_FACTORY_DATA_DIR": self._tmp})
+        self._env.start()
+        self._cards = patch.object(liye_sms, "LIYE_CARDS", "")
+        self._cards.start()
+        liye_sms._SESSIONS.clear()
+
+    def tearDown(self):
+        self._cards.stop()
+        self._env.stop()
+
+    def _state(self):
+        with open(os.path.join(self._tmp, "runtime", "state", "liye_cards.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)
+
+    def _txt(self):
+        with open(os.path.join(self._tmp, "runtime", "state", "liye_cards.txt"),
+                  encoding="utf-8") as f:
+            return f.read().split()
+
+    def test_remove_deletes_state_and_txt(self):
+        liye_sms.import_text("GPT-TEST-0001-0002-0003\nCZ-TEST-0004-0005-0006")
+        ok, message = liye_sms.remove_card("GPT-TEST-0001-0002-0003")
+        self.assertTrue(ok)
+        self.assertEqual(message, "")
+        codes = [c["code"] for c in self._state()["cards"]]
+        self.assertEqual(codes, ["CZ-TEST-0004-0005-0006"])   # 状态已移除
+        self.assertEqual(self._txt(), ["CZ-TEST-0004-0005-0006"])  # txt 同步移除，sync 不复活
+        self.assertEqual(liye_sms.summary()["total"], 1)
+
+    def test_summary_cards_carry_full_code(self):
+        liye_sms.import_text("GPT-TEST-0001-0002-0003")
+        cards = liye_sms.summary()["cards"]
+        self.assertEqual(cards[0]["full_code"], "GPT-TEST-0001-0002-0003")
+        self.assertEqual(cards[0]["code"], "GPT-TE...0003")   # 展示仍脱敏
+
+    def test_remove_rejects_in_use_card(self):
+        _write_state(self._tmp, [{"code": "GPT-live", "status": "in_use",
+                                  "claimed_at": time.time()}])
+        ok, message = liye_sms.remove_card("GPT-live")
+        self.assertFalse(ok)
+        self.assertIn("使用", message)
+        self.assertEqual(self._state()["cards"][0]["code"], "GPT-live")  # 未被误删
+
+    def test_remove_missing_card_returns_false(self):
+        liye_sms.import_text("GPT-TEST-0001-0002-0003")
+        ok, message = liye_sms.remove_card("GPT-NOPE-0000-0000-0000")
+        self.assertFalse(ok)
+        self.assertEqual(message, "卡密不存在")
+
+    def test_remove_rejects_env_configured_card(self):
+        with patch.object(liye_sms, "LIYE_CARDS", "GPT-ENV-0001-0002-0003"):
+            ok, message = liye_sms.remove_card("GPT-ENV-0001-0002-0003")
+        self.assertFalse(ok)
+        self.assertIn("env", message)
+
+
 class RecoverAllTests(unittest.TestCase):
     """WebUI「检查恢复」：冷却/超租期占用卡按平台真实订单回退；租期内占用卡跳过。"""
 
@@ -243,6 +305,51 @@ class RecoverAllTests(unittest.TestCase):
         entry = self._entry("GPT-stale")
         self.assertEqual(entry["status"], "cooldown")
         self.assertGreater(entry["cooldown_until"], time.time())
+
+    def test_recover_uncancellable_marks_long_cooldown(self):
+        def fake_api(code, method, path, body=None, service=None):
+            if path == "/api/orders" and code == "GPT-stale":
+                return {"orders": [{"id": "ord6", "status": "queued",
+                                    "activationId": "act6", "activationGeneration": 0}]}
+            if path == "/api/orders":
+                return {"orders": []}
+            if path == "/api/orders/ord6/action":
+                raise liye_sms.LiyeError("只有等待验证码的订单可以取消",
+                                         code="ORDER_NOT_CANCELLABLE")
+            raise AssertionError(f"unexpected {method} {path}")
+
+        with patch.object(liye_sms, "_api_with_relogin", side_effect=fake_api):
+            result = liye_sms.recover_all()
+        self.assertEqual(result["uncancellable"], 1)
+        self.assertEqual(result["still_busy"], 0)
+        self.assertEqual(result["reasons"], {"只有等待验证码的订单可以取消": 1})
+        entry = self._entry("GPT-stale")
+        self.assertEqual(entry["status"], "cooldown")
+        # 平台不允许取消：拉长到约 30 分钟，避免每 10 分钟空轮询
+        self.assertGreater(entry["cooldown_until"], time.time() + 1500)
+        self.assertEqual(self._entry("GPT-cool")["status"], "available")
+
+    def test_recover_uncancellable_aggregates_reasons(self):
+        def fake_api(code, method, path, body=None, service=None):
+            oid = "ord5" if code == "GPT-stale" else "ord4"
+            if path == "/api/orders":
+                return {"orders": [{"id": oid, "status": "queued",
+                                    "activationId": f"act-{oid}",
+                                    "activationGeneration": 0}]}
+            if path == f"/api/orders/{oid}/action":
+                raise liye_sms.LiyeError("只有等待验证码的订单可以取消",
+                                         code="ORDER_NOT_CANCELLABLE")
+            raise AssertionError(f"unexpected {method} {path}")
+
+        with patch.object(liye_sms, "_api_with_relogin", side_effect=fake_api):
+            result = liye_sms.recover_all()
+        self.assertEqual(result["checked"], 2)
+        self.assertEqual(result["uncancellable"], 2)
+        self.assertEqual(result["reasons"], {"只有等待验证码的订单可以取消": 2})
+        self.assertGreater(self._entry("GPT-cool")["cooldown_until"],
+                           time.time() + 1500)
+        self.assertGreater(self._entry("GPT-stale")["cooldown_until"],
+                           time.time() + 1500)
 
     def test_recover_network_error_keeps_status(self):
         def fake_api(code, method, path, body=None, service=None):
