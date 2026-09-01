@@ -137,8 +137,28 @@ function renderUpdateState(update, version){
 }
 
 async function pollStatus(){
+  const mainStatus = fetch('/api/status', {cache:'no-store'}).then(async response=>{
+    const data = await response.json();
+    if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    return data;
+  });
+  const k12Status = fetch('/api/k12/status', {cache:'no-store'}).then(async response=>{
+    const data = await response.json();
+    if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    return data;
+  });
+  const [mainResult, k12Result] = await Promise.allSettled([mainStatus, k12Status]);
+  if(k12Result.status === 'fulfilled'){
+    renderK12Status(k12Result.value);
+  }else{
+    renderK12Status({alive:false, ready:false, url:k12Url, message:'K12 状态接口暂时不可用'});
+  }
+  if(mainResult.status === 'rejected'){
+    if(updateRequested) setUpdateMessage('面板正在重启，等待重新连接…');
+    return;
+  }
   try{
-    const s = await (await fetch('/api/status')).json();
+    const s = mainResult.value;
     $('#dot-bb').classList.remove('pending');
     $('#dot-bb').classList.toggle('on', s.bitbrowser);
     const browserLabels = {adspower:'AdsPower', bundled:'内置浏览器', custom:'自定义 Chrome', custom_api:'自定义指纹浏览器'};

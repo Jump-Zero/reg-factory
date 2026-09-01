@@ -71,6 +71,10 @@ gmail_android/logs/
 gmail_android/offline/bluestacks/*
 !gmail_android/offline/bluestacks/.gitkeep
 gmail_android/dist/
+
+# Standalone K12 runtime data
+k12/data/**
+k12/*.log
 dist/
 build/
 screenshots_vision/

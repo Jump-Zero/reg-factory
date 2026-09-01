@@ -38,11 +38,17 @@ _PERMANENT_ERROR_MARKERS = (
 
 
 def _used_file(platform):
-    return f"emails_used_{platform}.txt"
+    return os.path.join(
+        os.path.dirname(os.path.abspath(EMAILS_FILE)),
+        f"emails_used_{platform}.txt",
+    )
 
 
 def _error_file(platform):
-    return f"emails_error_{platform}.txt"
+    return os.path.join(
+        os.path.dirname(os.path.abspath(EMAILS_FILE)),
+        f"emails_error_{platform}.txt",
+    )
 
 
 def _retry_claim_status():

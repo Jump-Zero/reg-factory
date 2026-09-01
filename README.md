@@ -68,7 +68,7 @@
 
 `1.2.30` 及更早便携版的一键更新启动参数存在问题，需要先从 Releases 手动下载并覆盖安装一次新版。新版的“一键更新”会重试断流下载、校验 SHA-256 与包内版本，并在失败时显示实际原因；数据目录不会随程序目录替换。
 
-为控制体积，Windows 便携包不包含可选的 Codex K12 子项目；需要 K12 时请使用源码方式安装，并准备 Node.js 20+。
+Windows 便携包包含全新的独立 Codex K12 适配器；K12 使用独立端口 `8806` 和独立数据目录，可通过 `start_k12.bat` 单独启动。
 
 ### 从源码运行
 
@@ -77,7 +77,7 @@
 - Python 3.10+
 - 默认使用 [BitBrowser](https://www.bitbrowser.cn/download)，也支持内置 Chromium、自定义 Chrome/Chromium 和 AdsPower
 - [Clash Verge 2.5.2 Windows x64](https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.2/Clash.Verge_2.5.2_x64-setup.exe)（自动/固定节点模式），或一个住宅代理服务
-- Node.js 20+（仅 Codex K12 控制台需要）
+- Node.js 20+（仅 Gmail Android 模块或源码前端开发按需需要）
 
 Windows：
 
@@ -109,11 +109,11 @@ macOS / Linux：
 - 号池扫描：同平台低频串行、近期结果自动复用，遇到限流或连续风控响应自动暂停；按需校验 Outlook、ChatGPT、Claude、Grok 和 Kiro，并标注 ChatGPT Plus 免费试用资格。
 - 网络出口：切换 Clash 自动轮换、固定节点或动态住宅 IP，并测试公网出口。
 - 环境配置：分组编辑 `.env` 并测试外部服务连通性。
-- Codex K12：管理 K12 workspace、邮箱资产、任务与 Codex 凭据。
+- Codex K12：独立管理 K12 workspace、邮箱资产、任务与 Codex 凭据；主面板只负责启动和内嵌入口。
 - Plus Codex 导入：使用已经开通 Plus 的 ChatGPT 账号，登录后强制完成手机号接码验证，再走 Codex OAuth 并导入 SUB2API；不再执行提链、绑卡或支付。WebUI 支持批量粘贴 Outlook/Hotmail/Live/MSN、iCloud、ChatGPT session Cookie/token 和完整 Codex OAuth JSON，也兼容 RT/client_id 正反顺序及多种分隔符。
 - GoPay 钱包支付：集成在现有 Plus 协议支付面板中；选择 `GoPay + 批量协议支付` 后，系统先提取 Midtrans 链接，再从本地钱包池自动选择可用账号支付。钱包池弹窗负责注册/登录、余额、号码和 OTP，不再提供第二套支付入口。
 
-控制台只监听本机。Codex K12 的独立说明见 [codex_k12/README.md](codex_k12/README.md)。
+控制台只监听本机。Codex K12 独立服务默认监听 `8806`，说明见 [k12/README.md](k12/README.md)。
 
 动态住宅 IP 会在创建新浏览器窗口时写入完整代理认证；轮换后的代理从下一个新窗口开始使用。网络页可分别设置 Outlook、Claude、ChatGPT、Grok、Kiro 和 GitHub 的出口，例如 Outlook 使用 Clash、其他平台使用住宅代理，并可按平台测试真实公网 IP。
 
@@ -202,7 +202,7 @@ reg-factory/
 ├─ tools/                  # 导出、校验、token 补传等维护工具
 ├─ runtime/                # 本机日志、状态与临时凭据（内容不提交）
 ├─ webui/                  # FastAPI 服务与原生前端
-├─ codex_k12/              # Vue + Node 的 K12 控制台
+├─ k12/                    # 独立 Python K12 适配器与前端
 ├─ gmail_android/          # BlueStacks + Appium 的 Gmail 流程
 ├─ vision_solver/          # 通用视觉验证码求解库
 ├─ xconsole_client/        # XConsole 客户端

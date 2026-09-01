@@ -48,11 +48,10 @@ ROOT = (
 WEBUI = os.path.join(ROOT, "webui")
 ENV_PATH = os.environ.get("REG_FACTORY_ENV_FILE") or os.path.join(ROOT, ".env")
 ENV_EXAMPLE = os.path.join(ROOT, ".env.example")
-K12_DIR = os.path.join(ROOT, "codex_k12")
-K12_SERVER = os.path.join(K12_DIR, "server", "index.ts")
-K12_TSX_CLI = os.path.join(K12_DIR, "node_modules", "tsx", "dist", "cli.mjs")
-K12_DIST_INDEX = os.path.join(K12_DIR, "dist", "index.html")
-K12_LOG_PATH = os.path.join(K12_DIR, "server.log")
+K12_DIR = os.path.join(ROOT, "k12")
+K12_SERVER = os.path.join(K12_DIR, "server.py")
+K12_DIST_INDEX = os.path.join(K12_DIR, "static", "index.html")
+K12_LOG_PATH = os.path.join(os.environ.get("REG_FACTORY_DATA_DIR") or ROOT, "runtime", "k12.log")
 PLUS_DIR = os.path.join(ROOT, "vendor", "chatgpt_plus")
 
 sys.path.insert(0, WEBUI)
@@ -358,16 +357,11 @@ def _k12_alive():
 
 def _k12_status(message=""):
     alive = _k12_alive()
-    node = shutil.which("node")
     missing = []
-    if not os.path.isfile(os.path.join(K12_DIR, "package.json")):
-        missing.append("codex_k12 子项目")
-    if not node:
-        missing.append("Node.js 20+")
-    if not os.path.isfile(K12_TSX_CLI):
-        missing.append("Node 依赖")
+    if not os.path.isfile(K12_SERVER):
+        missing.append("k12 独立适配器")
     if not os.path.isfile(K12_DIST_INDEX):
-        missing.append("生产构建")
+        missing.append("K12 前端")
     ready = not missing and _k12_is_local(_k12_url())
     managed = bool(K12_PROCESS and K12_PROCESS.returncode is None)
     if alive:
@@ -592,13 +586,20 @@ async def _start_k12_service():
         child_env = _child_env()
         child_env["HOST"] = "127.0.0.1"
         child_env["PORT"] = str(parsed.port or (443 if parsed.scheme == "https" else 80))
-        node = shutil.which("node")
+        child_env["K12_PORT"] = child_env["PORT"]
+        child_env["REG_FACTORY_K12_DATA_DIR"] = os.path.join(
+            os.environ.get("REG_FACTORY_DATA_DIR") or ROOT, "runtime", "k12"
+        )
         os.makedirs(K12_DIR, exist_ok=True)
         K12_LOG_HANDLE = open(K12_LOG_PATH, "a", encoding="utf-8")
         try:
+            if getattr(sys, "frozen", False):
+                command = [sys.executable, "-u", "--task", "k12/server.py"]
+            else:
+                command = [sys.executable, "-u", K12_SERVER]
             K12_PROCESS = await asyncio.create_subprocess_exec(
-                node, K12_TSX_CLI, K12_SERVER,
-                cwd=K12_DIR,
+                *command,
+                cwd=ROOT,
                 env=child_env,
                 stdout=K12_LOG_HANDLE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -620,7 +621,7 @@ async def _start_k12_service():
         if code is not None and K12_LOG_HANDLE:
             K12_LOG_HANDLE.close()
             K12_LOG_HANDLE = None
-        return _k12_status(f"服务未能就绪" + (f"（退出码 {code}）" if code is not None else "，请查看 codex_k12/server.log"))
+        return _k12_status(f"服务未能就绪" + (f"（退出码 {code}）" if code is not None else "，请查看 runtime/k12.log"))
 
 
 async def _stop_k12_service():

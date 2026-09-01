@@ -20,7 +20,7 @@ common/ 共享能力
 - `tools/` 放人工触发的导出、校验、迁移和补传命令。
 - `runtime/` 统一收纳根目录外的日志、状态和临时凭据。
 - `webui/` 只负责 schema、任务进程和本地界面，不复制业务逻辑。
-- 独立子系统保留自己的依赖和文档，例如 `codex_k12/`、`gmail_android/`、`vision_solver/`。
+- 独立 K12 适配器位于 `k12/`，拥有自己的服务、前端、任务和数据目录；`gmail_android/`、`vision_solver/` 等仍属于按需独立模块。
 
 ## 主要入口
 

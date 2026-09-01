@@ -98,7 +98,7 @@ REG_FACTORY_PROXY_ROTATE_METHOD=GET
 ### Python 与 Node.js
 
 - Python 3.10+ 是主流程必需依赖。
-- Node.js 20+ 只在构建或运行 Codex K12 时需要。
+- Codex K12 新适配器由 Python/FastAPI 提供独立服务；源码运行不额外要求 Node.js。
 - Gmail Android 流程还需要 BlueStacks、ADB、Appium 2.x 和 UiAutomator2 driver。
 
 ## 创建配置

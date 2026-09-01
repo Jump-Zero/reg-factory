@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -209,6 +210,32 @@ class MailCodeProvider:
         return code
 
 
+class ManualOtpFileProvider:
+    """Wait for a six-digit code written by the standalone K12 console."""
+
+    def __init__(self, path: str, max_wait: int = 600):
+        self.path = Path(path).expanduser().resolve()
+        self.max_wait = max(30, int(max_wait))
+
+    async def __call__(self, account_email: str, received_after: float):
+        del account_email, received_after
+        deadline = time.time() + self.max_wait
+        while time.time() < deadline:
+            try:
+                value = self.path.read_text(encoding="utf-8").strip()
+            except OSError:
+                value = ""
+            match = re.search(r"\b(\d{6})\b", value)
+            if match:
+                try:
+                    self.path.write_text("", encoding="utf-8")
+                except OSError:
+                    pass
+                return match.group(1)
+            await asyncio.sleep(1)
+        return None
+
+
 def require_phone_verification(metadata: dict, allow_unverified: bool = False) -> str:
     status = str((metadata or {}).get("codex_phone_status") or "not_verified").strip().lower()
     if status != "verified" and not allow_unverified:
@@ -259,6 +286,37 @@ def _check_paid(plan_type: str, args):
     if args.require_paid and normalized and normalized not in PAID_PLANS:
         raise RuntimeError(f"账号套餐为 {normalized}，不是已开通的 Plus/付费套餐")
     return normalized
+
+
+async def _run_k12_workspace(credentials: dict, result: dict, args) -> None:
+    """Execute the standalone K12 workspace stage after OAuth succeeds."""
+    from k12.workspace import operate_many, workspace_ids
+
+    if not getattr(args, "run_workspace_join", False):
+        return
+    ids = workspace_ids(getattr(args, "workspace_ids", []))
+    if not ids:
+        raise RuntimeError("K12 Workspace ID 未配置")
+    token = str(credentials.get("access_token") or credentials.get("accessToken") or "").strip()
+    if not token:
+        raise RuntimeError("OAuth 凭据缺少 access token，无法执行 K12 workspace 操作")
+    route = str(getattr(args, "workspace_route", "request") or "request").strip().lower()
+    result["stage"] = "workspace"
+    result["workspace_results"] = await asyncio.to_thread(
+        operate_many,
+        token,
+        ids,
+        route,
+        timeout=max(5, int(getattr(args, "workspace_timeout", 30) or 30)),
+        retries=max(0, int(getattr(args, "workspace_retries", 2) or 2)),
+        interval=max(0, float(getattr(args, "workspace_interval", 1.5) or 1.5)),
+    )
+    failed = [item for item in result["workspace_results"] if not item.get("ok")]
+    if failed:
+        raise RuntimeError(
+            "K12 workspace 操作失败: "
+            + "; ".join(f"{item.get('workspace_id', '')[:8]}... HTTP {item.get('status') or 'network'}" for item in failed)
+        )
 
 
 async def _save_and_create(origin, sub2api_token, group_id, credentials, email, result, args):
@@ -316,6 +374,7 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
             credentials["codex_phone_status"] = result["phone_status"]
             result["plan_type"] = _check_paid(credentials.get("plan_type"), args)
             await _save_and_create(origin, sub2api_token, group_id, credentials, email, result, args)
+            await _run_k12_workspace(credentials, result, args)
         else:
             from register_chatgpt import clash_browser_proxy_fields
 
@@ -347,6 +406,9 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
                 )
                 mail_mode = await mail_provider.prepare()
                 print(f"  [mail] {masked} 取码方式: {mail_mode}")
+            if getattr(args, "otp_file", ""):
+                mail_provider = ManualOtpFileProvider(args.otp_file, max_wait=args.timeout)
+                print("  [k12] waiting for manual OTP from the standalone console")
 
             result["stage"] = "oauth"
             metadata = {}
@@ -378,6 +440,7 @@ async def import_one(index, total, record, playwright, origin, sub2api_token, gr
             credentials["codex_phone_status"] = result["phone_status"]
             result["plan_type"] = _check_paid(credentials.get("plan_type") or result["plan_type"], args)
             await _save_and_create(origin, sub2api_token, group_id, credentials, email, result, args)
+            await _run_k12_workspace(credentials, result, args)
 
             # 邀请好友:Plus/Pro 账号 OAuth 成功后,从池子抽未注册邮箱邀请(触发 banked reset 奖励)
             if getattr(args, "invite_friend", False) and result.get("status") == "success":
@@ -511,6 +574,13 @@ def build_parser():
     parser.add_argument("--invite-timeout", type=int, default=45,
                         help="邀请流程超时秒数")
     parser.add_argument("--results", default="", help="结果 JSONL 路径")
+    parser.add_argument("--workspace-ids", nargs="*", default=[], help="K12 Workspace ID 列表")
+    parser.add_argument("--workspace-route", choices=("request", "accept"), default="request", help="K12 workspace 操作")
+    parser.add_argument("--run-workspace-join", action="store_true", help="OAuth 完成后执行 K12 workspace 操作")
+    parser.add_argument("--workspace-timeout", type=int, default=30)
+    parser.add_argument("--workspace-retries", type=int, default=2)
+    parser.add_argument("--workspace-interval", type=float, default=1.5)
+    parser.add_argument("--otp-file", default="", help="手动 OTP 文件，由 K12 控制台写入")
     parser.add_argument("--delete-input", action="store_true")
     parser.add_argument("--keep-on-fail", action="store_true")
     parser.add_argument("--allow-non-paid", dest="require_paid", action="store_false")

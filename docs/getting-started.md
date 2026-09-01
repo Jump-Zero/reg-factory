@@ -39,7 +39,7 @@ macOS / Linux：
 ./start.sh
 ```
 
-源码方式需要 Python 3.10+。只有 Codex K12 额外需要 Node.js 20+。
+源码方式需要 Python 3.10+。Codex K12 可通过 `start_k12.bat` 或 `start_k12.sh` 单独启动在 8806 端口。
 
 ## 2. 认识主界面
 

@@ -26,6 +26,8 @@ TASK_FILES = [
     "tools/export_chatgpt2api.py",
     "tools/export_accounts.py",
     "tools/export_kiro_credentials.py",
+    "k12/server.py",
+    "k12/workspace.py",
 ]
 
 datas = [
@@ -36,6 +38,7 @@ datas = [
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "common" / "bundled_browser_helper.py"), "common"),
     (str(ROOT / "vendor" / "gopay_engine"), "vendor/gopay_engine"),
+    (str(ROOT / "k12" / "static"), "k12/static"),
 ]
 datas.extend((str(ROOT / item), str(Path(item).parent)) for item in TASK_FILES)
 
@@ -69,6 +72,8 @@ hiddenimports = playwright_hidden + tls_hidden + [
     "unlock_outlook",
     "mailbox_broker",
     "register_outlook_standalone",
+    "k12.server",
+    "k12.workspace",
 ]
 for package in ("common", "vision_solver", "xconsole_client"):
     hiddenimports.extend(collect_submodules(package))

@@ -235,6 +235,17 @@ def main() -> None:
         sys.argv = [str(target_path), *raw_args[arg_offset:]]
         runpy.run_path(str(target_path), run_name="__main__")
         return
+    if raw_args[:1] == ["--k12"]:
+        _TASK_DISPATCH = True
+        _configure_live_output()
+        root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+        target_path = root / "k12" / "server.py"
+        if not target_path.is_file():
+            raise SystemExit("standalone K12 adapter is not included in this build")
+        os.environ.setdefault("K12_PORT", "8806")
+        sys.argv = [str(target_path)]
+        runpy.run_path(str(target_path), run_name="__main__")
+        return
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8799)

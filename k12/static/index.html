@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codex K12 独立工作台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div>
+        <p class="eyebrow">REG FACTORY / STANDALONE</p>
+        <h1>Codex K12</h1>
+        <p class="sub">独立端口、独立任务、独立数据目录；底层复用 reg-factory 的邮箱、浏览器和 OAuth 能力。</p>
+      </div>
+      <div class="health"><span id="health-dot"></span><span id="health">检测中</span></div>
+    </header>
+    <section class="grid">
+      <article class="panel overview">
+        <div class="panel-head"><h2>运行摘要</h2><button id="refresh-all" class="secondary">刷新全部</button></div>
+        <div class="stats"><div><b id="stat-emails">0</b><span>邮箱</span></div><div><b id="stat-free">0</b><span>可用</span></div><div><b id="stat-running">0</b><span>运行中</span></div><div><b id="stat-success">0</b><span>成功</span></div><div><b id="stat-failed">0</b><span>失败</span></div><div><b id="stat-workspaces">0</b><span>Workspace</span></div></div>
+      </article>
+      <article class="panel config">
+        <div class="panel-head"><h2>运行配置</h2><button id="save-config">保存</button></div>
+        <label>Workspace ID（每行一个）<textarea id="workspace-ids" placeholder="workspace-id-1&#10;workspace-id-2"></textarea></label>
+        <div class="row">
+          <label>操作<select id="workspace-route"><option value="request">Request access</option><option value="accept">Accept invite</option></select></label>
+          <label>并发<input id="concurrency" type="number" min="1" max="5" value="1"></label>
+        </div>
+        <label class="check"><input id="run-workspace" type="checkbox" checked> OAuth 完成后执行 Workspace 操作</label>
+        <div class="row">
+          <label>手机号平台<select id="sms-provider"><option value="auto">自动切换</option><option value="custom">自定义号码池</option><option value="smsman">SMS-Man</option><option value="firefox">firefox.fun</option><option value="hero">Hero SMS</option></select></label>
+          <label>节点<input id="node" value="auto"></label>
+        </div>
+        <label>邮箱 OTP<select id="otp-mode"><option value="auto">自动读取邮件</option><option value="manual">手动输入</option></select></label>
+        <label>SUB2API 地址<input id="sub2api-url" placeholder="https://sub2api.example"></label>
+        <div class="row"><label>SUB2API 账号<input id="sub2api-email"></label><label>SUB2API 密码<input id="sub2api-password" type="password"></label></div>
+        <label>SUB2API 分组<input id="group" value="k12"></label>
+        <p id="config-message" class="message"></p>
+      </article>
+      <article class="panel network">
+        <div class="panel-head"><h2>网络出口</h2><button id="refresh-proxy" class="secondary">刷新节点</button></div>
+        <div class="row"><label>模式<select id="network-mode"><option value="inherit">跟随主项目</option><option value="clash_auto">Clash 自动</option><option value="clash_fixed">Clash 固定</option><option value="residential">住宅代理</option><option value="direct">直连</option></select></label><label>当前节点<select id="network-node"><option value="">自动选择</option></select></label></div>
+        <p id="proxy-message" class="message"></p>
+      </article>
+      <article class="panel import">
+        <div class="panel-head"><h2>邮箱资产</h2><span id="email-count">0</span></div>
+        <textarea id="email-input" class="large" placeholder="email----password----client_id----refresh_token"></textarea>
+        <div class="actions"><button id="import-emails">导入邮箱</button><button id="sync-emails" class="secondary">同步主邮箱池</button><button id="refresh-emails" class="secondary">刷新</button></div>
+        <div class="actions"><button id="delete-emails" class="secondary">删除选中</button><input id="split-count" type="number" min="1" max="50" value="4"><button id="split-emails" class="secondary">拆分子邮箱</button><button id="export-data" class="secondary">导出数据</button><label class="file-button secondary">导入数据<input id="import-data" type="file" accept="application/json"></label></div>
+        <div id="emails" class="list"></div>
+      </article>
+    </section>
+    <section class="panel tasks">
+      <div class="panel-head"><h2>任务队列</h2><div class="actions"><input id="task-count" type="number" min="1" value="1"><button id="start-tasks">启动任务</button><button id="check-at" class="secondary">AT 测活</button><button id="repair-at" class="secondary">修复失效 AT</button><button id="clear-failed" class="secondary">清理失败</button><button id="refresh-tasks" class="secondary">刷新</button></div></div>
+      <div id="tasks" class="task-list"></div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

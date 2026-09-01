@@ -55,6 +55,9 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot "CHANGELOG.md") -Destination $Packag
 Copy-Item -LiteralPath (Join-Path $RepoRoot ".env.example") -Destination $PackageRoot
 Copy-Item -LiteralPath (Join-Path $RepoRoot "VERSION") -Destination $PackageRoot
 Copy-Item -LiteralPath (Join-Path $RepoRoot "docs") -Destination $PackageRoot -Recurse
+Copy-Item -LiteralPath (Join-Path $RepoRoot "start_k12.bat") -Destination $PackageRoot
+Copy-Item -LiteralPath (Join-Path $RepoRoot "start_k12.sh") -Destination $PackageRoot
+Copy-Item -LiteralPath (Join-Path $RepoRoot "k12" "README.md") -Destination (Join-Path $PackageRoot "K12-README.md")
 
 Get-ChildItem -LiteralPath $PackageRoot -Recurse -Directory -Filter "__pycache__" |
     Sort-Object FullName -Descending |
