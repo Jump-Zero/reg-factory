@@ -213,6 +213,7 @@ async function showView(v){
   $('#view-mailpool').style.display = v==='mailpool' ? 'block' : 'none';
   $('#view-k12').style.display = v==='k12' ? 'block' : 'none';
   $('#view-plus').style.display = v==='plus' ? 'flex' : 'none';
+  $('#view-health').style.display = v==='health' ? 'flex' : 'none';
   $$('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.view===v));
   if(v!=='run' && v!=='embed') $$('.scriptbtn').forEach(b=>b.classList.remove('active'));
   if(initializedViews.has(v)) return Promise.resolve();
@@ -223,6 +224,7 @@ async function showView(v){
     mailpool:loadMailpool,
     k12:openK12Channel,
     plus:loadPlusPanel,
+    health:loadHealthPanel,
   };
   const loader = loaders[v];
   if(!loader) return Promise.resolve();
@@ -599,12 +601,14 @@ function updateAssetStatusSummary(){
   if(!assetScanData) return;
   const platform = $('#asset-scan-platform')?.value || 'all';
   const source = $('#asset-scan-source') ? $('#asset-scan-source').value : 'all';
+  const split = $('#asset-scan-split') ? $('#asset-scan-split').value : 'all';
   const stack = buildAssetStackIndex(assetScanData.items || []);
   const items = (assetScanData.items || []).filter(item=>
     (platform === 'all' || item.platform === platform) &&
     // 与表格口径一致：被堆叠的子账号/子邮箱收纳在母行下，不单独计入汇总
     !stack.childKeys.has(assetItemKey(item)) &&
-    (source === 'all' || item.mail_source === source)
+    (source === 'all' || item.mail_source === source) &&
+    splitAssetMatch(item, split)
   );
   const counts = {};
   let subImported = 0, subNotImported = 0;
@@ -626,6 +630,7 @@ function filteredAssetScanItems(){
   const platform = $('#asset-scan-platform').value;
   const status = $('#asset-scan-status').value;
   const source = $('#asset-scan-source') ? $('#asset-scan-source').value : 'all';
+  const split = $('#asset-scan-split') ? $('#asset-scan-split').value : 'all';
   const stack = buildAssetStackIndex(assetScanData.items || []);
   return (assetScanData.items || []).filter(item=>
     (platform === 'all' || item.platform === platform) &&
@@ -635,8 +640,19 @@ function filteredAssetScanItems(){
      (status === 'sub_imported' && item.sub2api_uploaded) ||
      (status === 'sub_not_imported' && !item.sub2api_uploaded) ||
      (status !== 'sub_imported' && status !== 'sub_not_imported' && item.status === status)) &&
-    (source === 'all' || item.mail_source === source)
+    (source === 'all' || item.mail_source === source) &&
+    splitAssetMatch(item, split)
   );
+}
+
+// outlook 母邮箱分裂状态筛选：已分裂=is_parent；未分裂=非子邮箱且从未分裂过。
+// 非 outlook 平台没有母/子概念，split 非 all 时不显示。
+function splitAssetMatch(item, mode){
+  if(mode === 'all') return true;
+  if(item.platform !== 'outlook') return false;
+  if(mode === 'split') return !!item.is_parent;
+  if(mode === 'unsplit') return !item.is_parent && !item.parent_email;
+  return true;
 }
 
 function renderAssetScanTable(){
@@ -850,6 +866,7 @@ function renderAssetScanTable(){
 
 function renderAssetScan(data){
   assetScanData = data;
+  updateAssetPlatformUi();
   updateAssetStatusSummary();
   const scan = data.scan || {};
   const progress = scan.progress || {};
@@ -1085,7 +1102,20 @@ $('#asset-email-provider').onchange = updateAssetRequestPreview;
 $('#asset-status-filter').onchange = updateAssetRequestPreview;
 $('#asset-api-key').oninput = updateAssetRequestPreview;
 $$('[data-asset-pick]').forEach(button=>button.onclick=()=>setAssetPickMode(button.dataset.assetPick));
-$('#btn-refresh-assets').onclick = ()=>Promise.all([refreshAssetSummary(), loadAssetScan()]);
+// 刷新按钮：重拉资产统计与扫描列表。按钮转圈 + 扫描区可见消息（统计数字无变化时也能感知刷新动作）
+$('#btn-refresh-assets').onclick = async ()=>{
+  const button = $('#btn-refresh-assets');
+  button.classList.add('spinning');
+  setAssetMessage('#asset-scan-msg', '正在刷新资产数据…');
+  try{
+    await Promise.all([refreshAssetSummary(), loadAssetScan()]);
+    setAssetMessage('#asset-scan-msg', '资产数据已刷新', true);
+  }catch(error){
+    setAssetMessage('#asset-scan-msg', error.message || String(error), false);
+  }finally{
+    button.classList.remove('spinning');
+  }
+};
 $('#btn-save-asset-key').onclick = saveAssetKey;
 $('#btn-call-asset').onclick = callAssetApi;
 $('#btn-export-assets').onclick = exportAssetBatch;
@@ -1095,7 +1125,7 @@ $('#btn-copy-curl').onclick = ()=>copyText($('#asset-curl-example').textContent,
 $('#btn-scan-all').onclick = ()=>startAssetScan(true);
 $('#btn-scan-current').onclick = ()=>startAssetScan(false);
 $('#btn-scan-selected').onclick = ()=>startAssetScanSelected();
-$('#asset-scan-platform').onchange = ()=>{ assetScanPage = 1; updateAssetStatusSummary(); renderAssetScanTable(); updateScanSelectAllState(); };
+$('#asset-scan-platform').onchange = ()=>{ assetScanPage = 1; updateAssetPlatformUi(); updateAssetStatusSummary(); renderAssetScanTable(); updateScanSelectAllState(); };
 $('#asset-scan-status').onchange = ()=>{ assetScanPage = 1; renderAssetScanTable(); };
 $$('[data-scan-status]').forEach(button=>button.onclick=()=>{
   $('#asset-scan-status').value = button.dataset.scanStatus;
@@ -1105,6 +1135,21 @@ $$('[data-scan-status]').forEach(button=>button.onclick=()=>{
 $('#btn-scan-prev').onclick = ()=>{ assetScanPage -= 1; renderAssetScanTable(); };
 $('#btn-scan-next').onclick = ()=>{ assetScanPage += 1; renderAssetScanTable(); };
 $('#asset-scan-source').onchange = ()=>{ assetScanPage = 1; updateAssetStatusSummary(); renderAssetScanTable(); };
+// outlook 平台的工具栏裁剪：无母/子概念隐藏分裂筛选；OmniRoute 导入仅面向 Kiro 等账号邮箱，outlook 邮箱池不提供
+function updateAssetPlatformUi(){
+  const isOutlook = $('#asset-scan-platform').value === 'outlook';
+  const wrap = $('#asset-scan-split-wrap');
+  if(wrap){
+    wrap.style.display = isOutlook ? '' : 'none';
+    if(!isOutlook){
+      const sel = $('#asset-scan-split');
+      if(sel && sel.value !== 'all'){ sel.value = 'all'; assetScanPage = 1; }
+    }
+  }
+  const omniBtn = $('#btn-omni-import');
+  if(omniBtn) omniBtn.style.display = isOutlook ? 'none' : '';
+}
+$('#asset-scan-split').onchange = ()=>{ assetScanPage = 1; updateAssetStatusSummary(); renderAssetScanTable(); updateScanSelectAllState(); };
 
 // 扫描表格复选框 + 批量删除
 function getCheckedScanEmails(){
@@ -2438,16 +2483,21 @@ function renderLiyeCardList(pool){
     box.innerHTML = '<p class="liye-card-empty">卡池为空，可先导入卡密。</p>';
     return;
   }
+  const selectedCount = cards.filter(c=>c.selected).length;
+  const allChecked = selectedCount > 0 && selectedCount === cards.length;
   box.innerHTML = `<table class="gopay-table liye-card-table"><thead>
-      <tr><th>卡密</th><th>状态</th><th>号码</th><th></th></tr>
+      <tr><th class="liye-sel-col"><input type="checkbox" data-liye-check-all title="全选/取消全选（勾选的卡优先接码）" ${allChecked ? 'checked' : ''}></th>
+          <th>卡密</th><th>状态</th><th>号码</th><th></th></tr>
     </thead><tbody>${cards.map(card=>{
       const full = String(card.full_code || '');
       const encoded = encodeURIComponent(full);
       return `<tr>
-        <td title="${escapeHtml(full)}">${escapeHtml(card.code || '-')}</td>
+        <td class="liye-sel-col"><input type="checkbox" data-liye-check="${encoded}" title="勾选后该卡优先用于接码" ${card.selected ? 'checked' : ''}></td>
+        <td><code class="liye-code" title="点击复制卡密" data-liye-copy="${encoded}">${escapeHtml(full || card.code || '-')}</code></td>
         <td>${escapeHtml(liyeStatusLabel(card))}</td>
         <td>${escapeHtml(card.phone || '-')}</td>
         <td><div class="gopay-row-actions">
+          <button type="button" data-liye-copy="${encoded}">复制</button>
           <button class="danger" type="button" data-liye-delete="${encoded}"
             ${card.status === 'in_use' ? 'disabled title="占用中，请稍后或先「检查恢复」"' : ''}>删除</button>
         </div></td>
@@ -2505,6 +2555,35 @@ async function deleteLiyeCard(encodedCode, summaryId, messageId){
   }catch(error){
     message.textContent = error.message || String(error);
     message.className = 'bad';
+  }
+}
+
+async function saveLiyeSelection(summaryId='oauth-liye-summary', messageId='oauth-liye-message'){
+  const message = $(`#${messageId}`);
+  const codes = [...document.querySelectorAll('#oauth-liye-list [data-liye-check]:checked')]
+    .map(box=>decodeURIComponent(box.dataset.liyeCheck));
+  try{
+    const response = await fetch('/api/sms/liye/select', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({codes}),
+    });
+    const result = await readJsonResponse(response);
+    if(!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    renderLiyeCardsSummary(result.summary || {}, summaryId);
+    renderLiyeCardList(result.summary || {});   // 以服务端状态为准，刷新表头全选框
+    if(message){
+      message.textContent = codes.length
+        ? `已勾选 ${codes.length} 张优先接码；未勾选时按列表顺序取用`
+        : '已取消全部勾选，按列表顺序取用';
+      message.className = '';
+    }
+  }catch(error){
+    if(message){
+      message.textContent = `保存勾选失败：${error.message || error}`;
+      message.className = 'bad';
+    }
+    await loadLiyeCardsPool(summaryId);   // 失败时按服务端状态回滚显示
   }
 }
 
@@ -2820,9 +2899,24 @@ function renderForm(s){
       if(!box.hidden) await loadLiyeCardsPool('oauth-liye-summary');
     };
     liye.querySelector('#oauth-liye-list').onclick = event=>{
+      const copy = event.target.closest('[data-liye-copy]');
+      if(copy){
+        copyText(decodeURIComponent(copy.dataset.liyeCopy), copy);
+        return;
+      }
       const button = event.target.closest('[data-liye-delete]');
       if(!button || button.disabled) return;
       deleteLiyeCard(button.dataset.liyeDelete, 'oauth-liye-summary', 'oauth-liye-message');
+    };
+    liye.querySelector('#oauth-liye-list').onchange = event=>{
+      const box = event.target;
+      const isAll = box.matches('[data-liye-check-all]');
+      if(!isAll && !box.matches('[data-liye-check]')) return;
+      if(isAll){
+        liye.querySelectorAll('#oauth-liye-list tbody [data-liye-check]')
+          .forEach(item=>{ item.checked = box.checked; });
+      }
+      saveLiyeSelection('oauth-liye-summary', 'oauth-liye-message');
     };
   }
 
@@ -3746,6 +3840,683 @@ function renderMailpoolStats(d){
       <tbody>${rows}</tbody>
     </table></div>`;
 }
+
+// ---------------------------------------------------------------- 账号健康（401 处置）
+const HEALTH_LABELS = {
+  ok:'正常', suspect:'待探测', fixable:'可修复', suspicious_banned:'封禁嫌疑',
+  sub2api_active:'SUB2API 正常',
+  no_refresh:'无 refresh_token', no_local:'本地无凭据', network_error:'网络异常', refresh_error:'刷新异常',
+  reauth:'可重新授权', probe_error:'探测异常',
+};
+let healthBusy = false;
+let healthEventSource = null;
+
+function healthPlatformValue(){
+  const node = $('#health-platform');
+  return node ? node.value : 'all';
+}
+
+// 封禁隔离时对 SUB2API 上账号的处置方式：disable=禁用（默认），delete=删除（不可恢复）
+function healthSub2apiAction(){
+  const node = $('#health-sub2api-action');
+  return node && node.value === 'delete' ? 'delete' : 'disable';
+}
+
+// 行内操作按钮按「平台 + 分类」决定：openai 走修复/浏览器确认隔离，grok 走 sso 探测/直接隔离/重导入。
+function healthRowActions(row){
+  if(row.platform === 'grok'){
+    if(row.category === 'suspect') return [{label:'探测', kind:'scan-one'}];
+    if(row.category === 'suspicious_banned') return [{label:'直接隔离', kind:'grok-quarantine'}];
+    if(row.category === 'reauth' || row.category === 'no_local') return [{label:'重新授权导入', kind:'grok-reimport'}];
+    if(row.category === 'probe_error' || row.category === 'network_error') return [{label:'重扫', kind:'scan-one'}];
+    return [];
+  }
+  const openaiActions = {
+    suspect:[{label:'探测', kind:'scan-one'}],
+    fixable:[{label:'修复', kind:'fix'}],
+    suspicious_banned:[{label:'封禁确认', kind:'quarantine'}],
+    sub2api_active:[{label:'重新授权', kind:'reauth'}],
+    no_refresh:[{label:'重新授权', kind:'reauth'}],
+    no_local:[{label:'重新授权', kind:'reauth'}],
+    refresh_error:[{label:'重扫', kind:'scan-one'}],
+    network_error:[{label:'重扫', kind:'scan-one'}],
+  };
+  return openaiActions[row.category] || [];
+}
+
+function setHealthMessage(text, kind=''){
+  const node = $('#health-msg');
+  if(!node) return;
+  node.textContent = text;
+  node.style.color = kind === 'bad' ? 'var(--red)' : kind === 'ok' ? 'var(--green)' : '';
+}
+
+function setHealthRunState(text, cls='idle'){
+  const node = $('#health-run-state');
+  if(!node) return;
+  node.textContent = text;
+  node.className = `run-state ${cls}`;
+}
+
+function appendHealthLog(line){
+  const log = $('#health-log');
+  if(!log) return;
+  log.textContent += (log.textContent ? '\n' : '') + line;
+  log.scrollTop = log.scrollHeight;
+}
+
+// 账号列表前端分页：数据全量缓存在客户端，勾选状态跨页保留（键 = 平台|邮箱）。
+let healthRowsCache = [];
+let healthPage = 1;
+let healthPageSize = 50;
+const healthChecked = new Set();
+
+// 分类筛选：平台走工具栏全局选择，这里按健康分类 / SUB2API 状态 / 本地凭据过滤。
+let healthFilterCategory = 'all';
+let healthFilterStatus = 'all';
+let healthFilterLocal = 'all';
+
+function filteredHealthRows(){
+  return healthRowsCache.filter(row=>{
+    if(healthFilterCategory !== 'all' && String(row.category || '') !== healthFilterCategory) return false;
+    if(healthFilterStatus !== 'all' && String(row.status || '') !== healthFilterStatus) return false;
+    if(healthFilterLocal === 'yes' && !row.local) return false;
+    if(healthFilterLocal === 'no' && row.local) return false;
+    return true;
+  });
+}
+
+// 按当前数据重建筛选下拉选项（保留已选值），选项后附数量便于分类总览。
+function rebuildHealthFilterOptions(id, keyOf, labelOf){
+  const sel = $(id);
+  if(!sel) return;
+  const counts = {};
+  healthRowsCache.forEach(row=>{
+    const key = keyOf(row);
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  const current = sel.value || 'all';
+  const keys = Object.keys(counts).sort((a,b)=> counts[b] - counts[a] || String(a).localeCompare(String(b)));
+  sel.innerHTML = '<option value="all">全部</option>' + keys.map(key=>
+    `<option value="${key}">${labelOf ? labelOf(key) : key} (${counts[key]})</option>`).join('');
+  sel.value = keys.includes(current) || current === 'all' ? current : 'all';
+}
+
+function refreshHealthFilterOptions(){
+  rebuildHealthFilterOptions('#health-filter-category', row=>String(row.category || 'unknown'),
+    key=>HEALTH_LABELS[key] || key);
+  rebuildHealthFilterOptions('#health-filter-status', row=>String(row.status || 'unknown'));
+  rebuildHealthFilterOptions('#health-filter-local',
+    row=> row.local ? 'yes' : 'no', key=> key === 'yes' ? '有' : '无');
+}
+
+function healthCheckedKey(row){
+  return `${row.platform || 'openai'}|${row.email}`;
+}
+
+function healthEffectiveSize(){
+  return healthPageSize > 0 ? healthPageSize : Math.max(1, filteredHealthRows().length);
+}
+
+function healthTotalPages(){
+  return Math.max(1, Math.ceil(filteredHealthRows().length / healthEffectiveSize()));
+}
+
+function currentHealthPageRows(){
+  const size = healthEffectiveSize();
+  const start = (healthPage - 1) * size;
+  return filteredHealthRows().slice(start, start + size);
+}
+
+function healthSelectedRows(){
+  return healthRowsCache.filter(row=>healthChecked.has(healthCheckedKey(row)))
+    .map(row=>({email: row.email, platform: row.platform || 'openai'}));
+}
+
+function healthSelectedEmails(){
+  return healthSelectedRows().map(row=>row.email);
+}
+
+// 批量操作按平台分组：openai 走原链路，grok 走直接隔离/重导入链路。
+function splitHealthSelection(){
+  const rows = healthSelectedRows();
+  const byPlatform = {openai:[], grok:[]};
+  rows.forEach(row=>{
+    if(byPlatform[row.platform]) byPlatform[row.platform].push(row.email);
+  });
+  return byPlatform;
+}
+
+function syncHealthBatchButtons(){
+  const has = healthSelectedEmails().length > 0;
+  ['#btn-health-fix','#btn-health-quarantine','#btn-health-reauth'].forEach(id=>{
+    const btn = $(id);
+    if(btn && !healthBusy) btn.disabled = !has;
+  });
+}
+
+function setHealthBusy(busy){
+  healthBusy = busy;
+  ['#btn-health-scan','#btn-refresh-health','#btn-health-fix','#btn-health-quarantine','#btn-health-reauth'].forEach(id=>{
+    const btn = $(id);
+    if(btn) btn.disabled = busy;
+  });
+  if(!busy) syncHealthBatchButtons();
+}
+
+function renderHealth(data){
+  healthRowsCache = Array.isArray(data && data.accounts) ? data.accounts : [];
+  // 清理已不在最新扫描结果中的勾选，页码收缩时回退到最后一页
+  const validKeys = new Set(healthRowsCache.map(healthCheckedKey));
+  [...healthChecked].forEach(key=>{ if(!validKeys.has(key)) healthChecked.delete(key); });
+  healthPage = Math.min(Math.max(1, healthPage), healthTotalPages());
+  refreshHealthFilterOptions();
+  const summary = $('#health-summary');
+  if(summary){
+    const entries = Object.entries((data && data.summary) || {}).filter(([,count])=>count>0);
+    summary.innerHTML = entries.length
+      ? entries.map(([key,count])=>`<span class="health-chip hc-${key}">${HEALTH_LABELS[key]||key}<b>${count}</b></span>`).join('')
+      : '<span class="hint">暂无分类统计</span>';
+  }
+  renderHealthPage();
+}
+
+function renderHealthPage(){
+  const tbody = $('#health-tbody');
+  if(!tbody) return;
+  // 分页控件状态
+  const pages = healthTotalPages();
+  const pageInfo = $('#health-page-info');
+  if(pageInfo) pageInfo.textContent = `${healthPage} / ${pages}`;
+  const prev = $('#btn-health-prev');
+  const next = $('#btn-health-next');
+  if(prev) prev.disabled = healthPage <= 1;
+  if(next) next.disabled = healthPage >= pages;
+  const totalEl = $('#health-page-total');
+  const filteredCount = filteredHealthRows().length;
+  const filterActive = healthFilterCategory !== 'all' || healthFilterStatus !== 'all' || healthFilterLocal !== 'all';
+  if(totalEl){
+    totalEl.textContent = !filteredCount ? ''
+      : filterActive ? `筛选出 ${filteredCount} / ${healthRowsCache.length} 个账号`
+      : `共 ${filteredCount} 个账号`;
+  }
+  if(!healthRowsCache.length){
+    const names = {all:'任何平台', openai:'GPT', grok:'Grok'};
+    const label = names[healthPlatformValue()] || '所选平台';
+    tbody.innerHTML = `<tr><td colspan="8" class="health-empty">没有本项目导入到 SUB2API 的${label}账号</td></tr>`;
+    syncHealthSelectAll();
+    syncHealthBatchButtons();
+    return;
+  }
+  if(!filteredCount){
+    tbody.innerHTML = '<tr><td colspan="8" class="health-empty">没有符合当前筛选条件的账号（可点「清除筛选」）</td></tr>';
+    syncHealthSelectAll();
+    syncHealthBatchButtons();
+    return;
+  }
+  const rows = currentHealthPageRows();
+  tbody.innerHTML = rows.map(row=>{
+    const actions = healthRowActions(row).map(action=>
+      `<button class="health-row-btn" type="button" data-kind="${action.kind}" data-email="${row.email}" data-platform="${row.platform || 'openai'}">${action.label}</button>`
+    ).join('');
+    const detail = String(row.detail || '').replace(/"/g, '&quot;');
+    const checked = healthChecked.has(healthCheckedKey(row)) ? ' checked' : '';
+    return `<tr>
+      <td><input type="checkbox"${checked} data-email="${row.email}" data-platform="${row.platform || 'openai'}" aria-label="选择 ${row.email}"></td>
+      <td class="health-email" title="${row.email}">${row.email || row.name || '(未命名)'}</td>
+      <td>${row.platform_label || row.platform || ''}</td>
+      <td><span class="health-chip hc-${row.category}">${HEALTH_LABELS[row.category]||row.category}</span></td>
+      <td>${row.status || 'unknown'}</td>
+      <td>${row.local ? '有' : '无'}</td>
+      <td class="health-detail" title="${detail}">${row.detail || ''}</td>
+      <td class="health-actions">${actions || '<span class="health-none">—</span>'}</td>
+    </tr>`;
+  }).join('');
+  $$('#health-tbody input[data-email]').forEach(box=>{
+    box.onchange = ()=>{
+      const key = `${box.dataset.platform || 'openai'}|${box.dataset.email}`;
+      if(box.checked) healthChecked.add(key); else healthChecked.delete(key);
+      syncHealthSelectAll();
+      syncHealthBatchButtons();
+    };
+  });
+  $$('#health-tbody .health-row-btn').forEach(btn=> btn.onclick = ()=>runHealthAction(btn.dataset.kind, [btn.dataset.email], btn.dataset.platform));
+  syncHealthSelectAll();
+  syncHealthBatchButtons();
+}
+
+// 全选框只作用于当前页可见行，但勾选状态跨页保留
+function syncHealthSelectAll(){
+  const all = $('#health-select-all');
+  if(!all) return;
+  const rows = currentHealthPageRows();
+  const checkedCount = rows.filter(row=>healthChecked.has(healthCheckedKey(row))).length;
+  all.checked = rows.length > 0 && checkedCount === rows.length;
+}
+
+async function healthScan(probe, {emails=null, silent=false, platform: platformOpt=null, merge=false}={}){
+  if(healthBusy) return;
+  setHealthBusy(true);
+  setHealthRunState('运行中', 'running');
+  if(!silent) setHealthMessage(emails ? `正在扫描筛选出的 ${emails.length} 个账号…` : '正在扫描本项目导入的账号…');
+  try{
+    const platform = platformOpt || healthPlatformValue();
+    const response = await fetch('/api/health/scan', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({probe, emails: emails || undefined, platform: platform || undefined}),
+    });
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if(data.error) throw new Error(data.error);
+    if(merge && healthRowsCache.length){
+      // 定向扫描只返回筛选范围的结果：按「平台|邮箱」合并回缓存，未扫账号保留
+      const byKey = new Map(healthRowsCache.map(row=>[healthCheckedKey(row), row]));
+      (data.accounts || []).forEach(row=>{ byKey.set(healthCheckedKey(row), row); });
+      data.accounts = [...byKey.values()];
+      // 顶部分类统计与合并后的全集保持一致
+      const counts = {};
+      data.accounts.forEach(row=>{ const key=String(row.category||'unknown'); counts[key]=(counts[key]||0)+1; });
+      data.summary = counts;
+    }
+    renderHealth(data);
+    const excluded = Number(data.excluded_not_imported) || 0;
+    if(!silent || emails) setHealthMessage(
+      merge
+        ? `扫描完成：筛选的 ${(emails||[]).length} 个账号已刷新（列表共 ${data.accounts.length} 个）`
+        : `扫描完成：本项目导入账号 ${data.accounts.length} 个` + (excluded ? `（已忽略 SUB2API 上 ${excluded} 个非本项目账号）` : ''),
+      'ok');
+  }catch(error){
+    setHealthMessage(error.message || String(error), 'bad');
+  }finally{
+    setHealthRunState('待运行', 'idle');
+    setHealthBusy(false);
+  }
+}
+
+// 进入健康页/切平台时读取上次扫描缓存：账号状态延续上次扫描的快照，直到下一次扫描才刷新
+async function loadHealthCached(){
+  setHealthRunState('运行中', 'running');
+  setHealthMessage('正在读取上次扫描结果…');
+  try{
+    const response = await fetch(`/api/health/cached?platform=${encodeURIComponent(healthPlatformValue())}`, {cache:'no-store'});
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if(!data.cached){
+      renderHealth({accounts: [], summary: {}});
+      setHealthMessage('还没有扫描记录，点击「扫描账号状态」获取账号健康状态');
+      return;
+    }
+    renderHealth(data);
+    const when = data.saved_at ? new Date(data.saved_at * 1000).toLocaleString() : '';
+    setHealthMessage(
+      (when ? `显示上次扫描结果（${when}）` : '显示上次扫描结果')
+      + '，账号状态保持不变，直到下一次扫描', 'ok');
+  }catch(error){
+    setHealthMessage(error.message || String(error), 'bad');
+  }finally{
+    setHealthRunState('待运行', 'idle');
+  }
+}
+
+async function healthAct(endpoint, payload, runningText){
+  setHealthBusy(true);
+  setHealthRunState('运行中', 'running');
+  setHealthMessage(runningText);
+  try{
+    const response = await fetch(endpoint, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload),
+    });
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    return data;
+  }catch(error){
+    setHealthMessage(error.message || String(error), 'bad');
+    return null;
+  }finally{
+    setHealthRunState('待运行', 'idle');
+    setHealthBusy(false);
+  }
+}
+
+function healthLogResults(prefix, results){
+  (results || []).forEach(row=> appendHealthLog(`[${prefix}] ${row.email || '(未知)'}: ${row.state} - ${row.detail || ''}`));
+}
+
+async function healthFix(emails){
+  const data = await healthAct('/api/health/fix', {emails}, `正在免浏览器修复 ${emails.length} 个账号…`);
+  if(!data) return;
+  healthLogResults('fix', data.results);
+  const counts = data.summary || {};
+  const failed = (counts.failed || 0) + (counts.skipped || 0);
+  setHealthMessage(`修复完成：成功 ${counts.fixed || 0}，未修复 ${failed}（详情见日志）`, counts.fixed ? 'ok' : 'bad');
+  healthScan($('#health-probe').value, {silent:true});
+}
+
+async function healthQuarantine(emails, platform='openai', {rescan=true}={}){
+  const isGrok = platform === 'grok';
+  const deleteMode = healthSub2apiAction() === 'delete';
+  const subVerb = deleteMode ? '删除' : '禁用';
+  const data = await healthAct('/api/health/quarantine',
+    {emails, confirm_browser: !isGrok, platform, sub2api_action: healthSub2apiAction()},
+    isGrok
+      ? `正在直接隔离 ${emails.length} 个 Grok 账号（归档本地 sso 并在 SUB2API ${subVerb}）…`
+      : `正在浏览器确认 ${emails.length} 个账号（每号最多 4 分钟），请勿关闭指纹浏览器窗口…`);
+  if(!data) return;
+  healthLogResults('quarantine', data.results);
+  const quarantined = (data.results || []).filter(r=>r.state === 'quarantined').length;
+  if(isGrok){
+    setHealthMessage(
+      quarantined
+        ? `Grok 隔离完成：${quarantined} 个已归档并在 SUB2API ${subVerb}（详情见日志）`
+        : 'Grok 隔离完成：没有账号被隔离，详情见日志',
+      quarantined ? '' : 'ok',
+    );
+  }else{
+    setHealthMessage(
+      quarantined
+        ? `处置完成：确认封禁并隔离 ${quarantined} 个（详情见日志）`
+        : '处置完成：没有账号被确认封禁，建议改走「重新授权」（详情见日志）',
+      quarantined ? '' : 'ok',
+    );
+  }
+  if(rescan) healthScan($('#health-probe').value, {silent:true});
+}
+
+async function healthReauth(emails){
+  const data = await healthAct('/api/health/reauth', {emails}, `正在为 ${emails.length} 个账号准备重新授权…`);
+  if(!data) return;
+  (data.skipped || []).forEach(row=> appendHealthLog(`[reauth] 跳过 ${row.email}: ${row.reason || ''}`));
+  setHealthMessage(`已创建重新授权任务（${data.accepted} 个账号），日志见下方`, 'ok');
+  if(data.run_id) monitorHealthRun(data.run_id);
+}
+
+// Grok 重新授权导入：复用资产导入链路（本地 sso 换 SUB2API oauth，含 Clash 节点过 Cloudflare）。
+// 注意：sub2api-import 的 skipped 是 "email: 原因" 字符串数组，不是对象。
+async function healthGrokReimport(emails){
+  const data = await healthAct('/api/assets/sub2api-import', {emails, platform:'grok'},
+    `正在为 ${emails.length} 个 Grok 账号重新授权导入 SUB2API（sso 换 oauth，可能较慢）…`);
+  if(!data) return;
+  (data.skipped || []).forEach(line=> appendHealthLog(`[grok-reimport] 跳过 ${line}`));
+  setHealthMessage(data.msg || (data.ok ? '导入完成（详情见日志）' : '导入失败（详情见日志）'), data.ok ? 'ok' : 'bad');
+  if(data.ok) healthScan($('#health-probe').value, {silent:true});
+}
+
+function escapeHealthCell(text){
+  return String(text == null ? '' : text)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// Claude 本地清点：未接入 SUB2API，不发任何网络请求，只列本地凭据文件。
+async function loadHealthClaude(){
+  setHealthRunState('运行中', 'running');
+  setHealthMessage('正在清点本地 Claude 凭据…');
+  try{
+    const response = await fetch('/api/health/claude', {cache:'no-store'});
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    renderHealthClaude(data);
+    setHealthMessage((data && data.note) || `本地共 ${(data && data.total) || 0} 个 Claude 凭据文件`, 'ok');
+  }catch(error){
+    setHealthMessage(error.message || String(error), 'bad');
+  }finally{
+    setHealthRunState('待运行', 'idle');
+  }
+}
+
+function renderHealthClaude(data){
+  const items = Array.isArray(data && data.items) ? data.items : [];
+  const summary = $('#health-claude-summary');
+  if(summary) summary.textContent = (data && data.note) || `本地共 ${items.length} 个 Claude 凭据文件（仅清点，无 401 探测与处置）`;
+  const tbody = $('#health-claude-tbody');
+  if(!tbody) return;
+  if(!items.length){
+    tbody.innerHTML = '<tr><td colspan="5" class="health-empty">本地没有 Claude 凭据文件（cookies 目录）</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map(item=>`<tr>
+    <td class="health-email">${escapeHealthCell(item.email) || '(未识别邮箱)'}</td>
+    <td title="${escapeHealthCell(item.file)}">${escapeHealthCell(item.file)}</td>
+    <td>${Number(item.size_kb) || 0} KB</td>
+    <td>${escapeHealthCell(item.modified)}</td>
+    <td title="${escapeHealthCell(item.directory)}">${escapeHealthCell(item.directory)}</td>
+  </tr>`).join('');
+}
+
+function monitorHealthRun(runId){
+  if(healthEventSource) healthEventSource.close();
+  setHealthRunState('运行中', 'running');
+  appendHealthLog(`[webui] 重新授权任务已启动 run_id=${runId}`);
+  healthEventSource = new EventSource(`/api/logs/${runId}`);
+  healthEventSource.onmessage = event=>{
+    if(event.data) appendHealthLog(event.data);
+  };
+  healthEventSource.addEventListener('done', event=>{
+    let result = {};
+    try{ result = JSON.parse(event.data || '{}'); }catch(e){}
+    const ok = result.returncode === 0;
+    appendHealthLog(ok ? '[webui] 重新授权任务完成' : `[webui] 任务结束 returncode=${result.returncode}，请检查失败账号`);
+    setHealthRunState(ok ? '完成' : '结束', ok ? 'success' : 'failed');
+    healthEventSource.close();
+    healthEventSource = null;
+    healthScan($('#health-probe').value, {silent:true});
+  });
+  healthEventSource.onerror = ()=>{
+    setHealthRunState('日志中断', 'failed');
+  };
+}
+
+async function runHealthAction(kind, emails, platform){
+  if(!emails || !emails.length || healthBusy) return;
+  const rowPlatform = platform || 'openai';
+  if(kind === 'fix') return healthFix(emails);
+  if(kind === 'reauth') return healthReauth(emails);
+  if(kind === 'grok-reimport') return healthGrokReimport(emails);
+  if(kind === 'quarantine'){
+    if(!confirm(`将对 ${emails.length} 个账号打开指纹浏览器确认封禁状态；确认封禁的账号会隔离本地资产并禁用 SUB2API 账号。继续？`)) return;
+    return healthQuarantine(emails, rowPlatform === 'grok' ? 'grok' : 'openai');
+  }
+  if(kind === 'grok-quarantine'){
+    if(!confirm(`将直接隔离 ${emails.length} 个 Grok 账号：归档本地 sso 文件并在 SUB2API 禁用（xAI 已判定风控，无需浏览器确认）。继续？`)) return;
+    return healthQuarantine(emails, 'grok');
+  }
+  if(kind === 'scan-one') return healthScan('suspects', {emails, platform: rowPlatform});
+}
+
+async function loadHealthSchedule(){
+  try{
+    const response = await fetch('/api/health/schedule', {cache:'no-store'});
+    const data = await readJsonResponse(response);
+    if(!response.ok) return;
+    const enabled = $('#health-schedule-enabled');
+    const interval = $('#health-schedule-interval');
+    if(enabled) enabled.checked = !!data.enabled;
+    if(interval) interval.value = data.interval_minutes || 60;
+    const state = $('#health-schedule-state');
+    if(state){
+      const last = data.last_run ? new Date(data.last_run * 1000).toLocaleString() : '从未运行';
+      let text = `定时巡检：${data.enabled ? '已开启' : '未开启'} · 上次运行 ${last}`;
+      if(data.last_state === 'running') text += ' · 巡检进行中';
+      else if(data.last_state === 'failed') text += ` · 上次失败: ${data.last_error || ''}`;
+      else if(data.last_result && data.last_result.summary){
+        text += ' · 上次结果 ' + Object.entries(data.last_result.summary).map(([key,value])=>`${HEALTH_LABELS[key]||key}:${value}`).join('，');
+      }
+      state.textContent = text;
+    }
+  }catch(error){ /* 定时状态读取失败不阻塞面板 */ }
+}
+
+async function saveHealthSchedule(){
+  const enabled = $('#health-schedule-enabled');
+  const interval = $('#health-schedule-interval');
+  try{
+    const response = await fetch('/api/health/schedule', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        enabled: enabled ? enabled.checked : false,
+        interval_minutes: interval ? Number(interval.value) || 60 : 60,
+      }),
+    });
+    const data = await readJsonResponse(response);
+    if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    setHealthMessage('定时巡检设置已保存', 'ok');
+    loadHealthSchedule();
+  }catch(error){
+    setHealthMessage(error.message || String(error), 'bad');
+  }
+}
+
+async function loadHealthPanel(){
+  await loadHealthSchedule();
+  // 进入页面只显示上次扫描的缓存状态，不自动扫描；需要最新状态时手动扫描。
+  await loadHealthCached();
+}
+
+// 批量操作按选中行的平台分组执行；GPT 与 Grok 混选时先浏览器确认组，再 Grok 直接隔离组。
+async function runHealthBatch(kind){
+  const byPlatform = splitHealthSelection();
+  const openai = byPlatform.openai || [];
+  const grok = byPlatform.grok || [];
+  if(kind === 'fix'){
+    if(openai.length) return healthFix(openai);
+    return;
+  }
+  if(kind === 'reauth'){
+    if(openai.length) healthReauth(openai);
+    if(grok.length) return healthGrokReimport(grok);
+    return;
+  }
+  if(kind === 'quarantine'){
+    if(!openai.length && !grok.length) return;
+    const total = openai.length + grok.length;
+    const message = openai.length && grok.length
+      ? `选中 ${total} 个账号（GPT ${openai.length} + Grok ${grok.length}）：GPT 将打开指纹浏览器确认封禁，Grok 直接隔离（xAI 已判定）。继续？`
+      : grok.length
+        ? `将直接隔离 ${grok.length} 个 Grok 账号：归档本地 sso 文件并在 SUB2API 禁用（xAI 已判定风控，无需浏览器确认）。继续？`
+        : `将对 ${openai.length} 个账号打开指纹浏览器确认封禁状态；确认封禁的账号会隔离本地资产并禁用 SUB2API 账号。继续？`;
+    if(!confirm(message)) return;
+    if(openai.length) await healthQuarantine(openai, 'openai', {rescan:!grok.length});
+    if(grok.length) await healthQuarantine(grok, 'grok');
+    return;
+  }
+}
+
+// 平台筛选联动：Claude 只做本地清点（隐藏扫描表格与批量按钮），其余平台正常扫描。
+// 平台视图切换：claude 为独立清点视图（隐藏账号表格/操作区/分页，仅保留筛选行的平台下拉供切回），
+// 其余平台切换会重置页码并重新扫描。
+function applyHealthPlatformView(platform){
+  const tableWrap = $('#health-table-wrap');
+  const actionGroup = $('#health-table-actions');
+  const claudePanel = $('#health-claude-panel');
+  const footer = $('#health-list-footer');
+  const summary = $('#health-summary');
+  const toolbarSelect = $('#health-platform');
+  if(toolbarSelect && toolbarSelect.value !== platform) toolbarSelect.value = platform;
+  if(platform === 'claude'){
+    if(tableWrap) tableWrap.style.display = 'none';
+    if(actionGroup) actionGroup.style.display = 'none';
+    if(footer) footer.style.display = 'none';
+    if(summary) summary.style.display = 'none';
+    if(claudePanel) claudePanel.style.display = '';
+    loadHealthClaude();
+  }else{
+    if(tableWrap) tableWrap.style.display = '';
+    if(actionGroup) actionGroup.style.display = '';
+    if(footer) footer.style.display = '';
+    if(summary) summary.style.display = '';
+    if(claudePanel) claudePanel.style.display = 'none';
+    healthPage = 1;
+    // 切平台同样只显示该平台上次扫描的缓存，不自动扫描
+    loadHealthCached();
+  }
+}
+$('#health-platform').onchange = ()=> applyHealthPlatformView(healthPlatformValue());
+
+$('#btn-health-scan').onclick = ()=>{
+  if(healthPlatformValue() === 'claude') return loadHealthClaude();
+  // 扫描范围由筛选/操作行决定：分类/SUB2API 状态/本地凭据有筛选时，只定向扫筛选出的账号（结果合并回列表）
+  const hasFilter = healthFilterCategory !== 'all' || healthFilterStatus !== 'all' || healthFilterLocal !== 'all';
+  if(hasFilter){
+    const emails = [...new Set(filteredHealthRows().map(row=>row.email))];
+    if(!emails.length){
+      setHealthMessage('当前筛选没有账号，无法定向扫描；可清除筛选后扫描全部', 'bad');
+      return;
+    }
+    healthScan($('#health-probe').value, {emails, merge:true});
+    return;
+  }
+  healthScan($('#health-probe').value);
+};
+// 刷新：重新读取定时巡检设置与上次扫描缓存快照（不发起扫描探测）
+$('#btn-refresh-health').onclick = async ()=>{
+  const button = $('#btn-refresh-health');
+  button.classList.add('spinning');
+  try{
+    if(healthPlatformValue() === 'claude'){
+      // claude 平台没有缓存接口，刷新走本地凭据清点
+      await loadHealthClaude();
+    }else{
+      await Promise.all([loadHealthSchedule(), loadHealthCached()]);
+    }
+  }catch(error){
+    setHealthMessage(error.message || String(error), 'bad');
+  }finally{
+    button.classList.remove('spinning');
+  }
+};
+$('#btn-health-fix').onclick = ()=> runHealthBatch('fix');
+$('#btn-health-quarantine').onclick = ()=> runHealthBatch('quarantine');
+$('#btn-health-reauth').onclick = ()=> runHealthBatch('reauth');
+$('#health-select-all').onchange = event=>{
+  const checked = event.target.checked;
+  currentHealthPageRows().forEach(row=>{
+    const key = healthCheckedKey(row);
+    if(checked) healthChecked.add(key); else healthChecked.delete(key);
+  });
+  renderHealthPage();
+};
+$('#btn-health-prev').onclick = ()=>{
+  if(healthPage > 1){ healthPage -= 1; renderHealthPage(); }
+};
+$('#btn-health-next').onclick = ()=>{
+  if(healthPage < healthTotalPages()){ healthPage += 1; renderHealthPage(); }
+};
+$('#health-page-size').onchange = event=>{
+  const value = Math.floor(Number(event.target.value));
+  // 自定义每页数量：非法/清空/0 视为「全部」（单页显示）
+  healthPageSize = Number.isFinite(value) && value > 0 ? value : 0;
+  event.target.value = healthPageSize > 0 ? healthPageSize : '';
+  healthPage = 1;
+  renderHealthPage();
+};
+$('#health-filter-category').onchange = event=>{
+  healthFilterCategory = event.target.value || 'all';
+  healthPage = 1;
+  renderHealthPage();
+};
+$('#health-filter-status').onchange = event=>{
+  healthFilterStatus = event.target.value || 'all';
+  healthPage = 1;
+  renderHealthPage();
+};
+$('#health-filter-local').onchange = event=>{
+  healthFilterLocal = event.target.value || 'all';
+  healthPage = 1;
+  renderHealthPage();
+};
+$('#btn-health-filter-reset').onclick = ()=>{
+  healthFilterCategory = healthFilterStatus = healthFilterLocal = 'all';
+  ['#health-filter-category','#health-filter-status','#health-filter-local'].forEach(id=>{
+    const sel = $(id);
+    if(sel) sel.value = 'all';
+  });
+  healthPage = 1;
+  renderHealthPage();
+};
+$('#btn-health-schedule').onclick = saveHealthSchedule;
 
 // ---------------------------------------------------------------- 启动
 scriptsReady = loadScripts();

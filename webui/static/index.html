@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
-<link rel="stylesheet" href="/static/style.css?v=20260830-oauth-5">
+<link rel="stylesheet" href="/static/style.css?v=20260830-oauth-9">
 </head>
 <body>
 <header class="topbar">
@@ -45,6 +45,7 @@
       <button class="navbtn" data-view="env" data-guide="env-entry"><span class="nav-icon" aria-hidden="true">CFG</span><span>环境配置</span></button>
       <button class="navbtn navbtn-k12" data-view="k12"><span class="nav-icon" aria-hidden="true">K</span><span>Codex K12</span><span id="k12-nav-state" class="nav-state">检测中</span></button>
       <button class="navbtn" data-view="plus"><span class="nav-icon" aria-hidden="true">P</span><span>Plus 导入</span><span id="plus-nav-state" class="nav-state">检测中</span></button>
+      <button class="navbtn" data-view="health"><span class="nav-icon" aria-hidden="true">H</span><span>账号健康</span></button>
     </div>
     <div class="sidebar-footer">
       <div class="service-list" aria-label="服务状态">
@@ -440,6 +441,11 @@
               <option value="imported">自主导入</option>
               <option value="registered">自主注册</option>
             </select></label>
+            <label id="asset-scan-split-wrap" style="display:none"><span>母邮箱</span><select id="asset-scan-split">
+              <option value="all">全部分裂状态</option>
+              <option value="split">已分裂母邮箱</option>
+              <option value="unsplit">未分裂母邮箱</option>
+            </select></label>
             <label><span>状态</span><select id="asset-scan-status">
               <option value="all">全部状态</option>
               <option value="normal">正常</option>
@@ -673,6 +679,104 @@
         <div id="env-groups"></div>
       </div>
     </section>
+
+    <!-- 账号健康视图（Codex OAuth 401 处置） -->
+    <section id="view-health" style="display:none">
+      <div class="panel">
+        <div class="env-head">
+          <h2>账号健康（多平台 401 处置）</h2>
+          <span id="health-msg" class="env-msg"></span>
+        </div>
+        <p class="hint">按平台扫描 SUB2API 账号：GPT 掉授权可免浏览器一键修复，封禁嫌疑需浏览器确认后隔离（新 token 自动回写本地）；Grok 支持本地 sso 探测、重新授权导入与直接隔离（xAI 已判定风控，无需浏览器确认）；Claude 未接入 SUB2API，仅做本地凭据清点，不发起任何网络请求。</p>
+        <div class="health-toolbar">
+          <label class="health-field"><span>探测模式</span>
+            <select id="health-probe">
+              <option value="suspects">只探测嫌疑账号（推荐）</option>
+              <option value="all">探测全部账号</option>
+              <option value="none">不探测（仅列出）</option>
+            </select>
+          </label>
+          <button id="btn-health-scan" class="btn-run" type="button">扫描账号状态</button>
+          <button id="btn-refresh-health" class="icon-button" type="button" title="刷新（重新读取上次扫描结果，不发起探测）" aria-label="刷新健康数据">↻</button>
+          <label class="health-field"><span>SUB2API 处置</span>
+            <select id="health-sub2api-action" title="封禁确认隔离时对 SUB2API 上账号的处理方式">
+              <option value="disable">禁用账号</option>
+              <option value="delete">删除账号（不可恢复）</option>
+            </select>
+          </label>
+          <span class="health-toolbar-spacer"></span>
+          <label class="health-toggle"><input id="health-schedule-enabled" type="checkbox"><span>定时巡检</span></label>
+          <label class="health-field"><span>间隔(分钟)</span><input id="health-schedule-interval" type="number" min="10" max="1440" step="10" value="60"></label>
+          <button id="btn-health-schedule" class="btn-secondary" type="button">保存定时设置</button>
+        </div>
+        <div id="health-summary" class="health-summary"></div>
+        <div id="health-schedule-state" class="hint"></div>
+        <div class="health-filters" id="health-filters">
+          <div class="health-filter-group">
+            <label class="health-field"><span>平台</span>
+              <select id="health-platform">
+                <option value="all">全部平台</option>
+                <option value="openai">仅 GPT</option>
+                <option value="grok">仅 Grok</option>
+                <option value="claude">Claude（本地清点）</option>
+              </select>
+            </label>
+            <label class="health-field"><span>健康分类</span>
+              <select id="health-filter-category"><option value="all">全部</option></select>
+            </label>
+            <label class="health-field"><span>SUB2API 状态</span>
+              <select id="health-filter-status"><option value="all">全部</option></select>
+            </label>
+            <label class="health-field"><span>本地凭据</span>
+              <select id="health-filter-local"><option value="all">全部</option></select>
+            </label>
+            <button id="btn-health-filter-reset" class="btn-secondary" type="button">清除筛选</button>
+          </div>
+          <div class="health-action-group" id="health-table-actions">
+            <span id="health-page-total"></span>
+            <label class="health-field health-page-size-field"><span>每页</span>
+              <input id="health-page-size" type="number" min="1" step="10" value="50" placeholder="全部" aria-label="每页数量">
+            </label>
+            <button id="btn-health-fix" class="btn-secondary" type="button" disabled>修复选中（免浏览器）</button>
+            <button id="btn-health-quarantine" class="btn-danger" type="button" disabled>浏览器确认并隔离选中</button>
+            <button id="btn-health-reauth" class="btn-secondary" type="button" disabled>重新授权选中</button>
+          </div>
+        </div>
+        <div class="health-table-wrap" id="health-table-wrap">
+          <table class="health-table">
+            <thead>
+              <tr><th class="col-check"><input type="checkbox" id="health-select-all" aria-label="全选本页"></th><th>邮箱</th><th>平台</th><th>健康分类</th><th>SUB2API 状态</th><th>本地凭据</th><th>详情</th><th>操作</th></tr>
+            </thead>
+            <tbody id="health-tbody"><tr><td colspan="8" class="health-empty">正在读取账号列表…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="health-list-footer" id="health-list-footer">
+          <button id="btn-health-prev" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button>
+          <span id="health-page-info">1 / 1</span>
+          <button id="btn-health-next" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button>
+        </div>
+        <div id="health-claude-panel" style="display:none">
+          <p id="health-claude-summary" class="hint"></p>
+          <div class="health-table-wrap">
+            <table class="health-table">
+              <thead>
+                <tr><th>邮箱</th><th>文件</th><th>大小</th><th>修改时间</th><th>目录</th></tr>
+              </thead>
+              <tbody id="health-claude-tbody"><tr><td colspan="5" class="health-empty">尚未清点</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="panel log-panel">
+        <div class="log-head">
+          <div class="log-heading">
+            <span>健康任务日志</span>
+            <span id="health-run-state" class="run-state idle" role="status" aria-live="polite">待运行</span>
+          </div>
+        </div>
+        <pre id="health-log" class="log" data-empty="暂无输出"></pre>
+      </div>
+    </section>
   </main>
 </div>
 
@@ -711,6 +815,6 @@
 
 <div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
 
-<script src="/static/app.js?v=20260830-oauth-9"></script>
+<script src="/static/app.js?v=20260830-oauth-17"></script>
 </body>
 </html>

@@ -27,8 +27,11 @@ CLI 探测(查 OpenAI application_id / 余额)：
   python -m common.sms balance
 """
 
+import atexit
+import os
 import re
 import sys
+import threading
 import time
 
 import requests
@@ -202,6 +205,71 @@ def release(pkey):
         requests.get(SMS_API_BASE, params={"act": "cancelPhone", "token": SMS_TOKEN, "pkey": pkey}, timeout=10)
     except Exception:
         pass
+
+
+# ---------------- 延迟取消调度 ----------------
+# sms-activate 兼容平台(hero-sms等)取号不满 2 分钟取消会被拒(CANNOT_BEFORE_2_MIN)，
+# sms-man reject 同样有最小持有时间——换号时立即取消=失败=白扣款。
+# defer_release 让取消动作等到「取号满 min_hold 秒」再发，主流程零等待继续换号。
+_PENDING_CANCELS = []
+_PENDING_LOCK = threading.Lock()
+
+
+def _min_hold_seconds():
+    try:
+        v = float(os.environ.get("SMS_CANCEL_MIN_HOLD", "120") or "120")
+    except (TypeError, ValueError):
+        v = 120.0
+    return max(0.0, v)
+
+
+def defer_release(pkey, acquired_at=None, min_hold=None):
+    """放弃号码时的延迟取消：立即返回不阻塞主流程；后台线程等到
+    「acquired_at(取号时刻, time.monotonic()) + min_hold 秒」再执行 release。
+    min_hold 缺省读 SMS_CANCEL_MIN_HOLD(默认120s)；<=0 退化为立即 release(旧行为)。"""
+    if not pkey:
+        return
+    if min_hold is None:
+        min_hold = _min_hold_seconds()
+    if min_hold <= 0:
+        release(pkey)
+        return
+    start = acquired_at if acquired_at is not None else time.monotonic()
+    due = start + float(min_hold)
+
+    def _worker():
+        delay = due - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            release(pkey)
+            print(f"  [sms] 旧号 {pkey} 已到最小持有期，已发起取消")
+        except Exception as e:
+            print(f"  [sms] 旧号 {pkey} 取消失败: {str(e)[:80]}")
+
+    t = threading.Thread(target=_worker, name=f"sms-cancel-{pkey}", daemon=True)
+    with _PENDING_LOCK:
+        _PENDING_CANCELS.append(t)
+    t.start()
+
+
+def flush_pending_cancels(max_wait=150.0):
+    """等完所有未到期的延迟取消并发出(限时 max_wait 秒)。atexit 已注册兜底——
+    不 flush 直接退出的话 daemon 线程被杀、取消丢失(号白扣)。"""
+    with _PENDING_LOCK:
+        pending = list(_PENDING_CANCELS)
+        _PENDING_CANCELS.clear()
+    if not pending:
+        return
+    start = time.time()
+    for t in pending:
+        remain = max_wait - (time.time() - start)
+        if remain <= 0:
+            return
+        t.join(timeout=remain)
+
+
+atexit.register(flush_pending_cancels)
 
 
 # ---------------- hero-sms ----------------

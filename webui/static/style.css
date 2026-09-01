@@ -547,6 +547,7 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   font-size:18px;cursor:pointer
 }
 .icon-button:hover{border-color:var(--accent);color:var(--text)}
+.icon-button.spinning{animation:update-spin 1s linear infinite;pointer-events:none;opacity:.6}
 .network-actions{display:flex;align-items:center;gap:9px;padding-top:16px;border-top:1px solid var(--line)}
 .btn-secondary{
   min-height:36px;padding:7px 13px;border:1px solid var(--line-strong);border-radius:6px;
@@ -768,10 +769,15 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .gopay-sms-config .btn-secondary{margin-top:12px}
 .liye-card-list{margin-top:10px}
 .liye-card-list .gopay-table{min-width:0}
-.liye-card-table th:nth-child(1),.liye-card-table td:nth-child(1){width:44%}
-.liye-card-table th:nth-child(2),.liye-card-table td:nth-child(2){width:28%}
-.liye-card-table th:nth-child(3),.liye-card-table td:nth-child(3){width:17%}
-.liye-card-table th:nth-child(4),.liye-card-table td:nth-child(4){width:11%}
+.liye-card-table th:nth-child(1),.liye-card-table td:nth-child(1){width:4%}
+.liye-card-table th:nth-child(2),.liye-card-table td:nth-child(2){width:34%}
+.liye-card-table th:nth-child(3),.liye-card-table td:nth-child(3){width:15%}
+.liye-card-table th:nth-child(4),.liye-card-table td:nth-child(4){width:15%}
+.liye-card-table th:nth-child(5),.liye-card-table td:nth-child(5){width:32%}
+.liye-card-table .liye-sel-col{text-align:center}
+.liye-card-table .liye-sel-col input{width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--amber);vertical-align:middle}
+.liye-card-table .liye-code{font-family:Consolas,Menlo,monospace;font-size:10.5px;color:var(--text);cursor:pointer;word-break:break-all}
+.liye-card-table .liye-code:hover{color:#9fc2ff;text-decoration:underline}
 .liye-card-empty{margin:6px 0;color:var(--muted);font-size:10.5px}
 .mailpool-stats{margin-top:10px}
 .mailpool-stats-wrap{overflow-x:auto}
@@ -1039,3 +1045,61 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   #btn-tour-prev{grid-column:1}
   #btn-tour-next{grid-column:2}
 }
+
+/* ============================================================ 账号健康（401 处置） */
+#view-health{flex-direction:column;gap:14px;min-height:0;overflow:auto}
+.health-toolbar{display:flex;align-items:flex-end;flex-wrap:wrap;gap:10px;margin:12px 0 4px}
+.health-field{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--muted)}
+.health-field select,.health-field input{
+  min-height:32px;padding:5px 9px;border:1px solid var(--line);border-radius:6px;
+  background:var(--surface-raised);color:var(--text);font-size:12.5px
+}
+.health-toggle{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);cursor:pointer;white-space:nowrap}
+.health-toolbar-spacer{flex:1}
+.health-summary{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0 2px;min-height:22px}
+.health-chip{
+  display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border:1px solid var(--line);
+  border-radius:999px;background:var(--surface-raised);font-size:11px;color:var(--muted);white-space:nowrap
+}
+.health-chip b{font-size:12px;color:var(--text)}
+.health-chip.hc-ok{border-color:rgba(65,184,120,.45)}.health-chip.hc-ok b{color:var(--green)}
+.health-chip.hc-fixable{border-color:rgba(77,141,247,.5)}.health-chip.hc-fixable b{color:#8eb8ff}
+.health-chip.hc-suspect{border-color:rgba(229,168,75,.45)}.health-chip.hc-suspect b{color:var(--amber)}
+.health-chip.hc-suspicious_banned{border-color:rgba(226,100,85,.55)}.health-chip.hc-suspicious_banned b{color:var(--red)}
+.health-chip.hc-no_refresh{border-color:rgba(229,168,75,.4)}
+.health-chip.hc-no_local{border-color:var(--line)}
+.health-chip.hc-network_error{border-color:rgba(67,182,178,.45)}.health-chip.hc-network_error b{color:var(--cyan)}
+.health-chip.hc-refresh_error{border-color:rgba(155,161,170,.45)}
+.health-table-wrap{margin-top:10px;overflow-x:auto;border:1px solid var(--line);border-radius:7px}
+.health-table{width:100%;border-collapse:collapse;font-size:12px}
+.health-table th{
+  position:sticky;top:0;padding:9px 10px;text-align:left;background:var(--surface-raised);
+  color:var(--muted);font-size:10.5px;font-weight:600;border-bottom:1px solid var(--line);white-space:nowrap
+}
+.health-table td{padding:8px 10px;border-bottom:1px solid rgba(48,52,59,.55);vertical-align:middle}
+.health-table tbody tr:last-child td{border-bottom:none}
+.health-table tbody tr:hover{background:var(--surface-hover)}
+.health-table input[type=checkbox]{width:14px;height:14px;cursor:pointer}
+.health-email{max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:11.5px}
+.health-detail{max-width:300px;color:var(--muted);font-size:11px;line-height:1.4}
+.health-empty{padding:26px 10px;text-align:center;color:var(--quiet)}
+.health-none{color:var(--quiet)}
+.health-actions{display:flex;gap:6px;white-space:nowrap}
+.health-row-btn{
+  min-height:24px;padding:3px 9px;border:1px solid var(--line-strong);border-radius:5px;
+  background:var(--surface-raised);color:var(--text);font-size:10.5px;cursor:pointer
+}
+.health-row-btn:hover{border-color:var(--accent);color:#8eb8ff}
+/* 账号列表筛选/操作行：照资产 API 号池列表布局 —— 左侧筛选，右侧计数/每页/批量操作 */
+.health-filters{display:flex;align-items:flex-end;flex-wrap:wrap;gap:10px;margin-top:13px}
+.health-filter-group{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.health-action-group{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin-left:auto;justify-content:flex-end}
+.health-filters .health-field select{min-height:28px;padding:2px 8px;font:11px var(--mono)}
+.health-filters .btn-secondary,.health-filters .btn-danger{min-height:28px;padding:4px 10px;font-size:11px}
+.health-filters .btn-secondary:disabled,.health-filters .btn-danger:disabled{opacity:.5;cursor:not-allowed}
+.health-page-size-field input{width:72px;text-align:center;min-height:28px;padding:2px 8px;font:11px var(--mono)}
+.health-action-group #health-page-total{color:var(--quiet);font:10.5px var(--mono);white-space:nowrap}
+.health-table .col-check{width:34px;text-align:center}
+.health-list-footer{display:flex;align-items:center;justify-content:flex-end;gap:9px;margin-top:10px;color:var(--quiet);font:10.5px var(--mono)}
+.health-list-footer .icon-button{width:30px;height:30px;font-size:16px}
+.health-list-footer .icon-button:disabled{opacity:.4;cursor:not-allowed}

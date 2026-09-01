@@ -76,6 +76,9 @@ async def main():
     parser.add_argument("--auth-url-source", choices=["sub2", "cpa"],
                         default=os.environ.get("CODEX_AUTH_URL_SOURCE", "sub2").strip().lower() or "sub2",
                         help="授权地址来源：sub2（默认）或 cpa；cpa 模式由 CPA 直接接收 callback")
+    parser.add_argument("--sub2api-proxy", default=os.environ.get("SUB2API_PROXY_NAME", "").strip(),
+                        help="SUB2API 后台代理(名称或ID)，换 token 由 SUB2API 走该代理出站；"
+                             "留空读 .env SUB2API_PROXY_NAME，不指定则 SUB2API 直连出站(易遇地区风控)")
     parser.add_argument("--keep", action="store_true", help="失败保留窗口")
     args = parser.parse_args()
 
@@ -144,16 +147,35 @@ async def main():
             email = sess.get("user", {}).get("email", "")
             plan = sess.get("account", {}).get("planType")
             print(f"  登录态 OK: {email}  planType={plan}")
+            # session 接口还能返回不代表账号正常：已登录页面若弹 "Your session has
+            # expired" 等标记，说明 session 已被 OpenAI 作废(封禁/停用前兆)，
+            # 继续授权必然失败——立即放弃并隔离该账号，不进授权流程。
+            _ban = await ox.detect_account_banned(page)
+            if _ban:
+                print(f"  [BAN] chatgpt 页面出现封禁标记（{_ban}），放弃该账号并隔离资产")
+                await ox.quarantine_banned_account(
+                    email or cookie_email, f"CK 登录后页面出现封禁标记: {_ban}")
+                return 3
             if plan != "plus":
                 print(f"  [WARN] 当前 planType={plan}，非 plus —— OAuth 能成但可能无 codex 额度")
 
             token = None
             group_id = None
+            sub2_proxy_id = None
             if auth_source == "sub2":
-                # SUB2API: 登录 + 找分组
+                # SUB2API: 登录 + 找分组 + 解析换码代理(避免 SUB2API 直连出站触发地区风控)
                 token = ox.sub2api_login(origin, SUB2API_EMAIL, SUB2API_PASSWORD)
                 group_id = ox.find_group_id(origin, token, args.group)
                 print(f"  SUB2API: group={args.group}(#{group_id})")
+                try:
+                    sub2_proxy_id = ox.resolve_proxy_id(origin, token, args.sub2api_proxy)
+                except RuntimeError as e:
+                    print(f"  [FAIL] {e}")
+                    return 2
+                if sub2_proxy_id:
+                    print(f"  SUB2API: 换 token 走代理 #{sub2_proxy_id}（{args.sub2api_proxy}）")
+                else:
+                    print("  [WARN] 未指定 SUB2API 代理，换 token 将直连出站(易遇 403 地区风控)")
             else:
                 print("  CPA: 使用管理接口生成授权地址并接收 callback")
 
@@ -194,7 +216,7 @@ async def main():
                 if auth_source == "cpa":
                     auth_url, state = ox.generate_cpa_auth_url(CPA_URL, CPA_MGMT_KEY)
                     return auth_url, "", state
-                auth_url, session_id, state = ox.generate_auth_url(origin, token)
+                auth_url, session_id, state = ox.generate_auth_url(origin, token, proxy_id=sub2_proxy_id)
                 return auth_url, session_id, state
 
             code, session_id, cb_state, msg = await ox.authorize_with_retry(
@@ -234,8 +256,9 @@ async def main():
                 ok = True
                 cred = None
             else:
-                # 换码 + 建号
-                exch = ox.exchange_code(origin, token, session_id, code, cb_state)
+                # 换码 + 建号（SUB2API 服务端走 sub2_proxy_id 代理出站换 token）
+                exch = ox.exchange_code(origin, token, session_id, code, cb_state,
+                                        proxy_id=sub2_proxy_id)
                 cred = ox.build_oauth_credentials(exch)
                 cred["codex_phone_status"] = codex_metadata.get("codex_phone_status", "unknown")
                 from common.session_export import save_codex_oauth_credentials

@@ -56,6 +56,11 @@ BANNED_MARKERS = (
     "account suspended",
     "your account has been suspended",
     "your account has been banned",
+    # 已登录后 session 被 OpenAI 主动作废(chatgpt.com 弹 "Your session has expired")
+    # ——封禁/停用前兆，按封禁处置：放弃账号并隔离。
+    "session has expired",
+    "会话已过期",
+    "セッションの有効期限",
 )
 
 
@@ -185,8 +190,42 @@ def find_group_id(origin, token, group_name, timeout=DEFAULT_TIMEOUT):
     raise RuntimeError(f"SUB2API 未找到 openai 分组: {group_name}")
 
 
-def generate_auth_url(origin, token, redirect_uri=REDIRECT_URI, timeout=DEFAULT_TIMEOUT):
+def resolve_proxy_id(origin, token, preference, timeout=DEFAULT_TIMEOUT):
+    """按名称或 ID 在 SUB2API 后台代理列表中匹配一个 active 代理。
+
+    SUB2API 服务端(Docker)换 token 时默认直连出站，OpenAI 风控会对
+    不支持地区返回 403 unsupported_country_region_territory；
+    传 proxy_id 让 SUB2API 走指定代理出站(对齐 codex_k12 Node 版 resolveProxyId)。
+    preference 为空返回 None(不指定)；支持纯数字 ID 或代理名称(大小写不敏感)。
+    """
+    pref = str(preference or "").strip()
+    if not pref:
+        return None
+    proxies = _sub2api_request(origin, "/api/v1/admin/proxies/all?with_count=true",
+                               token=token, timeout=timeout) or []
+    pref_id = int(pref) if pref.isdigit() else None
+    for p in proxies:
+        pid = p.get("id")
+        try:
+            pid = int(pid) if pid is not None else None
+        except (TypeError, ValueError):
+            pid = None
+        status = str(p.get("status") or "").strip().lower()
+        if pid is None or (status and status != "active"):
+            continue
+        if (pref_id is not None and pid == pref_id) or \
+           (pref_id is None and str(p.get("name") or "").strip().lower() == pref.lower()):
+            return pid
+    sample = ", ".join(
+        f"{p.get('name') or '(unnamed)'}#{p.get('id')}" for p in proxies[:8])
+    raise RuntimeError(f"SUB2API 代理未匹配: {pref}；可用: {sample or '无(先在 SUB2API 后台添加代理)'}")
+
+
+def generate_auth_url(origin, token, redirect_uri=REDIRECT_URI, timeout=DEFAULT_TIMEOUT,
+                      proxy_id=None):
     body = {"redirect_uri": redirect_uri}
+    if proxy_id:
+        body["proxy_id"] = int(proxy_id)
     d = _sub2api_request(origin, "/api/v1/admin/openai/generate-auth-url",
                          token=token, method="POST", body=body, timeout=timeout)
     auth_url = str((d or {}).get("auth_url") or (d or {}).get("authUrl") or "").strip()
@@ -310,8 +349,10 @@ def _state_from_url(url):
         return ""
 
 
-def exchange_code(origin, token, session_id, code, state, timeout=60):
+def exchange_code(origin, token, session_id, code, state, timeout=60, proxy_id=None):
     body = {"session_id": session_id, "code": code, "state": state}
+    if proxy_id:
+        body["proxy_id"] = int(proxy_id)
     return _sub2api_request(origin, "/api/v1/admin/openai/exchange-code",
                             token=token, method="POST", body=body, timeout=timeout)
 
@@ -365,6 +406,9 @@ async def _has_phone_error(page):
         "try another", "different phone", "not supported", "already", "too many",
         "couldn't send a text message", "could not send a text message",
         "switched to whatsapp", "send a verification code on whatsapp",
+        # 中文/日文界面(截图实测)：「我们无法向该电话号码发送短信，因此已切换为 WhatsApp」
+        "无法向该电话号码发送短信", "已切换为 whatsapp", "已切换为whatsapp",
+        "无法发送短信", "smsを送信できません", "whatsappに切り替え",
     ]:
         if kw in txt:
             return True
@@ -727,11 +771,12 @@ async def handle_add_phone(
                                             smsman_maxprice=SMSMAN_MAXPRICE_OPENAI,
                                             provider=sms_provider)
             print(f"  [add-phone] 尝试 {i+1}/{attempts}: +{cc}{phone}")
+            _acquired_at = time.monotonic()  # 取号时刻：延迟取消按「取号+最小持有期」计时
             await _fill_phone_continue(page, cc, phone)
             await asyncio.sleep(4)
             if _is_phone_flow_url(page.url) and await _has_phone_error(page):
                 print("  [add-phone] 号码被拒，换号重试")
-                sms.release(pkey)
+                sms.defer_release(pkey, _acquired_at)
                 continue
             code_task = asyncio.create_task(
                 asyncio.to_thread(sms.get_code, pkey, max_wait=sms_timeout)
@@ -744,29 +789,33 @@ async def handle_add_phone(
                 if _is_phone_flow_url(page.url) and await _has_phone_error(page):
                     print("  [add-phone] SMS 发送失败或已切换 WhatsApp，立即换号")
                     delivery_failed = True
-                    await asyncio.to_thread(sms.release, pkey)
+                    sms.defer_release(pkey, _acquired_at)
                     break
-            code = await code_task
+            # 旧号等码任务不再 await：to_thread 线程 cancel 不掉，await 反而白等到超时；
+            # 直接跳过——孤儿线程无害(号码已进延迟取消队列，get-sms 对其报错提前结束)。
+            code = None
+            if not delivery_failed:
+                code = await code_task
             if delivery_failed:
                 continue
             if not code:
                 print("  [add-phone] 未收到验证码，换号重试")
-                sms.release(pkey)
+                sms.defer_release(pkey, _acquired_at)
                 continue
             if not await _enter_otp(page, code):
                 print("  [add-phone] 验证码未写入输入框，换号重试")
-                sms.release(pkey)
+                sms.defer_release(pkey, _acquired_at)
                 continue
             if await _wait_for_phone_flow_exit(page):
                 print("  [add-phone] 手机验证通过")
                 return True
             print(f"  [add-phone] 验证码提交后仍在手机验证页: {page.url[:80]}")
-            sms.release(pkey)
+            sms.defer_release(pkey, _acquired_at)
         except Exception as e:
             print(f"  [add-phone] err: {str(e)[:80]}")
             if pkey:
                 try:
-                    sms.release(pkey)
+                    sms.defer_release(pkey, _acquired_at)
                 except Exception:
                     pass
     return False
@@ -873,6 +922,18 @@ async def drive_authorize(
             round_i += 1
             if captured.get("url"):
                 break
+            # session 被 OpenAI 作废(封禁/停用前兆)：chatgpt.com 弹 "Your session has
+            # expired"，继续授权必然失败——立即放弃并返回带封禁标记的 msg，让上层隔离该账号。
+            # auth.openai.com 的登录/验证页同样会提示 session 过期，一并检测。
+            try:
+                if "chatgpt.com" in page.url or "auth.openai.com" in page.url:
+                    for _exp_label in ("Your session has expired", "会话已过期", "セッションの有効期限"):
+                        if await page.get_by_text(_exp_label, exact=False).count() > 0:
+                            print(f"  [BAN] 页面出现「{_exp_label}」弹窗：session 已被作废，放弃该账号")
+                            return None, None, (f"your session has expired"
+                                                f"（页面弹窗 {_exp_label}，session 作废，大概率封禁/停用）")
+            except Exception:
+                pass
             # BiDi keeps the failed localhost callback in the address bar even
             # when no Playwright route handler is available.
             try:
@@ -1374,6 +1435,13 @@ async def _complete_auth_email_login(
                 return True, "ok"
             try:
                 body = (await page.locator("body").inner_text()).lower()
+                # 验证码怎么填都过不去、页面弹封禁/session 过期 = 账号大概率被停用，
+                # 立即放弃(带标记让上层隔离)，不烧完 5 轮接码。
+                _ban = banned_marker_in(body)
+                if _ban:
+                    print(f"  [BAN] 验证码页出现封禁标记（{_ban}），放弃该账号")
+                    return False, (f"OAuth 邮箱验证码未完成: 页面出现封禁标记（{_ban}），"
+                                   f"账号大概率被封禁/停用")
                 if "route error" in body and "text/html" in body:
                     retry = page.get_by_role("button", name="Retry", exact=False)
                     if await retry.count() > 0:
@@ -1518,6 +1586,20 @@ async def authorize_with_retry(page, gen_auth_url, account_email="", phone_skip_
             print(f"  [codex] 第 {attempt+1} 次要手机验证，换新会话重试...")
             await asyncio.sleep(1.5)
             continue
+        # 封禁/session 作废标记：继续重试毫无意义(白烧接码费)，立即终止整个授权。
+        # msg 没带标记时兜底扫一遍页面(URL/正文/session 响应体)——覆盖
+        # "页面在弹 session expired 等封禁状态，但 msg 只是普通失败文案"的漏网情况。
+        ban_hit = banned_marker_in(msg)
+        if not ban_hit:
+            try:
+                ban_hit = await detect_account_banned(page)
+            except Exception:
+                ban_hit = ""
+        if ban_hit:
+            print(f"  [codex] 检测到封禁标记（{ban_hit}），停止重试")
+            if not banned_marker_in(msg):
+                msg = f"{msg}（页面出现封禁标记 {ban_hit}，账号大概率被封禁/停用）"
+            return None, None, None, msg
         # 非"要手机"的其它失败(没捕获回调/error 等)：免手机阶段也继续重试，最后一次失败才退
         if is_phone_attempt:
             return None, None, None, msg

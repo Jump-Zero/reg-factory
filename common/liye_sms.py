@@ -49,6 +49,7 @@ from config import (
     LIYE_SERVICE,
     LIYE_CARDS,
     LIYE_ALLOC_TIMEOUT,
+    LIYE_ALLOC_ROUNDS,
     LIYE_LEASE_SECONDS,
 )
 from common.file_lock import file_lock
@@ -70,6 +71,10 @@ _SESSIONS_LOCK = threading.Lock()
 # 卡密前缀 -> 平台服务。GPT-/CZ-=chatai(OpenAI)，GOO-=google(Gmail/Google)。
 # 登录与建单的 service 必须与卡密类型一致，否则平台拒绝；无已知前缀时回退 LIYE_SERVICE。
 _SERVICE_PREFIXES = (("GOO", "google"), ("GPT", "chatai"), ("CZ", "chatai"))
+
+# 平台限频提示：同一张卡重试取号过多时，平台返回「尝试次数过多，请稍后再试」→ 宣布卡密冷却
+_RATE_LIMIT_MARKER = "尝试次数过多"
+_RATE_LIMIT_COOLDOWN = 600  # 限频冷却时长(秒)，到期由 _recover_stale 懒恢复
 
 
 def _service_for_card(code):
@@ -183,6 +188,7 @@ def sync_cards():
                     "code": code,
                     "status": "available",
                     "service": _service_for_card(code),
+                    "selected": False,
                     "updated_at": time.time(),
                 })
                 added += 1
@@ -263,7 +269,9 @@ def _phone_of(order):
 
 
 def _wait_phone(session, order, timeout):
-    """取号后等号码落到订单上（queued/purchasing 也算在途）。返回带 phone 的 order 或 None。"""
+    """取号后等号码落到订单上（queued/purchasing 也算在途）。
+    返回最终订单快照：拿到号码时含 phone；超时未分配或订单已终态时返回
+    无 phone 快照（供调用方「退出卡密」取消/判断用），不再返回 None。"""
     oid = order.get("id")
     start = time.time()
     cur = order
@@ -271,17 +279,19 @@ def _wait_phone(session, order, timeout):
         if str(cur.get("phone") or "").strip():
             return cur
         if str(cur.get("status") or "") in _TERMINAL_BAD:
-            return None
+            return cur
         try:
             data = _api(session, "GET", f"/api/orders/{oid}/status")
             nxt = _order_of(data)
             if nxt:
                 cur = nxt
         except LiyeError as e:
+            if _RATE_LIMIT_MARKER in str(e):
+                raise
             if e.code in ("CARD_LOGIN_REQUIRED", "CARD_SESSION_INVALID") or e.status == 401:
                 raise
         time.sleep(3)
-    return cur if str(cur.get("phone") or "").strip() else None
+    return cur
 
 
 def _card_entry(state, code):
@@ -343,18 +353,25 @@ def _recover_stale(state):
 
 
 def _pick_available(state, service=None):
-    """挑下一张可用卡：跳过冷却中的 available 卡；指定 service 时只挑该服务的卡
+    """挑下一张可用卡：勾选(selected)的卡优先；勾选卡都不可用或未勾选时
+    按原顺序取全池。跳过冷却中的 available 卡；指定 service 时只挑该服务的卡
     (避免 OpenAI 流程拿到 GOO- 的 Gmail 卡、反之亦然)。"""
     now = time.time()
-    for c in state["cards"]:
+
+    def usable(c):
         if not isinstance(c, dict) or c.get("status") != "available":
-            continue
+            return False
         if service and _service_for_card(c.get("code")) != str(service).strip().lower():
-            continue
+            return False
         cd = float(c.get("cooldown_until") or 0)
-        if cd and now < cd:
-            continue
-        return c
+        return not (cd and now < cd)
+
+    for c in state["cards"]:        # 第一遍：勾选的可用卡
+        if c.get("selected") and usable(c):
+            return c
+    for c in state["cards"]:        # 第二遍：全池按原顺序（含未勾选）
+        if usable(c):
+            return c
     return None
 
 
@@ -371,10 +388,39 @@ def summary():
          "full_code": c.get("code"),
          "status": c.get("status"), "service": c.get("service"),
          "phone": c.get("phone"), "order_id": c.get("order_id"),
+         "selected": bool(c.get("selected")),
          "cooldown_until": c.get("cooldown_until"),
          "updated_at": c.get("updated_at")}
         for c in state["cards"] if isinstance(c, dict)
     ]}
+
+
+def set_selection(codes):
+    """WebUI 卡密勾选：只有列表里的卡 selected=True，其余全部清除。
+    取号时勾选的可用卡优先；勾选卡全部不可用则回落全池按原顺序（避免取号失败）。
+    codes 为空列表 = 全部取消勾选。返回 (ok, message)。"""
+    wanted = []
+    for raw in codes if isinstance(codes, (list, tuple)) else []:
+        code = str(raw).strip()
+        if code and code not in wanted:
+            wanted.append(code)
+    sync_cards()
+    with file_lock(_state_file()):
+        state = _load_state()
+        known = {c.get("code") for c in state["cards"] if isinstance(c, dict)}
+        unknown = [c for c in wanted if c not in known]
+        if unknown:
+            return False, f"卡密不在池中: {unknown[0][:6]}...{unknown[0][-4:]}"
+        now = time.time()
+        for c in state["cards"]:
+            if not isinstance(c, dict):
+                continue
+            flag = c.get("code") in wanted
+            if bool(c.get("selected")) != flag:
+                c["selected"] = flag
+                c["updated_at"] = now
+        _save_state(state)
+    return True, ""
 
 
 def remove_card(code):
@@ -432,11 +478,13 @@ def claim(max_cards=3, alloc_timeout=None, service="chatai"):
                           "service": svc, "updated_at": time.time()})
             code = entry["code"]
             _save_state(state)
+        print(f"  [liye] using card: {code}"
+              + ("（勾选优先）" if entry.get("selected") else ""))
         try:
             phone, dial, order = _claim_one(code, timeout, service=svc)
         except Exception as e:
             last_err = str(e)[:120]
-            print(f"  [liye] card {code[:6]}...{code[-4:]} failed: {last_err}")
+            print(f"  [liye] card {code} failed: {last_err}")
             _mark_failed(code, e)
             continue
         with file_lock(_state_file()):
@@ -448,52 +496,112 @@ def claim(max_cards=3, alloc_timeout=None, service="chatai"):
                           "generation": order.get("activationGeneration") or 0,
                           "phone": phone, "service": svc, "updated_at": time.time()})
                 _save_state(state)
-        print(f"  [liye] phone: +{phone} ({order.get('countryEnglishName') or order.get('countryName') or '?'}, card={code[:6]}...{code[-4:]})")
+        print(f"  [liye] phone: +{phone} ({order.get('countryEnglishName') or order.get('countryName') or '?'}, card={code})")
         return phone, dial, f"liye_{order.get('id')}"
     raise RuntimeError(f"liye: get phone failed ({last_err})".strip())
 
 
 def _claim_one(code, timeout, service=None):
-    """单卡取号：登录→(恢复在途订单或新建)→等号码。返回 (phone, dial, order)。"""
+    """单卡取号：登录→(恢复在途订单或新建)→等号码。返回 (phone, dial, order)。
+
+    等 timeout 秒仍未分配号码：先取消订单退出卡密(平台退回使用次数)，再
+    重新登录取号，重复直至拿到号码；订单排队中平台不允许取消时同样退出
+    卡密重新登录取号（订单保留在平台侧继续排队）。平台返回「尝试次数过多，
+    请稍后再试」时抛 CARD_RATE_LIMITED，由 _mark_failed 宣布卡密冷却。"""
     svc = (service or _service_for_card(code)).strip().lower()
     session = _login(code, service=svc)
-    # 已有活动订单则恢复（换进程/重试时会把上一张号续上）
-    data = _api_with_relogin(code, "GET", "/api/orders", service=svc)
-    active = next((o for o in _orders_of(data) if str(o.get("status") or "") in _ACTIVE), None)
-    if active is None:
-        data = _api_with_relogin(code, "POST", "/api/orders", {"service": svc}, service=svc)
-        order = _order_of(data)
-        if order is None:
-            raise LiyeError("liye: create order returned no order")
-    else:
-        order = active
-        if str(order.get("smsCode") or "").strip():
-            raise LiyeError("liye: card already received code", code="CARD_ALREADY_USED")
-        print(f"  [liye] resume active order {order.get('id')}")
-    order = _wait_phone(session, order, timeout)
-    if order is None or not str((order or {}).get("phone") or "").strip():
-        raise LiyeError("liye: number assignment timeout/no number",
-                        code="NO_NUMBERS")
-    phone, dial = _phone_of(order)
-    return phone, dial, order
+    rounds = max(1, LIYE_ALLOC_ROUNDS)
+    for round_no in range(1, rounds + 1):
+        try:
+            if round_no > 1:
+                # 「再次输入卡密」：丢弃旧会话重新登录后再取号
+                _drop_session(code)
+                session = _login(code, service=svc)
+            # 已有活动订单则恢复（换进程/重试时会把上一张号续上）
+            data = _api_with_relogin(code, "GET", "/api/orders", service=svc)
+            active = next((o for o in _orders_of(data)
+                           if str(o.get("status") or "") in _ACTIVE), None)
+            if active is None:
+                data = _api_with_relogin(code, "POST", "/api/orders",
+                                         {"service": svc}, service=svc)
+                order = _order_of(data)
+                if order is None:
+                    raise LiyeError("liye: create order returned no order")
+            else:
+                order = active
+                if str(order.get("smsCode") or "").strip():
+                    raise LiyeError("liye: card already received code",
+                                    code="CARD_ALREADY_USED")
+                print(f"  [liye] resume active order {order.get('id')}")
+            order = _wait_phone(session, order, timeout)
+            if order is not None and str((order or {}).get("phone") or "").strip():
+                phone, dial = _phone_of(order)
+                if round_no > 1:
+                    print(f"  [liye] round {round_no}: 重取后拿到号码")
+                return phone, dial, order
+            # 超时未分配号码：退出卡密重取（订单可取消则取消退回次数；排队中
+            # 平台不允许取消则保留订单，「退出卡密→重新登录取号」照常循环）
+            print(f"  [liye] round {round_no}/{rounds}: {timeout}s 未分配号码，退出卡密重取")
+            _exit_order(code, order, service=svc)
+        except LiyeError as e:
+            if _RATE_LIMIT_MARKER in str(e):
+                raise LiyeError("尝试次数过多，请稍后再试（卡密冷却中）",
+                                code="CARD_RATE_LIMITED",
+                                order=e.order, payload=e.payload) from e
+            raise
+    raise LiyeError(f"liye: {rounds} 轮取号仍未分配号码", code="NO_NUMBERS")
+
+
+def _exit_order(code_card, order, service=None):
+    """重取前退出卡密：取消当前订单让平台退回使用次数（best-effort）。
+    订单已终态(取消/失败)则无需取消；订单仍在排队时平台不允许取消
+    (ORDER_NOT_CANCELLABLE)——保留订单，「退出卡密→重新登录取号」照常循环。"""
+    if not isinstance(order, dict) or not order.get("id"):
+        return
+    if str(order.get("status") or "") in _TERMINAL_BAD:
+        return
+    body = {"action": "cancel",
+            "expectedActivationId": order.get("activationId"),
+            "expectedGeneration": order.get("activationGeneration") or 0}
+    try:
+        _api_with_relogin(code_card, "POST",
+                          f"/api/orders/{order.get('id')}/action", body,
+                          service=service)
+        print(f"  [liye] exited order {order.get('id')}, card use returned")
+    except LiyeError as e:
+        if _RATE_LIMIT_MARKER in str(e):
+            raise
+        if e.code == "ORDER_NOT_CANCELLABLE":
+            # 订单还在排队：平台不允许取消，保留订单；
+            # 「退出卡密→重新登录取号」不受影响，下一轮继续重取
+            print(f"  [liye] order {order.get('id')} queued, cancel not allowed; keep it and retake")
+            return
+        print(f"  [liye] exit deferred ({e.code or e.status or 'error'}), keep order")
 
 
 def _mark_failed(code, exc):
     """取号失败后按错误语义置卡密状态。"""
     err = exc if isinstance(exc, LiyeError) else None
     status = "available"
+    cooldown_until = 0
     if err and err.code in ("CARD_ALREADY_USED",):
         status = "exhausted"
+    elif err and err.code == "CARD_RATE_LIMITED":
+        # 「尝试次数过多，请稍后再试」：宣布卡密冷却，到期懒恢复
+        status = "cooldown"
+        cooldown_until = time.time() + _RATE_LIMIT_COOLDOWN
     elif err and err.status in (401, 403) and err.code in ("CARD_LOGIN_REQUIRED", "CARD_SESSION_INVALID", "INVALID_CARD", "CARD_NOT_FOUND"):
         status = "invalid"
     elif err and err.code in ("INVALID_LENGTH", "INVALID_CARD", "CARD_NOT_FOUND"):
         status = "invalid"
+    if status == "available":
+        cooldown_until = time.time() + 60
     with file_lock(_state_file()):
         state = _load_state()
         c = _card_entry(state, code)
         if c is not None:
             c.update({"status": status, "order_id": "", "phone": "",
-                      "cooldown_until": time.time() + 60 if status == "available" else 0,
+                      "cooldown_until": cooldown_until,
                       "updated_at": time.time()})
             _save_state(state)
 
@@ -598,7 +706,11 @@ def replace(pkey, timeout=None):
         print(f"  [liye] replace failed: {e.code or e} ")
         return None
     order = _order_of(data) or {}
-    order = _wait_phone(_login(code_card), order, timeout or LIYE_ALLOC_TIMEOUT)
+    try:
+        order = _wait_phone(_login(code_card), order, timeout or LIYE_ALLOC_TIMEOUT)
+    except LiyeError as e:
+        print(f"  [liye] replace wait failed: {e.code or e}")
+        return None
     if order is None or not str(order.get("phone") or "").strip():
         return None
     phone, dial = _phone_of(order)

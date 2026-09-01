@@ -374,6 +374,8 @@ LIYE_SERVICE = _env("LIYE_SERVICE", "chatai").strip().lower() or "chatai"
 LIYE_CARDS = _env("LIYE_CARDS", "")  # 卡密池(逗号分隔)，如 GPT-XXXX-XXXX-XXXX-XXXX,CZ-XXXX-...
 # 取号后等号码分配的超时(秒)；queued/purchasing 在途时轮询
 LIYE_ALLOC_TIMEOUT = _env_int("LIYE_ALLOC_TIMEOUT", 90)
+# 分配超时后「退出卡密→重新登录取号」的最大轮数；平台提示「尝试次数过多」则卡密冷却
+LIYE_ALLOC_ROUNDS = _env_int("LIYE_ALLOC_ROUNDS", 8)
 # in_use 卡密的租期(秒)：超过后 claim 时查上游实际状态做懒回收(默认 20 分钟)
 LIYE_LEASE_SECONDS = _env_int("LIYE_LEASE_SECONDS", 1200)
 # 号段黑名单(拨号前缀，逗号分隔)：分到黑名单国家的号会取消退回换卡重试；空=不过滤

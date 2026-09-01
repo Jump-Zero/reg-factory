@@ -58,6 +58,7 @@ PLUS_DIR = os.path.join(ROOT, "vendor", "chatgpt_plus")
 sys.path.insert(0, WEBUI)
 sys.path.insert(0, ROOT)
 from webui import scripts as schema  # noqa: E402
+from webui import health  # noqa: E402  # 账号健康（Codex OAuth 401 处置）
 
 
 # The updater inherits the current service environment.  Values originally
@@ -227,6 +228,9 @@ K12_LOG_HANDLE = None
 K12_START_TASK = None
 K12_LOCK = asyncio.Lock()
 
+# 账号健康定时巡检任务（手动+定时双触发中的"定时"侧，随 WebUI 常驻）。
+HEALTH_SCHEDULER_TASK = None
+
 # Plus 工作台使用内置 zkky 服务；网络出口优先住宅 IP，缺失时回退 Clash。
 PLUS_PORT = 5601
 PLUS_BATCH_SIZE = 27
@@ -292,6 +296,15 @@ def _read_config_val(key, default="", allow_empty=False):
     except Exception:
         pass
     return default
+
+
+def _health_cfg():
+    """账号健康模块的 SUB2API 连接配置（每次调用热读，保存面板后即时生效）。"""
+    return {
+        "url": _read_config_val("SUB2API_URL", ""),
+        "email": _read_config_val("SUB2API_EMAIL", ""),
+        "password": _read_config_val("SUB2API_PASSWORD", ""),
+    }
 
 
 def _liye_cards_file_has_cards():
@@ -1843,12 +1856,176 @@ async def api_chatgpt_plus_import_codex(request: Request):
             **started,
             "accepted": len(records),
             "accepted_emails": [str(record.get("email") or "").strip().lower() for record in records],
-            "skipped": skipped[:20],
+            "skipped": [],
         }
     except Exception as exc:
         with contextlib.suppress(OSError):
             os.unlink(input_path)
         return JSONResponse({"error": str(exc)[:240]}, status_code=400)
+
+
+# ============================================================ 账号健康（401 处置）
+@app.get("/api/health/schedule")
+async def api_health_schedule_get():
+    return health.load_schedule()
+
+
+@app.post("/api/health/schedule")
+async def api_health_schedule_save(request: Request):
+    data = await request.json()
+    try:
+        interval = int((data or {}).get("interval_minutes") or 60)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "巡检间隔必须是整数(分钟)"}, status_code=400)
+    try:
+        return health.save_schedule(enabled=bool((data or {}).get("enabled")), interval_minutes=interval)
+    except Exception as exc:
+        return JSONResponse({"error": f"保存失败：{str(exc)[:160]}"}, status_code=500)
+
+
+@app.post("/api/health/scan")
+async def api_health_scan(request: Request):
+    data = await request.json()
+    probe = str((data or {}).get("probe") or "suspects").strip().lower()
+    if probe not in {"suspects", "all", "none"}:
+        return JSONResponse({"error": "未知探测模式"}, status_code=400)
+    platform = str((data or {}).get("platform") or "all").strip().lower()
+    emails = (data or {}).get("emails") or None
+    try:
+        return await asyncio.to_thread(health.scan_accounts, _health_cfg(), probe, emails, platform)
+    except Exception as exc:
+        return JSONResponse({"error": f"扫描失败：{str(exc)[:200]}"}, status_code=500)
+
+
+@app.get("/api/health/cached")
+async def api_health_cached(platform: str = "all"):
+    """读取上次扫描的缓存结果（不发网络请求）；进入健康页/切平台时展示，
+    账号状态保持上次扫描时的快照，直到下一次扫描才刷新。"""
+    platform = str(platform or "all").strip().lower()
+    if platform != "all" and platform not in health.SUB2API_PLATFORMS:
+        return JSONResponse({"error": f"不支持的平台: {platform}"}, status_code=400)
+    try:
+        return await asyncio.to_thread(health.cached_scan, platform)
+    except Exception as exc:
+        return JSONResponse({"error": f"读取缓存失败：{str(exc)[:200]}"}, status_code=500)
+
+
+@app.post("/api/health/fix")
+async def api_health_fix(request: Request):
+    data = await request.json()
+    emails = [str(item or "").strip().lower() for item in (data or {}).get("emails") or []]
+    emails = [item for item in emails if item]
+    if not emails:
+        return JSONResponse({"error": "请选择要修复的账号"}, status_code=400)
+    try:
+        return await asyncio.to_thread(health.fix_accounts, _health_cfg(), emails)
+    except Exception as exc:
+        return JSONResponse({"error": f"修复失败：{str(exc)[:200]}"}, status_code=500)
+
+
+@app.post("/api/health/quarantine")
+async def api_health_quarantine(request: Request):
+    data = await request.json()
+    emails = [str(item or "").strip().lower() for item in (data or {}).get("emails") or []]
+    emails = [item for item in emails if item]
+    if not emails:
+        return JSONResponse({"error": "请选择要隔离的账号"}, status_code=400)
+    confirm = bool((data or {}).get("confirm_browser", True))
+    platform = str((data or {}).get("platform") or "openai").strip().lower()
+    sub2api_action = str((data or {}).get("sub2api_action") or "disable").strip().lower()
+    if sub2api_action not in ("disable", "delete"):
+        return JSONResponse({"error": "SUB2API 处置方式必须是 disable/delete"}, status_code=400)
+    try:
+        return await health.quarantine_accounts(
+            _health_cfg(), emails, confirm=confirm, platform=platform,
+            sub2api_action=sub2api_action)
+    except Exception as exc:
+        return JSONResponse({"error": f"隔离失败：{str(exc)[:200]}"}, status_code=500)
+
+
+@app.get("/api/health/claude")
+async def api_health_claude():
+    """Claude 本地清点（未接入 SUB2API，仅列本地 CK 文件，无网络探测）。"""
+    try:
+        return await asyncio.to_thread(health.claude_inventory)
+    except Exception as exc:
+        return JSONResponse({"error": f"清点失败：{str(exc)[:200]}"}, status_code=500)
+
+
+@app.post("/api/health/reauth")
+async def api_health_reauth(request: Request):
+    """对掉授权账号重新授权：复用批量授权导入链路（本地凭据直接重登，不重注册）。"""
+    data = await request.json()
+    emails = [str(item or "").strip().lower() for item in (data or {}).get("emails") or []]
+    emails = [item for item in emails if item]
+    if not emails:
+        return JSONResponse({"error": "请选择要重新授权的账号"}, status_code=400)
+    lines, skipped = await asyncio.to_thread(health.prepare_reauth_lines, emails)
+    if not lines:
+        return JSONResponse(
+            {
+                "error": "没有可用凭据：这些账号既没有浏览器 Cookie 文件，也没有本地邮箱密码记录",
+                "skipped": skipped[:20],
+            },
+            status_code=400,
+        )
+    accepted_emails = []
+    for line in lines:
+        text = line.strip()
+        if text.startswith("{"):
+            try:
+                accepted_emails.append(str(json.loads(text).get("email") or ""))
+            except ValueError:
+                accepted_emails.append("")
+        else:
+            accepted_emails.append(text.split("----")[0])
+    accepted_emails = [item for item in accepted_emails if item]
+    input_path = ""
+    try:
+        data_root = os.path.abspath(os.environ.get("REG_FACTORY_DATA_DIR") or ROOT)
+        runtime_dir = os.path.join(data_root, "runtime", "plus_codex")
+        os.makedirs(runtime_dir, exist_ok=True)
+        descriptor, input_path = tempfile.mkstemp(
+            prefix="health-reauth-", suffix=".txt", dir=runtime_dir, text=True
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        with contextlib.suppress(OSError):
+            os.chmod(input_path, 0o600)
+
+        script = schema.script_by_id("plus_codex_import")
+        args = {
+            "--accounts-file": input_path,
+            "--group": _read_config_val("SUB2API_GROUP", "codex") or "codex",
+            "--concurrency": 1,
+            "--node": "auto",
+            "--sms-provider": "auto",
+            "--phone-attempts": 3,
+            "--sms-timeout": 180,
+            "--timeout": 1800,
+            "--output-format": "sub2api",
+            "--delete-input": True,
+            "--keep-on-fail": True,
+        }
+        task_env = _child_env("chatgpt")
+        from common import proxy_switch
+
+        await asyncio.to_thread(proxy_switch.ensure_proxy_mode, task_env)
+        started = await _start_managed_run(
+            _build_cmd(script, args), "plus_codex_import", task_env, data_root
+        )
+        RUNS[started["run_id"]]["sensitive_input_path"] = input_path
+        return {
+            **started,
+            "accepted": len(lines),
+            "accepted_emails": accepted_emails,
+            "skipped": skipped[:20],
+        }
+    except Exception as exc:
+        if input_path:
+            with contextlib.suppress(OSError):
+                os.unlink(input_path)
+        return JSONResponse({"error": f"重新授权启动失败：{str(exc)[:200]}"}, status_code=400)
 
 
 def _decode_access_token_claims(token):
@@ -3512,6 +3689,23 @@ async def api_liye_card_delete(request: Request):
     return {"removed": code, "summary": await asyncio.to_thread(liye_sms.summary)}
 
 
+@app.post("/api/sms/liye/select")
+async def api_liye_cards_select(request: Request):
+    data = await request.json()
+    codes = (data or {}).get("codes")
+    if not isinstance(codes, list) or len(codes) > 500:
+        return JSONResponse({"error": "codes 必须是卡密列表（最多 500 张）"},
+                            status_code=400)
+    from common import liye_sms
+
+    ok, message = await asyncio.to_thread(liye_sms.set_selection, codes)
+    if not ok:
+        return JSONResponse({"error": message}, status_code=409)
+    selected = len({str(c).strip() for c in codes if str(c).strip()})
+    return {"selected": selected,
+            "summary": await asyncio.to_thread(liye_sms.summary)}
+
+
 def _gopay_error(exc: Exception):
     from common.gopay_service import GoPayUnavailable
 
@@ -4677,15 +4871,21 @@ async def api_stop_all():
 
 @app.on_event("startup")
 async def startup_local_services():
-    global K12_START_TASK
+    global K12_START_TASK, HEALTH_SCHEDULER_TASK
     auto_start = _read_config_val("K12_AUTO_START", "1").strip().lower() not in {"0", "false", "no", "off"}
     if auto_start and not _k12_alive():
         K12_START_TASK = asyncio.create_task(_start_k12_service())
+    HEALTH_SCHEDULER_TASK = asyncio.create_task(health.scheduler_loop(_health_cfg, print))
 
 
 @app.on_event("shutdown")
 async def shutdown_local_services():
-    global K12_START_TASK
+    global K12_START_TASK, HEALTH_SCHEDULER_TASK
+    if HEALTH_SCHEDULER_TASK and not HEALTH_SCHEDULER_TASK.done():
+        HEALTH_SCHEDULER_TASK.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await HEALTH_SCHEDULER_TASK
+    HEALTH_SCHEDULER_TASK = None
     if K12_START_TASK and not K12_START_TASK.done():
         K12_START_TASK.cancel()
         with contextlib.suppress(asyncio.CancelledError):

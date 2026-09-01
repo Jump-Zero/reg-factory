@@ -49,6 +49,76 @@ class ServiceDetectTests(unittest.TestCase):
         self.assertEqual(picked["code"], "GPT-ccc")
 
 
+class SelectionTests(unittest.TestCase):
+    """卡密勾选：selected 卡优先取用；勾选卡全不可用回落全池原顺序。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="liye_sel_")
+        self._env = patch.dict(os.environ, {"REG_FACTORY_DATA_DIR": self._tmp})
+        self._env.start()
+        self._cards = patch.object(liye_sms, "LIYE_CARDS", "")
+        self._cards.start()
+
+    def tearDown(self):
+        self._cards.stop()
+        self._env.stop()
+
+    def _state(self):
+        with open(os.path.join(self._tmp, "runtime", "state", "liye_cards.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_pick_available_prefers_selected(self):
+        state = {"cards": [
+            {"code": "GPT-aaa", "status": "available"},
+            {"code": "GPT-bbb", "status": "available", "selected": True},
+        ]}
+        # 勾选的卡即使排在后面也先被取用
+        picked = liye_sms._pick_available(state, service="chatai")
+        self.assertEqual(picked["code"], "GPT-bbb")
+
+    def test_pick_available_falls_back_when_selected_unavailable(self):
+        state = {"cards": [
+            {"code": "GPT-aaa", "status": "available", "selected": True,
+             "cooldown_until": 9999999999},
+            {"code": "GPT-bbb", "status": "available"},
+        ]}
+        # 勾选卡冷却中：回落全池原顺序，不直接取号失败
+        picked = liye_sms._pick_available(state, service="chatai")
+        self.assertEqual(picked["code"], "GPT-bbb")
+
+    def test_pick_available_selected_wrong_service_still_skipped(self):
+        state = {"cards": [
+            {"code": "GOO-bbb", "status": "available", "selected": True},
+            {"code": "GPT-aaa", "status": "available"},
+        ]}
+        # 勾选的 Gmail 卡对 chatai 依旧不可见
+        picked = liye_sms._pick_available(state, service="chatai")
+        self.assertEqual(picked["code"], "GPT-aaa")
+
+    def test_set_selection_writes_state_and_clears(self):
+        _write_state(self._tmp, [
+            {"code": "GPT-aaa", "status": "available", "selected": True},
+            {"code": "GPT-bbb", "status": "available"},
+        ])
+        ok, _ = liye_sms.set_selection(["GPT-bbb"])
+        self.assertTrue(ok)
+        entries = {c["code"]: c for c in self._state()["cards"]}
+        self.assertTrue(entries["GPT-bbb"]["selected"])
+        self.assertFalse(entries["GPT-aaa"]["selected"])   # 不在列表 → 清除
+        # 空列表 = 全部取消勾选
+        ok, _ = liye_sms.set_selection([])
+        self.assertTrue(ok)
+        entries = {c["code"]: c for c in self._state()["cards"]}
+        self.assertFalse(entries["GPT-bbb"]["selected"])
+
+    def test_set_selection_rejects_unknown_code(self):
+        _write_state(self._tmp, [{"code": "GPT-aaa", "status": "available"}])
+        ok, msg = liye_sms.set_selection(["GPT-nope"])
+        self.assertFalse(ok)
+        self.assertIn("不在池中", msg)
+
+
 class ClaimTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp(prefix="liye_test_")
@@ -80,6 +150,17 @@ class ClaimTests(unittest.TestCase):
         self.assertEqual(claim_one.call_args[0][0], "GPT-aaa")
         self.assertEqual(claim_one.call_args[1]["service"], "chatai")
 
+    def test_claim_prefers_selected_card(self):
+        _write_state(self._tmp, [
+            {"code": "GPT-aaa", "status": "available"},
+            {"code": "GPT-bbb", "status": "available", "selected": True},
+        ])
+        with patch.object(liye_sms, "_claim_one") as claim_one:
+            claim_one.return_value = ("15550001111", "", self._order())
+            liye_sms.claim(max_cards=1)
+        # 勾选的 GPT-bbb 优先于排在前面的 GPT-aaa
+        self.assertEqual(claim_one.call_args[0][0], "GPT-bbb")
+
     def test_claim_raises_when_only_other_service_cards(self):
         _write_state(self._tmp, [{"code": "GOO-bbb", "status": "available"}])
         with self.assertRaises(RuntimeError) as ctx:
@@ -96,6 +177,160 @@ class ClaimTests(unittest.TestCase):
         self.assertEqual(entry["service"], "chatai")
         self.assertEqual(entry["status"], "in_use")
         self.assertEqual(entry["order_id"], "ord1")
+
+
+class ClaimRetryTests(unittest.TestCase):
+    """分配超时→退出卡密→重新登录取号循环；「尝试次数过多」→ 卡密冷却。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="liye_retry_")
+        self._env = patch.dict(os.environ, {"REG_FACTORY_DATA_DIR": self._tmp})
+        self._env.start()
+        self._cards = patch.object(liye_sms, "LIYE_CARDS", "")
+        self._cards.start()
+        _write_state(self._tmp, [{"code": "GPT-aaa", "status": "available"}])
+        liye_sms._SESSIONS.clear()
+
+    def tearDown(self):
+        self._cards.stop()
+        self._env.stop()
+        liye_sms._SESSIONS.clear()
+
+    @staticmethod
+    def _order(order_id="ord1", phone=""):
+        return {"id": order_id, "phone": phone, "activationId": "act1",
+                "activationGeneration": 0, "status": "waiting"}
+
+    def _entry(self):
+        with open(os.path.join(self._tmp, "runtime", "state", "liye_cards.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)["cards"][0]
+
+    def _api_mock(self, post_orders):
+        """GET /api/orders → 无在途订单；POST /api/orders 依次返回 post_orders。"""
+        created = {"n": 0}
+
+        def fake(code, method, path, body=None, service=None):
+            if path == "/api/orders" and method == "POST":
+                order = post_orders[min(created["n"], len(post_orders) - 1)]
+                created["n"] += 1
+                return {"order": order}
+            return {"orders": []}
+
+        return fake, created
+
+    def test_timeout_reenters_card_until_number(self):
+        """第 1 轮超时 → 退出卡密重新登录，第 2 轮重建单拿到号码。"""
+        o1, o2 = self._order("ord1"), self._order("ord2", "15550001111")
+        fake, created = self._api_mock([o1, o2])
+        with patch.object(liye_sms, "LIYE_ALLOC_ROUNDS", 3), \
+             patch.object(liye_sms, "_login", return_value=object()), \
+             patch.object(liye_sms, "_api_with_relogin", side_effect=fake), \
+             patch.object(liye_sms, "_wait_phone", side_effect=[o1, o2]), \
+             patch.object(liye_sms, "_exit_order") as exit_order, \
+             patch.object(liye_sms, "_drop_session", wraps=liye_sms._drop_session) as drop:
+            phone, dial, pkey = liye_sms.claim(max_cards=1)
+        self.assertEqual((phone, pkey), ("15550001111", "liye_ord2"))
+        self.assertEqual(created["n"], 2)   # 超时后重新建单
+        exit_order.assert_called_once()     # 退出卡密（取消订单退回次数）
+        drop.assert_called_once()           # 再次输入卡密（重登）
+
+    def test_rate_limit_raises_card_rate_limited(self):
+        """平台返回「尝试次数过多，请稍后再试」→ 转换为 CARD_RATE_LIMITED。"""
+        def limited(code, method, path, body=None, service=None):
+            if path == "/api/orders" and method == "POST":
+                raise liye_sms.LiyeError("尝试次数过多，请稍后再试", code="TOO_MANY")
+            return {"orders": []}
+
+        with patch.object(liye_sms, "LIYE_ALLOC_ROUNDS", 3), \
+             patch.object(liye_sms, "_login", return_value=object()), \
+             patch.object(liye_sms, "_api_with_relogin", side_effect=limited):
+            with self.assertRaises(liye_sms.LiyeError) as ctx:
+                liye_sms._claim_one("GPT-aaa", 1, service="chatai")
+        self.assertEqual(ctx.exception.code, "CARD_RATE_LIMITED")
+
+    def test_rate_limit_marks_card_cooldown_via_claim(self):
+        """claim 全链路：限频后报错透出，卡密置 cooldown 600s。"""
+        def limited(code, method, path, body=None, service=None):
+            if path == "/api/orders" and method == "POST":
+                raise liye_sms.LiyeError("尝试次数过多，请稍后再试", code="TOO_MANY")
+            return {"orders": []}
+
+        with patch.object(liye_sms, "LIYE_ALLOC_ROUNDS", 3), \
+             patch.object(liye_sms, "_login", return_value=object()), \
+             patch.object(liye_sms, "_api_with_relogin", side_effect=limited):
+            with self.assertRaises(RuntimeError) as ctx:
+                liye_sms.claim(max_cards=1)
+        self.assertIn("尝试次数过多", str(ctx.exception))
+        entry = self._entry()
+        self.assertEqual(entry["status"], "cooldown")
+        self.assertGreater(entry["cooldown_until"], time.time() + 500)
+
+    def test_rounds_exhausted_falls_back_no_numbers(self):
+        """到达轮数上限仍未限频：NO_NUMBERS 报错，重试 N 轮，卡回 available+60s。"""
+        fake, created = self._api_mock([self._order("ordX")])
+        with patch.object(liye_sms, "LIYE_ALLOC_ROUNDS", 3), \
+             patch.object(liye_sms, "_login", return_value=object()), \
+             patch.object(liye_sms, "_api_with_relogin", side_effect=fake), \
+             patch.object(liye_sms, "_wait_phone", return_value=None), \
+             patch.object(liye_sms, "_exit_order"):
+            with self.assertRaises(RuntimeError) as ctx:
+                liye_sms.claim(max_cards=1)
+        self.assertIn("未分配号码", str(ctx.exception))
+        self.assertEqual(created["n"], 3)   # 每轮重建单
+        entry = self._entry()
+        self.assertEqual(entry["status"], "available")
+        self.assertGreater(entry["cooldown_until"], time.time() + 30)
+
+    def test_queued_order_cancel_rejected_still_exits_and_retries(self):
+        """订单排队中平台不允许取消(ORDER_NOT_CANCELLABLE)：
+        保留订单，仍退出卡密重新登录取号，循环继续直至拿到号码。"""
+        o1 = self._order("ord1")
+        o1["status"] = "queued"
+        o2 = self._order("ord2", "15550002222")
+        created = {"n": 0}
+
+        def fake(code, method, path, body=None, service=None):
+            if path == "/api/orders" and method == "POST":
+                created["n"] += 1
+                return {"order": o1 if created["n"] == 1 else o2}
+            if path.endswith("/action"):
+                # 排队中平台拒绝取消
+                raise liye_sms.LiyeError("order queued, cannot cancel",
+                                         code="ORDER_NOT_CANCELLABLE")
+            return {"orders": []}
+
+        with patch.object(liye_sms, "LIYE_ALLOC_ROUNDS", 3), \
+             patch.object(liye_sms, "_login", return_value=object()), \
+             patch.object(liye_sms, "_api_with_relogin", side_effect=fake), \
+             patch.object(liye_sms, "_wait_phone", side_effect=[o1, o2]), \
+             patch.object(liye_sms, "_drop_session", wraps=liye_sms._drop_session) as drop:
+            phone, dial, pkey = liye_sms.claim(max_cards=1)
+        self.assertEqual((phone, pkey), ("15550002222", "liye_ord2"))
+        self.assertEqual(created["n"], 2)   # 取消被拒后仍重新建单取号
+        drop.assert_called_once()           # 仍退出卡密（重登）再取
+
+    def test_wait_phone_timeout_returns_snapshot(self):
+        """等待超时未分号：返回订单快照供退出卡密取消，而非 None。"""
+        order = self._order("ordQ")
+        order["status"] = "queued"
+
+        def fake_api(session, method, path, body=None, timeout=30):
+            return {"order": order}
+
+        with patch.object(liye_sms, "_api", side_effect=fake_api), \
+             patch.object(liye_sms.time, "sleep"):
+            cur = liye_sms._wait_phone(object(), order, 0.05)
+        self.assertEqual(cur["id"], "ordQ")
+
+    def test_wait_phone_terminal_returns_snapshot(self):
+        """订单进入终态(取消/失败)：直接返回终态快照，不再轮询。"""
+        order = self._order("ordC")
+        order["status"] = "cancelled"
+        with patch.object(liye_sms, "_api") as api_mock:
+            cur = liye_sms._wait_phone(object(), order, 0.05)
+        self.assertEqual(cur["status"], "cancelled")
+        api_mock.assert_not_called()
 
 
 class SessionKeyTests(unittest.TestCase):
