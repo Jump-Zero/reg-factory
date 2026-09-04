@@ -111,6 +111,26 @@ class OAuthCodexTests(unittest.TestCase):
         )
         self.assertTrue(asyncio.run(_has_phone_error(page)))
 
+    def test_phone_already_used_message_is_a_phone_error(self):
+        """「该电话号码已被使用。请使用其他电话号码。」→ 触发换号重试。"""
+        page = MagicMock()
+        page.inner_text = AsyncMock(
+            return_value="该电话号码已被使用。请使用其他电话号码。"
+        )
+        self.assertTrue(asyncio.run(_has_phone_error(page)))
+
+    def test_traditional_chinese_whatsapp_fallback_is_detected(self):
+        page = MagicMock()
+        page.inner_text = AsyncMock(
+            return_value="我們無法將簡訊傳送到此電話號碼，因此已切換為 WhatsApp。"
+        )
+        self.assertTrue(asyncio.run(_has_phone_error(page)))
+
+    def test_unrelated_already_text_is_not_a_phone_error(self):
+        page = MagicMock()
+        page.inner_text = AsyncMock(return_value="Already signed in")
+        self.assertFalse(asyncio.run(_has_phone_error(page)))
+
     def test_phone_flow_exit_requires_consent_or_callback(self):
         async def exercise(url):
             page = MagicMock()

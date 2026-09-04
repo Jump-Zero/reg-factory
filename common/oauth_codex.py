@@ -395,24 +395,66 @@ def create_oauth_account(origin, token, credentials, group_ids, name="",
 
 
 # ============================================================ 浏览器驱动授权
+def _phone_error_text_variants(text):
+    """生成 add-phone 错误文案的可比对形式，兼容多语言空格/标点差异。"""
+    raw = str(text or "").lower()
+    # 页面文案可能使用不换行空格、全角空格或中间插入标点；保留原文，
+    # 再提供一个仅含字母数字和 CJK 的紧凑形式用于稳定匹配。
+    compact = re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", raw)
+    return raw, compact
+
+
 async def _has_phone_error(page):
-    """add-phone 页是否出现"号码不可用/无效"类报错。"""
+    """判断 add-phone 是否进入需要释放号码并换号的两类失败状态。
+
+    第一类：短信不可投递，页面回退到 WhatsApp；
+    第二类：号码已使用/不支持/无效/触发频率限制。
+    文案按英文、简体/繁体中文、日文、韩文和西文常见翻译覆盖，
+    同时用紧凑文本处理翻译中的空格和标点变化。
+    """
     try:
-        txt = (await page.inner_text("body")).lower()
+        raw, compact = _phone_error_text_variants(await page.inner_text("body"))
     except Exception:
         return False
-    for kw in [
-        "can't be used", "cannot be used", "not valid", "invalid", "unable to",
-        "try another", "different phone", "not supported", "already", "too many",
+
+    # 不使用单独的 "already" 等过宽词，避免把普通登录提示误判成换号。
+    exact_markers = (
+        # SMS 无法发送 → 已回退 WhatsApp
         "couldn't send a text message", "could not send a text message",
-        "switched to whatsapp", "send a verification code on whatsapp",
-        # 中文/日文界面(截图实测)：「我们无法向该电话号码发送短信，因此已切换为 WhatsApp」
-        "无法向该电话号码发送短信", "已切换为 whatsapp", "已切换为whatsapp",
-        "无法发送短信", "smsを送信できません", "whatsappに切り替え",
-    ]:
-        if kw in txt:
-            return True
-    return False
+        "unable to send a text message", "can't send a text message",
+        "switched to whatsapp", "switching to whatsapp",
+        "send a verification code on whatsapp",
+        "无法向该电话号码发送短信", "无法將簡訊傳送到此電話號碼",
+        "无法将短信发送到此电话号码", "已切换为 whatsapp", "已切換為 whatsapp",
+        "已切换为whatsapp", "已切換為whatsapp", "无法发送短信", "無法傳送簡訊",
+        "smsを送信できません", "whatsappに切り替え", "whatsappに切り替わりました",
+        "문자 메시지를 보낼 수 없습니다", "whatsapp로 전환",
+        # 号码已使用/不可用/受限
+        "this phone number has already been used", "phone number already in use",
+        "this number has already been used", "phone number can't be used",
+        "phone number cannot be used", "this phone number is not valid",
+        "try another phone number", "use a different phone number",
+        "电话号码已被使用", "電話號碼已被使用", "請使用其他電話號碼",
+        "请使用其他电话号码", "该号码已被使用", "此電話號碼無法使用",
+        "電話番号はすでに使用されています", "別の電話番号をお試しください",
+        "전화번호가 이미 사용되었습니다", "다른 전화번호를 사용해 주세요",
+    )
+    compact_markers = (
+        "couldntsendatextmessage", "couldnotsendatextmessage",
+        "switchedtowhatsapp", "switchingtowhatsapp",
+        "sendaverificationcodeonwhatsapp", "无法向该电话号码发送短信",
+        "无法将短信发送到此电话号码", "已切换为whatsapp", "已切換為whatsapp",
+        "无法发送短信", "無法傳送簡訊", "smsを送信できません",
+        "whatsappに切り替え", "whatsappに切り替わりました",
+        "thisphonenumberhasalreadybeenused", "phonenumberalreadyinuse",
+        "phonenumbercantbeused", "phonenumbercannotbeused",
+        "tryanotherphonenumber", "usedifferentphonenumber",
+        "电话号码已被使用", "電話號碼已被使用", "请使用其他电话号码",
+        "請使用其他電話號碼", "该号码已被使用", "此電話號碼無法使用",
+    )
+    return any(marker in raw for marker in exact_markers) or any(
+        marker in compact for marker in compact_markers
+    )
 
 
 def _is_phone_flow_url(url):
