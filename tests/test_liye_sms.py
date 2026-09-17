@@ -6,7 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -14,10 +14,10 @@ if sys.platform == "win32":
 from common import liye_sms
 
 
-def _write_state(root, cards):
+def _write_state(root, cards, strict=False):
     os.makedirs(os.path.join(root, "runtime", "state"), exist_ok=True)
     with open(os.path.join(root, "runtime", "state", "liye_cards.json"), "w", encoding="utf-8") as f:
-        json.dump({"version": 1, "cards": cards}, f)
+        json.dump({"version": 1, "cards": cards, "strict_selected": strict}, f)
 
 
 class ServiceDetectTests(unittest.TestCase):
@@ -117,6 +117,109 @@ class SelectionTests(unittest.TestCase):
         ok, msg = liye_sms.set_selection(["GPT-nope"])
         self.assertFalse(ok)
         self.assertIn("不在池中", msg)
+
+
+class StrictSelectionTests(unittest.TestCase):
+    """「仅用勾选卡密」开关：开启后取号只用勾选(selected)卡，不回落未勾选卡。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="liye_strict_")
+        self._env = patch.dict(os.environ, {"REG_FACTORY_DATA_DIR": self._tmp})
+        self._env.start()
+        self._cards = patch.object(liye_sms, "LIYE_CARDS", "")
+        self._cards.start()
+
+    def tearDown(self):
+        self._cards.stop()
+        self._env.stop()
+
+    def _state(self):
+        with open(os.path.join(self._tmp, "runtime", "state", "liye_cards.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_strict_picks_only_selected(self):
+        state = {"cards": [
+            {"code": "GPT-aaa", "status": "available"},
+            {"code": "GPT-bbb", "status": "available", "selected": True},
+        ], "strict_selected": True}
+        self.assertEqual(liye_sms._pick_available(state, service="chatai")["code"],
+                         "GPT-bbb")
+
+    def test_strict_never_falls_back_to_unselected(self):
+        state = {"cards": [
+            {"code": "GPT-aaa", "status": "available", "selected": True,
+             "cooldown_until": 9999999999},
+            {"code": "GPT-bbb", "status": "available"},
+        ], "strict_selected": True}
+        # 勾选卡冷却中：严格模式不回落 GPT-bbb，直接取号失败
+        self.assertIsNone(liye_sms._pick_available(state, service="chatai"))
+
+    def test_strict_without_selection_fails_closed(self):
+        state = {"cards": [{"code": "GPT-aaa", "status": "available"}],
+                 "strict_selected": True}
+        self.assertIsNone(liye_sms._pick_available(state, service="chatai"))
+
+    def test_strict_selected_wrong_service_not_visible(self):
+        state = {"cards": [
+            {"code": "GOO-bbb", "status": "available", "selected": True},
+            {"code": "GPT-aaa", "status": "available"},
+        ], "strict_selected": True}
+        # 勾选的 Gmail 卡对 chatai 依旧不可见，严格模式也不回落 GPT-aaa
+        self.assertIsNone(liye_sms._pick_available(state, service="chatai"))
+
+    def test_strict_off_keeps_pool_fallback(self):
+        state = {"cards": [
+            {"code": "GPT-aaa", "status": "available", "selected": True,
+             "cooldown_until": 9999999999},
+            {"code": "GPT-bbb", "status": "available"},
+        ], "strict_selected": False}
+        self.assertEqual(liye_sms._pick_available(state, service="chatai")["code"],
+                         "GPT-bbb")
+
+    def test_set_strict_selected_persists_and_summary_reports(self):
+        _write_state(self._tmp, [{"code": "GPT-aaa", "status": "available"}])
+        ok, message = liye_sms.set_strict_selected(True)
+        self.assertTrue(ok)
+        self.assertEqual(message, "")
+        self.assertTrue(self._state().get("strict_selected"))
+        self.assertTrue(liye_sms.summary()["strict_selected"])
+        ok, _ = liye_sms.set_strict_selected(False)
+        self.assertTrue(ok)
+        self.assertFalse(liye_sms.summary()["strict_selected"])
+
+    def test_claim_strict_failure_message_mentions_mode(self):
+        _write_state(self._tmp, [
+            {"code": "GPT-aaa", "status": "available"},
+            {"code": "GPT-sel", "status": "available", "selected": True,
+             "cooldown_until": 9999999999},
+        ], strict=True)
+        with self.assertRaises(RuntimeError) as ctx:
+            liye_sms.claim(max_cards=1)
+        self.assertIn("仅用勾选卡密", str(ctx.exception))
+        self.assertIn("不回落未勾选卡", str(ctx.exception))
+
+    def test_claim_strict_no_selection_failure_message(self):
+        _write_state(self._tmp, [{"code": "GPT-aaa", "status": "available"}],
+                     strict=True)
+        with self.assertRaises(RuntimeError) as ctx:
+            liye_sms.claim(max_cards=1)
+        self.assertIn("未勾选任何卡密", str(ctx.exception))
+
+    def test_claim_strict_uses_selected_card(self):
+        _write_state(self._tmp, [
+            {"code": "GPT-aaa", "status": "available"},
+            {"code": "GPT-bbb", "status": "available", "selected": True},
+        ], strict=True)
+        with patch.object(liye_sms, "_claim_one") as claim_one:
+            claim_one.return_value = ("15550001111", "",
+                                      {"id": "ord1", "phone": "15550001111",
+                                       "activationId": "act1",
+                                       "activationGeneration": 0,
+                                       "status": "waiting"})
+            phone, dial, pkey = liye_sms.claim(max_cards=1)
+        self.assertEqual((phone, pkey), ("15550001111", "liye_ord1"))
+        self.assertEqual(claim_one.call_args[0][0], "GPT-bbb")
 
 
 class ClaimTests(unittest.TestCase):
@@ -621,6 +724,9 @@ class ChatgptChainTests(unittest.TestCase):
     def test_auto_order_includes_liye_when_cards_configured(self):
         from common import sms as root_sms
 
+        # 轮换游标是模块级全局：同进程先跑过其它 sms 测试会推进它，
+        # 使 liye 不在末位；这里重置保证断言的是「默认 last」排列。
+        root_sms._AUTO_PROVIDER_CURSOR = 0
         with patch.object(root_sms, "SMS_TOKEN", "firefox-token"), \
              patch.object(root_sms, "SMSMAN_TOKEN", "smsman-token"), \
              patch.object(root_sms, "HERO_SMS_API_KEY", "hero-key"), \
@@ -629,6 +735,82 @@ class ChatgptChainTests(unittest.TestCase):
         # 默认 last：liye 排在最后兜底
         self.assertEqual(order[-1], "liye")
         self.assertEqual(set(order), {"firefox", "smsman", "hero", "liye"})
+
+
+class SessionExitTests(unittest.TestCase):
+    """退出卡密：先调平台 POST /api/card/logout（服务端结束会话），再丢本地 Session。"""
+
+    def test_drop_session_logs_out_on_platform(self):
+        sess = MagicMock()
+        liye_sms._SESSIONS["GPT-aaa|chatai"] = sess
+        try:
+            liye_sms._drop_session("GPT-aaa")
+        finally:
+            liye_sms._SESSIONS.clear()
+        sess.post.assert_called_once()
+        args, _kwargs = sess.post.call_args
+        self.assertIn("/api/card/logout", str(args[0]))
+
+    def test_drop_session_logout_failure_still_discards(self):
+        sess = MagicMock()
+        sess.post.side_effect = RuntimeError("network down")
+        liye_sms._SESSIONS["GPT-aaa|chatai"] = sess
+        try:
+            liye_sms._drop_session("GPT-aaa")  # 不应抛错
+        finally:
+            liye_sms._SESSIONS.clear()
+        self.assertNotIn("GPT-aaa|chatai", liye_sms._SESSIONS)
+
+    def test_drop_session_without_local_session_is_noop(self):
+        liye_sms._drop_session("GPT-notloaded")  # 不应抛错
+
+
+class OrderStateTests(unittest.TestCase):
+    """订单-卡密状态：order_consumed 判断与 _transition 的 exhausted 保护。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="liye_ord_")
+        self._env = patch.dict(os.environ, {"REG_FACTORY_DATA_DIR": self._tmp})
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+
+    def _write_state(self, cards):
+        os.makedirs(os.path.join(self._tmp, "runtime", "state"), exist_ok=True)
+        with open(os.path.join(self._tmp, "runtime", "state", "liye_cards.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "cards": cards, "strict_selected": False}, f)
+
+    def _read_state(self):
+        with open(os.path.join(self._tmp, "runtime", "state", "liye_cards.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_order_consumed_true_for_exhausted_card(self):
+        self._write_state([{"code": "GPT-aaa", "status": "exhausted", "order_id": "77"}])
+        self.assertTrue(liye_sms.order_consumed("liye_77"))
+
+    def test_order_consumed_false_for_in_use_card(self):
+        self._write_state([{"code": "GPT-aaa", "status": "in_use", "order_id": "77"}])
+        self.assertFalse(liye_sms.order_consumed("liye_77"))
+
+    def test_order_consumed_false_for_unknown_order(self):
+        self._write_state([{"code": "GPT-aaa", "status": "available"}])
+        self.assertFalse(liye_sms.order_consumed("liye_404"))
+
+    def test_transition_does_not_resurrect_exhausted_card(self):
+        # 已收码(一卡一次已消耗)：取消失败的冷却不能把 exhausted 拉回 cooldown
+        self._write_state([{"code": "GPT-aaa", "status": "exhausted", "order_id": "77"}])
+        liye_sms._transition("77", "cooldown", cooldown_until=9999999999)
+        self.assertEqual(self._read_state()["cards"][0]["status"], "exhausted")
+
+    def test_transition_still_releases_active_card(self):
+        self._write_state([{"code": "GPT-aaa", "status": "in_use", "order_id": "77"}])
+        liye_sms._transition("77", "available")
+        card = self._read_state()["cards"][0]
+        self.assertEqual(card["status"], "available")
+        self.assertEqual(card["order_id"], "")
 
 
 if __name__ == "__main__":

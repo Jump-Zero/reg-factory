@@ -1038,6 +1038,43 @@ def _account_map(directory: Path) -> dict[str, str]:
     return result
 
 
+def _key_cookie_values(cookies: list[dict], key_names) -> list[str]:
+    """Identity values of a cookie jar, ordered by lookup priority.
+
+    ChatGPT chunks ``__Secure-next-auth.session-token`` into ``.0``/``.1``
+    suffixed cookies when the token exceeds the per-cookie size limit, so the
+    plain name is usually absent from fresh browser dumps. Candidates per key
+    name: the plain value (or all chunks joined in index order), then the
+    leading chunk alone because accounts.txt rows written by the registration
+    flow store only that first chunk.
+    """
+    values: list[str] = []
+    for name in sorted(key_names):
+        plain = next(
+            (item for item in cookies if item.get("name") == name and item.get("value")),
+            None,
+        )
+        if plain:
+            values.append(str(plain["value"]))
+            continue
+        prefix = name + "."
+        chunks = [
+            item for item in cookies
+            if isinstance(item.get("name"), str) and item["name"].startswith(prefix) and item.get("value")
+        ]
+        if not chunks:
+            continue
+
+        def _chunk_index(item: dict) -> tuple:
+            suffix = str(item["name"])[len(prefix):]
+            return (0, suffix) if not suffix.isdigit() else (int(suffix), "")
+
+        chunks.sort(key=_chunk_index)
+        values.append("".join(str(item["value"]) for item in chunks))
+        values.append(str(chunks[0]["value"]))
+    return values
+
+
 def _cookie_records(platform: str) -> list[dict]:
     def load() -> list[dict]:
         config = _PLATFORMS[platform]
@@ -1061,16 +1098,14 @@ def _cookie_records(platform: str) -> list[dict]:
                     item for item in raw_cookies
                     if isinstance(item, dict) and _domain_allowed(item.get("domain", ""), config["domains"])
                 ]
-                key_cookie = next(
-                    (item for item in cookies if item.get("name") in config["key_names"] and item.get("value")),
-                    None,
-                )
-                if not key_cookie:
+                candidates = _key_cookie_values(cookies, config["key_names"])
+                if not candidates:
                     continue
+                email = next((accounts[value] for value in candidates if value in accounts), "")
                 records.append({
                     "path": path,
-                    "email": accounts.get(str(key_cookie["value"]), ""),
-                    "email_provider": classify_email_provider(accounts.get(str(key_cookie["value"]), "")),
+                    "email": email,
+                    "email_provider": classify_email_provider(email),
                     "cookies": cookies,
                 })
         return sorted(records, key=lambda item: (item["path"].stat().st_mtime, str(item["path"]).lower()))

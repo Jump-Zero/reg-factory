@@ -46,9 +46,12 @@ class SmsRoutingTests(unittest.TestCase):
         hero.assert_called_once_with("dr")
 
     def test_auto_rotates_starting_provider_between_requests(self):
+        # has_cards 钉住 False：真实环境配了 LIYE 卡时 has_cards() 会把 liye
+        # 追加进轮换列表，本测试只验证三个 key 型平台的轮换（liye 另有专测）。
         with patch.object(sms, "SMS_TOKEN", "firefox-token"), \
              patch.object(sms, "SMSMAN_TOKEN", "smsman-token"), \
-             patch.object(sms, "HERO_SMS_API_KEY", "hero-key"):
+             patch.object(sms, "HERO_SMS_API_KEY", "hero-key"), \
+             patch("common.liye_sms.has_cards", return_value=False):
             first = sms._auto_provider_order("2313", "openai", "dr")
             second = sms._auto_provider_order("2313", "openai", "dr")
             third = sms._auto_provider_order("2313", "openai", "dr")

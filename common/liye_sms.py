@@ -122,7 +122,7 @@ def _state_file():
 
 
 def _empty_state():
-    return {"version": 1, "cards": []}
+    return {"version": 1, "cards": [], "strict_selected": False}
 
 
 def _load_state():
@@ -235,9 +235,17 @@ def _login(card_code, service=None):
 
 
 def _drop_session(card_code):
+    """退出卡密会话：先调平台 POST /api/card/logout（服务端结束会话，与网页端
+    「退出」按钮一致——重新登录取号前必须先退出旧会话，而不是并行新开一个），
+    再丢弃本地 Session。logout 失败(网络/会话已过期)不阻塞，本地照常丢弃。"""
     with _SESSIONS_LOCK:
-        for key in [k for k in _SESSIONS if k.startswith(f"{card_code}|")]:
-            _SESSIONS.pop(key, None)
+        keys = [k for k in _SESSIONS if k.startswith(f"{card_code}|")]
+        sessions = [_SESSIONS.pop(k) for k in keys]
+    for sess in sessions:
+        try:
+            sess.post(LIYE_API_BASE.rstrip("/") + "/api/card/logout", json={}, timeout=10)
+        except Exception:
+            pass
 
 
 def _api_with_relogin(card_code, method, path, body=None, service=None):
@@ -354,7 +362,9 @@ def _recover_stale(state):
 
 def _pick_available(state, service=None):
     """挑下一张可用卡：勾选(selected)的卡优先；勾选卡都不可用或未勾选时
-    按原顺序取全池。跳过冷却中的 available 卡；指定 service 时只挑该服务的卡
+    按原顺序取全池。strict_selected=True（「仅用勾选卡密」开关）时只用勾选卡，
+    勾选卡全不可用直接返回 None（取号失败，不回落未勾选卡）。
+    跳过冷却中的 available 卡；指定 service 时只挑该服务的卡
     (避免 OpenAI 流程拿到 GOO- 的 Gmail 卡、反之亦然)。"""
     now = time.time()
 
@@ -369,6 +379,8 @@ def _pick_available(state, service=None):
     for c in state["cards"]:        # 第一遍：勾选的可用卡
         if c.get("selected") and usable(c):
             return c
+    if state.get("strict_selected"):
+        return None                 # 严格模式：不回落未勾选卡
     for c in state["cards"]:        # 第二遍：全池按原顺序（含未勾选）
         if usable(c):
             return c
@@ -383,7 +395,8 @@ def summary():
     for c in state["cards"]:
         if isinstance(c, dict):
             counts[c.get("status") or "?"] = counts.get(c.get("status") or "?", 0) + 1
-    return {"total": len(state["cards"]), **counts, "cards": [
+    return {"total": len(state["cards"]),
+            "strict_selected": bool(state.get("strict_selected")), **counts, "cards": [
         {"code": (c.get("code") or "")[:6] + "..." + (c.get("code") or "")[-4:],
          "full_code": c.get("code"),
          "status": c.get("status"), "service": c.get("service"),
@@ -419,6 +432,17 @@ def set_selection(codes):
             if bool(c.get("selected")) != flag:
                 c["selected"] = flag
                 c["updated_at"] = now
+        _save_state(state)
+    return True, ""
+
+
+def set_strict_selected(enabled):
+    """「仅用勾选卡密」开关：True=取号只从勾选(selected)卡里挑，勾选卡全部
+    不可用时直接取号失败，不回落未勾选卡；False=默认行为（勾选卡优先，
+    不足时回落全池按序）。返回 (ok, message)。"""
+    with file_lock(_state_file()):
+        state = _load_state()
+        state["strict_selected"] = bool(enabled)
         _save_state(state)
     return True, ""
 
@@ -471,6 +495,13 @@ def claim(max_cards=3, alloc_timeout=None, service="chatai"):
             if entry is None:
                 _save_state(state)
                 scope = f" for service {service}" if service else ""
+                if state.get("strict_selected"):
+                    any_sel = any(isinstance(c, dict) and c.get("selected")
+                                  for c in state["cards"])
+                    why = ("未勾选任何卡密" if not any_sel
+                           else "勾选的卡密均不可用（耗尽/占用/冷却）")
+                    raise RuntimeError(
+                        f"liye: {why}；「仅用勾选卡密」开启中，不回落未勾选卡{scope}")
                 raise RuntimeError(f"liye: no available cards{scope} ({last_err})".strip())
             svc = str(service or "chatai").strip().lower()
             entry.update({"status": "in_use", "claimed_at": time.time(),
@@ -617,6 +648,16 @@ def _resolve(pkey):
     return entry, order_id
 
 
+def order_consumed(pkey):
+    """该订单绑定的卡密是否已收到过验证码（一卡一次，已消耗）。
+    已消耗的卡换号/取消都无意义，add-phone 换号重试时应直接跳过释放动作。"""
+    try:
+        entry, _order_id = _resolve(pkey)
+        return str(entry.get("status") or "") == "exhausted"
+    except Exception:
+        return False
+
+
 def get_code(pkey, max_wait=180, interval=5):
     """轮询订单状态拿验证码；拿到即把卡密标记 exhausted（一卡一次）。"""
     entry, order_id = _resolve(pkey)
@@ -732,6 +773,10 @@ def _transition(order_id, status, **extra):
         state = _load_state()
         c = _entry_by_order(state, order_id)
         if c is None:
+            return
+        # 已收码的卡密即已消耗：取消失败的冷却不能把 exhausted 拉回
+        # cooldown/available，否则冷却到期后会被误当可用卡复用（一卡一次）。
+        if str(c.get("status") or "") == "exhausted" and status != "exhausted":
             return
         c.update({"status": status, "updated_at": time.time(),
                   "order_id": "" if status == "available" else c.get("order_id"),
@@ -898,11 +943,19 @@ def _cli(argv):
             return 1
         print("OK" if reset_card(argv[1]) else "卡密不在池中")
         return 0
+    if cmd == "strict":
+        if len(argv) < 2 or str(argv[1]).lower() not in ("on", "off"):
+            print("用法: python -m common.liye_sms strict on|off")
+            return 1
+        enabled = str(argv[1]).lower() == "on"
+        set_strict_selected(enabled)
+        print(f"OK: 仅用勾选卡密={'on' if enabled else 'off'}")
+        return 0
     if cmd == "test":
         phone, dial, pkey = claim()
         print(f"phone=+{phone} pkey={pkey}，15 分钟内有效；验证码轮询用 get_code")
         return 0
-    print("用法: python -m common.liye_sms [status|stats [service]|reset CODE|test]")
+    print("用法: python -m common.liye_sms [status|stats [service]|reset CODE|strict on|off|test]")
     return 1
 
 

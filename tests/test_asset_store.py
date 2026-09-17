@@ -249,6 +249,43 @@ class AssetStoreTests(unittest.TestCase):
         self.assertEqual(cpa["data"]["access_token"], "access-token")
         self.assertEqual(chatgpt2api["data"]["source_type"], "web")
 
+    def test_chatgpt_chunked_session_token_maps_to_email(self):
+        cookie_dir = self.root / "cookies" / "chatgpt"
+        cookie_dir.mkdir(parents=True)
+        chunk_zero = "jwe-header.payload-part-"
+        chunk_one = "signature"
+        (cookie_dir / "full_chunked_20260101_000000.json").write_text(
+            json.dumps([
+                {
+                    "name": "__Secure-next-auth.session-token.0",
+                    "value": chunk_zero,
+                    "domain": ".chatgpt.com",
+                    "path": "/",
+                },
+                {
+                    "name": "__Secure-next-auth.session-token.1",
+                    "value": chunk_one,
+                    "domain": ".chatgpt.com",
+                    "path": "/",
+                },
+            ]),
+            encoding="utf-8",
+        )
+
+        def mapping_for(account_token: str) -> str:
+            asset_store._RECORD_CACHE.clear()
+            (cookie_dir / "accounts.txt").write_text(
+                f"chunked@example.com|password|{account_token}\n", encoding="utf-8"
+            )
+            records = asset_store._cookie_records("chatgpt")
+            self.assertEqual(len(records), 1)
+            return records[0]["email"]
+
+        # 注册流程写入 accounts.txt 时只落了第 0 段（save_platform_cookies 现状）
+        self.assertEqual(mapping_for(chunk_zero), "chunked@example.com")
+        # 拼接后的完整 token 同样能命中
+        self.assertEqual(mapping_for(chunk_zero + chunk_one), "chunked@example.com")
+
     def test_chatgpt_icloud_formats_include_the_mailbox_access_url(self):
         email = "mailbox@icloud.com"
         access_url = "https://mail.example.test/api/share/opaque-token"

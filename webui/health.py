@@ -16,6 +16,19 @@ refresh_token 能否刷新是「账号被封禁」与「单纯掉授权」的分
 注意：OpenAI 刷新时会轮换 refresh_token。因此凡真正发起过刷新（扫描探测或修复），
 成功后都必须立刻把新凭据回写本地 oauth-*.session.json，绝不能继续使用旧 token，
 否则下一次刷新必报 invalid_grant，把好账号误判成封禁。
+
+扫描探测铁律（2026-09 与用户确认）：扫描一律走 SUB2API 服务端刷新
+（POST /accounts/{id}/refresh，走账号自身 proxy 出站），与实际使用完全同路径：
+- 成功 → 账号在 SUB2API 真实可用（token 由 SUB2API 自己轮换并保管，不产生不同步）
+- 被拒（401/session ended）→ 真死号
+扫描中严禁本地 _refresh_oauth 探测：本地刷新轮换出的新 token 只落本地文件，
+SUB2API 手里的旧 token 立即作废——这正是「扫描显示正常、一到 SUB2API 使用就
+401」的根因。本地刷新只允许出现在 fix_accounts（刷新→回写本地→PUT 回 SUB2API
+的完整闭环）里。
+
+401 实录优先：SUB2API 的 error_message 会记录实际调用 OpenAI 被拒的实录
+（"Authentication failed (401): ... invalidated oauth token"），这比 status 字段
+更权威——status 仍为 active 的账号也可能已记录 401（尚未触发 auto_pause）。
 """
 
 from __future__ import annotations
@@ -58,6 +71,7 @@ CATEGORY_LABELS = {
     "suspect": "待探测",
     "fixable": "可修复",
     "suspicious_banned": "封禁嫌疑",
+    "auth401": "已 401",
     "sub2api_active": "SUB2API 正常",
     "no_refresh": "无 refresh_token",
     "no_local": "本地无凭据",
@@ -275,22 +289,41 @@ def delete_sub2api_account(origin, token, account_id):
         return False, str(exc)
 
 
+def sub2api_401_evidence(item):
+    """SUB2API 条目是否已记录 401 认证失败实录。
+
+    error_message 形如 "Authentication failed (401): ... invalidated oauth token"。
+    这是 SUB2API 实际调用 OpenAI 被拒的实录，比 status 字段更权威。
+    """
+    text = str((item or {}).get("error_message") or "")
+    lowered = text.lower()
+    return bool(
+        "401" in text
+        or "invalidated oauth token" in lowered
+        or "authentication failed" in lowered
+    )
+
+
 # ============================================================ 刷新测试
-def _refresh_oauth(refresh_token, client_id="", timeout=20):
+def _refresh_oauth(refresh_token, client_id="", timeout=20, proxy=""):
     """用 refresh_token 向 OpenAI 换新 access_token，返回判别结果。
 
     - ok=True: payload 含新 access_token（可能轮换 refresh_token，调用方必须回写）
     - kind="rejected": OpenAI 明确拒绝(invalid_grant / HTTP 401) → 封禁嫌疑
     - kind="network":  连接异常/超时 → 不可定罪
     - kind="http":     其他 HTTP 错误 → 状态未知
+
+    proxy: fix 闭环（唯一允许本地刷新的场景）必须挂全局代理出站；
+    本机直连 auth.openai.com 会被地区风控拦截（HTTP 403），导致修复全部失败。
     """
     body = {
         "grant_type": "refresh_token",
         "refresh_token": str(refresh_token or ""),
         "client_id": str(client_id or DEFAULT_CLIENT_ID),
     }
+    proxies = {"http": proxy, "https": proxy} if proxy else None
     try:
-        resp = requests.post(OPENAI_TOKEN_URL, json=body, timeout=timeout)
+        resp = requests.post(OPENAI_TOKEN_URL, json=body, timeout=timeout, proxies=proxies)
     except (requests.RequestException, ConnectionError, TimeoutError) as exc:
         # 覆盖 requests 库异常与内置网络异常(ConnectionResetError 等)，一律不可定罪
         return {"ok": False, "kind": "network", "error": str(exc)[:200]}
@@ -373,22 +406,35 @@ def _sub2api_refresh_account(origin, token, item):
     「拿 SUB2API 凭据本地刷新」不可行；这是唯一可用的远端自愈/验证通道：
     - 刷新成功 → SUB2API 持有有效 refresh_token，账号活着（本地判据已失真）
     - 刷新失败 → SUB2API 侧凭据也被 OpenAI 拒绝（session ended），封禁嫌疑坐实
-    返回 (ok, 说明文字)。
+    服务端出站到 OpenAI 偶发网络抖动（EOF 等），失败原因不明时自动重试一次。
+    返回 (ok, 说明文字, kind)；kind: ""=成功 / "rejected"=OpenAI 明确拒绝 /
+    "unknown"=其他失败（网络、限流等，不可定罪）。
     """
-    try:
-        _sub2api_request(
-            origin, f"/api/v1/admin/accounts/{int(item['id'])}/refresh",
-            token=token, method="POST", body={}, retries=1,
-        )
-    except Exception as exc:
-        text = str(exc).replace("\n", " ")
-        return False, f"SUB2API 侧刷新同样失败: {text[:120]}"
-    return True, "SUB2API 侧刷新成功"
+    note, kind = "", "unknown"
+    for _attempt in range(2):
+        try:
+            _sub2api_request(
+                origin, f"/api/v1/admin/accounts/{int(item['id'])}/refresh",
+                token=token, method="POST", body={}, retries=1,
+            )
+            return True, "SUB2API 侧刷新成功", ""
+        except Exception as exc:
+            text = str(exc).replace("\n", " ")
+            lowered = text.lower()
+            rejected = any(
+                marker in lowered
+                for marker in ("status 401", "session has ended", "invalid_grant")
+            )
+            note = f"SUB2API 侧刷新同样失败: {text[:120]}"
+            kind = "rejected" if rejected else "unknown"
+            if rejected:
+                break
+    return False, note, kind
 
 
 # ============================================================ Grok 探测
-def _grok_probe_proxy():
-    """Grok 探测代理：复用全局代理（过 Cloudflare），不可用时返回空串。"""
+def _effective_proxy():
+    """出站代理：复用全局代理（过 Cloudflare / OpenAI 地区风控），不可用时返回空串。"""
     try:
         from common.proxy_switch import effective_proxy_url
 
@@ -428,47 +474,46 @@ def _probe_grok_sso(sso, proxy="", timeout=20):
 
 
 # ============================================================ 扫描
-def _scan_grok_row(row, local, need_probe, proxy):
-    """就地补全单个 grok 行的分类（探测走本地 sso 访问 grok.com）。"""
+def _scan_grok_row(row, item, local, need_probe, origin, token, proxy):
+    """就地补全单个 grok 行的分类。
+
+    真实校验走 SUB2API 服务端刷新（与实际使用同路径，实测 grok 账号同样支持
+    /accounts/{id}/refresh）。被拒时回退本地 sso 探测区分：
+    sso 仍活 → 重新授权导入即可恢复；sso 也死 → 封禁。
+    """
     if not need_probe:
         if local is not None:
             row["local"] = True
         return
-    if local is None:
-        row["category"] = "no_local"
-        row["detail"] = "SUB2API 有账号但本地无 sso 文件，请走「重新授权」"
-        return
-    row["local"] = True
-    result = _probe_grok_sso(local["sso"], proxy=proxy)
+    ok, note, kind = _sub2api_refresh_account(origin, token, item)
     time.sleep(PROBE_INTERVAL_SECONDS)
-    row["probe"] = {
-        "kind": str(result.get("kind") or ""),
-        "error": str(result.get("error") or "")[:160],
-    }
-    if result["ok"]:
+    row["probe"] = {"kind": kind, "error": note[:160]}
+    if ok:
+        if local is not None:
+            row["local"] = True
         if row["suspect"]:
-            # SUB2API 侧状态异常但 sso 仍有效：重导入即可恢复（grok 无本地 RT，不能静默修复）。
+            row["category"] = "sub2api_active"
+            row["detail"] = "服务端刷新成功，账号在 SUB2API 已恢复可用"
+        else:
+            row["detail"] = "服务端刷新验证通过，账号真实可用"
+        return
+    if kind == "rejected":
+        if local is None:
+            row["category"] = "suspicious_banned"
+            row["detail"] = f"服务端刷新被拒且本地无 sso 文件；{note[:80]}"
+            return
+        row["local"] = True
+        sso_result = _probe_grok_sso(local["sso"], proxy=proxy)
+        if sso_result["ok"]:
             row["category"] = "reauth"
-            row["detail"] = "sso 仍有效，走「重新授权导入」即可恢复 SUB2API"
+            row["detail"] = ("SUB2API 持有的 oauth 凭据被拒，但本地 sso 仍有效，"
+                             "走「重新授权导入」即可恢复")
         else:
-            row["detail"] = "sso 探测通过"
-    elif result.get("kind") == "rejected":
-        row["category"] = "suspicious_banned"
-        row["detail"] = f"xAI 风控判定，可直接隔离（{str(result.get('error'))[:80]}）"
-    elif result.get("kind") == "network":
-        if row["suspect"]:
-            row["category"] = "network_error"
-            row["detail"] = "探测请求网络异常，无法判定（请稍后重扫）"
-        else:
-            row["detail"] = "探测时网络异常（账号仍为 active）"
-    else:
-        if row["suspect"]:
-            row["category"] = "probe_error"
-            row["detail"] = (
-                f"探测返回异常 HTTP {result.get('status')}：{str(result.get('error'))[:80]}"
-            )
-        else:
-            row["detail"] = f"探测 HTTP {result.get('status')}（账号仍为 active）"
+            row["category"] = "suspicious_banned"
+            row["detail"] = f"服务端刷新与本地 sso 均被拒，疑似封禁；{note[:60]}"
+        return
+    row["category"] = "probe_error"
+    row["detail"] = f"服务端刷新网络异常，无法判定（请重扫）：{note[:80]}"
 
 
 # ============================================================ 扫描结果缓存
@@ -581,10 +626,12 @@ def scan_accounts(cfg, probe="suspects", emails=None, platform="all"):
     与 SUB2API 条目的交集）。SUB2API 上外部导入的账号、只在本地未导入的
     项目账号都不进结果（用户确认的口径）。
 
-    probe: "suspects"(默认，只探测 status 非 active 的账号) / "all" / "none"
+    probe: "all"(真实校验全部：对每个账号做 SUB2API 服务端刷新) /
+           "suspects"(默认，只校验 status 非 active 或已记录 401 的账号) / "none"(仅列出)
     emails: 只看这些邮箱（匹配条目 email 或 name）
     platform: "all"(默认，SUB2API_PLATFORMS 全部) / "openai" / "grok"
     返回 {ok, accounts:[row], summary:{}, total_in_sub2api, excluded_not_imported}
+    校验方式与实际使用同路径（SUB2API 自己刷新自己持有的凭据），结果即真实可用性。
     """
     if not (str(cfg.get("url") or "").strip() and str(cfg.get("email") or "").strip()
             and str(cfg.get("password") or "").strip()):
@@ -609,7 +656,7 @@ def scan_accounts(cfg, probe="suspects", emails=None, platform="all"):
         return {"ok": False, "error": f"SUB2API 拉取失败: {str(exc)[:160]}"}
     locals_index = list_local_credentials()
     grok_index = list_grok_sso_credentials()
-    grok_proxy = _grok_probe_proxy()
+    grok_proxy = _effective_proxy()
     rows, counts = [], {}
 
     def add(row):
@@ -631,7 +678,11 @@ def scan_accounts(cfg, probe="suspects", emails=None, platform="all"):
                 excluded_not_imported += 1
                 continue
             status = str(item.get("status") or "").strip().lower() or "unknown"
-            suspect = status not in SUSPECT_EXEMPT
+            sub_401 = sub2api_401_evidence(item)
+            suspect = status not in SUSPECT_EXEMPT or sub_401
+            suspect_detail = f"SUB2API status={status}"
+            if sub_401:
+                suspect_detail += "，已记录 401 认证失败"
             row = {
                 "id": item.get("id"),
                 "name": str(item.get("name") or ""),
@@ -639,96 +690,42 @@ def scan_accounts(cfg, probe="suspects", emails=None, platform="all"):
                 "platform": name,
                 "platform_label": meta["label"],
                 "status": status,
+                "sub_401": sub_401,
                 "suspect": suspect,
                 "local": False,
                 "category": "ok" if not suspect else "suspect",
-                "detail": "" if not suspect else f"SUB2API status={status}",
+                "detail": "" if not suspect else suspect_detail,
             }
             need_probe = probe == "all" or (probe == "suspects" and suspect)
             if name == "grok":
-                _scan_grok_row(row, grok_index.get(email), need_probe, grok_proxy)
+                _scan_grok_row(row, item, grok_index.get(email), need_probe, origin, token, grok_proxy)
                 add(row)
                 continue
             row["local"] = email in locals_index
             if need_probe:
-                local = locals_index.get(email)
-                if local is None:
-                    row["category"] = "no_local"
-                    row["detail"] = "SUB2API 有账号但本地无 oauth 凭据文件"
-                elif not str((local["data"] or {}).get("refresh_token") or "").strip():
-                    row["category"] = "no_refresh"
-                    row["detail"] = "本地凭据缺少 refresh_token，只能浏览器重新授权"
-                else:
-                    result = _refresh_oauth(
-                        local["data"].get("refresh_token"), local["data"].get("client_id"),
-                    )
-                    time.sleep(PROBE_INTERVAL_SECONDS)
-                    row["probe"] = {
-                        "kind": str(result.get("kind") or ""),
-                        "error": str(result.get("error") or "")[:160],
-                    }
-                    if result["ok"]:
-                        # 刷新会轮换 refresh_token，必须立刻回写本地，否则下次刷新必失败。
-                        try:
-                            _merge_credentials_file(local["path"], result["payload"])
-                            write_note = "已回写本地凭据"
-                        except Exception as exc:
-                            write_note = f"本地回写失败: {str(exc)[:60]}"
-                        if suspect:
-                            row["category"] = "fixable"
-                            row["detail"] = f"refresh_token 仍可用，可直接修复（{write_note}）"
-                        else:
-                            row["detail"] = f"刷新验证通过（{write_note}）"
-                    elif result.get("kind") == "rejected":
-                        # 本地凭据被拒 ≠ 封禁：OpenAI 的 refresh_token 一次轮换，若账号曾在
-                        # SUB2API 侧刷新过令牌，新凭据只在 SUB2API 手里（SUB2API 管理 API 对
-                        # credentials 脱敏，本地拿不回来）。以 SUB2API 侧状态为准分流判定。
-                        sub_status = str(item.get("status") or "").strip().lower()
-                        sub_err = str(item.get("error_message") or "")
-                        sub_broken = "401" in sub_err or "authentication" in sub_err.lower()
-                        if sub_status == ACTIVE_STATUS and not sub_broken:
-                            row["category"] = "sub2api_active"
-                            row["detail"] = ("本地凭据已过期（曾在 SUB2API 侧刷新过令牌导致不同步），"
-                                             "SUB2API 上账号正常可用；如需本地直连/上传请重新授权")
-                        elif sub_status in DISABLE_STATUS_CANDIDATES:
-                            row["category"] = "suspicious_banned"
-                            row["detail"] = (f"OpenAI 拒绝刷新（{str(result.get('error'))[:60]}），"
-                                             f"且 SUB2API 上该账号已被禁用（status={sub_status}），疑似封禁")
-                        else:
-                            ok2, note = _sub2api_refresh_account(origin, token, item)
-                            if ok2:
-                                row["category"] = "sub2api_active"
-                                row["detail"] = ("本地凭据已过期，已触发 SUB2API 刷新成功，"
-                                                 "账号在 SUB2API 上正常可用")
-                            else:
-                                row["category"] = "suspicious_banned"
-                                row["detail"] = (f"OpenAI 拒绝刷新（{str(result.get('error'))[:60]}），"
-                                                 f"疑似封禁；{note}")
-                    elif result.get("kind") == "network":
-                        if suspect:
-                            row["category"] = "network_error"
-                            row["detail"] = "刷新请求网络异常，无法判定（请稍后重扫）"
-                        else:
-                            row["detail"] = "刷新验证时网络异常（账号仍为 active）"
+                # 真实校验：SUB2API 服务端刷新，与实际使用完全同路径。
+                # 严禁本地刷新探测（token 轮换只落本地，SUB2API 旧 token 立即作废）。
+                ok2, note, kind2 = _sub2api_refresh_account(origin, token, item)
+                time.sleep(PROBE_INTERVAL_SECONDS)
+                row["probe"] = {"kind": kind2, "error": note[:160]}
+                if ok2:
+                    if suspect:
+                        row["category"] = "sub2api_active"
+                        row["detail"] = "服务端刷新成功，账号在 SUB2API 已恢复可用"
                     else:
-                        # 其他 HTTP 错误（如 403 地区风控）本地凭据状态未知，不定罪；
-                        # SUB2API 侧 active 则直接按正常处理。
-                        sub_status2 = str(item.get("status") or "").strip().lower()
-                        sub_err2 = str(item.get("error_message") or "")
-                        sub_broken2 = "401" in sub_err2 or "authentication" in sub_err2.lower()
-                        if sub_status2 == ACTIVE_STATUS and not sub_broken2:
-                            row["category"] = "sub2api_active"
-                            row["detail"] = (f"本地直连验证被 OpenAI 拦截（HTTP {result.get('status')}），"
-                                             "本地凭据状态未知；SUB2API 上账号正常可用")
-                        elif suspect:
-                            row["category"] = "refresh_error"
-                            row["detail"] = (
-                                f"刷新返回异常 HTTP {result.get('status')}：{str(result.get('error'))[:80]}"
-                            )
-                        else:
-                            row["detail"] = (
-                                f"刷新验证 HTTP {result.get('status')}（账号仍为 active）"
-                            )
+                        row["detail"] = "服务端刷新验证通过，账号真实可用"
+                elif kind2 == "rejected":
+                    local = locals_index.get(email)
+                    if local is not None and str((local["data"] or {}).get("refresh_token") or "").strip():
+                        row["category"] = "fixable"
+                        row["detail"] = ("SUB2API 持有的凭据已被 OpenAI 拒绝（session ended）；"
+                                         "本地另有凭据副本，可尝试「修复」同步回 SUB2API")
+                    else:
+                        row["category"] = "suspicious_banned"
+                        row["detail"] = f"服务端刷新被拒（session ended），疑似封禁；{note[:80]}"
+                else:
+                    row["category"] = "probe_error"
+                    row["detail"] = f"服务端刷新网络异常，无法判定（请重扫）：{note[:80]}"
             add(row)
     result = {
         "ok": True,
@@ -773,7 +770,10 @@ def fix_accounts(cfg, emails):
             results.append({"email": email, "state": "skipped",
                             "detail": "本地凭据无 refresh_token，请走「重新授权」"})
             continue
-        refreshed = _refresh_oauth(refresh_token, (local["data"] or {}).get("client_id"))
+        # fix 闭环本地刷新必须挂全局代理：本机直连 auth.openai.com 会被地区风控
+        # 拦截（HTTP 403），导致修复全部失败（2026-09-08 实测）。
+        refreshed = _refresh_oauth(refresh_token, (local["data"] or {}).get("client_id"),
+                                   proxy=_effective_proxy())
         time.sleep(PROBE_INTERVAL_SECONDS)
         kind = str(refreshed.get("kind") or "")
         if kind == "network":
@@ -784,7 +784,7 @@ def fix_accounts(cfg, emails):
             if kind == "rejected":
                 # 本地 RT 已死多半是 SUB2API 侧刷新过令牌：触发 SUB2API 刷新，
                 # 成功则账号在 SUB2API 恢复可用（本地凭据需重新授权才能恢复）。
-                ok2, note = _sub2api_refresh_account(origin, token, item)
+                ok2, note, _kind2 = _sub2api_refresh_account(origin, token, item)
                 if ok2:
                     results.append({"email": email, "state": "fixed",
                                     "detail": "本地凭据已过期（SUB2API 侧刷新过令牌），已触发 SUB2API "
@@ -793,10 +793,25 @@ def fix_accounts(cfg, emails):
                 results.append({"email": email, "state": "failed",
                                 "detail": "OpenAI 拒绝刷新，SUB2API 侧刷新也失败，疑似封禁（请走「封禁确认」）"})
                 continue
-            else:
+            if sub2api_401_evidence(item):
+                # 本地刷新被地区风控拦截但 SUB2API 已实录 401：改走服务端刷新终判。
+                ok2, note, kind2 = _sub2api_refresh_account(origin, token, item)
+                if ok2:
+                    results.append({"email": email, "state": "fixed",
+                                    "detail": "本地刷新被拦截，但 SUB2API 服务端刷新成功，账号已恢复可用"})
+                    continue
+                if kind2 == "rejected":
+                    results.append({"email": email, "state": "failed",
+                                    "detail": "SUB2API 已记录 401 且服务端刷新被拒（session ended），"
+                                              "疑似封禁（请走「封禁确认」）"})
+                    continue
                 results.append({"email": email, "state": "failed",
-                                "detail": f"刷新失败 HTTP {refreshed.get('status')}"})
+                                "detail": "SUB2API 已记录 401，账号当前不可用；本地刷新被拦截"
+                                          f"（HTTP {refreshed.get('status')}），服务端刷新网络异常无法定根因，请稍后重试"})
                 continue
+            results.append({"email": email, "state": "failed",
+                            "detail": f"刷新失败 HTTP {refreshed.get('status')}"})
+            continue
         # 先回写本地（防轮换），再更新 SUB2API。
         try:
             _merge_credentials_file(local["path"], refreshed["payload"])

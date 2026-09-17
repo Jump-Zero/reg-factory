@@ -405,10 +405,11 @@ def _phone_error_text_variants(text):
 
 
 async def _has_phone_error(page):
-    """判断 add-phone 是否进入需要释放号码并换号的两类失败状态。
+    """判断 add-phone 是否进入需要释放号码并换号的三类失败状态。
 
     第一类：短信不可投递，页面回退到 WhatsApp；
-    第二类：号码已使用/不支持/无效/触发频率限制。
+    第二类：号码已使用/不支持/无效/触发频率限制；
+    第三类：号码被判定为虚拟号(VoIP)拒收。
     文案按英文、简体/繁体中文、日文、韩文和西文常见翻译覆盖，
     同时用紧凑文本处理翻译中的空格和标点变化。
     """
@@ -438,6 +439,13 @@ async def _has_phone_error(page):
         "请使用其他电话号码", "该号码已被使用", "此電話號碼無法使用",
         "電話番号はすでに使用されています", "別の電話番号をお試しください",
         "전화번호가 이미 사용되었습니다", "다른 전화번호를 사용해 주세요",
+        # 虚拟号(VoIP)拒收 → 换真实号重试
+        "appears to be a virtual", "appears to be a voip", "looks like a virtual",
+        "virtual phone number", "virtual number", "non-virtual", "non-voip",
+        "voip number", "known as voip",
+        "虚拟号码", "虚拟电话号码", "非虚拟", "虛擬號碼", "虛擬電話號碼", "非虛擬",
+        "仮想番号", "バーチャル番号", "非仮想",
+        "가상 번호", "가상번호",
     )
     compact_markers = (
         "couldntsendatextmessage", "couldnotsendatextmessage",
@@ -451,6 +459,11 @@ async def _has_phone_error(page):
         "tryanotherphonenumber", "usedifferentphonenumber",
         "电话号码已被使用", "電話號碼已被使用", "请使用其他电话号码",
         "請使用其他電話號碼", "该号码已被使用", "此電話號碼無法使用",
+        "appearstobeavirtual", "appearstobeavoip", "lookslikeavirtual",
+        "virtualphonenumber", "virtualnumber", "nonvirtual", "nonvoip",
+        "voipnumber", "knownasvoip", "voip",
+        "虚拟号码", "虚拟电话号码", "非虚拟", "虛擬號碼", "非虛擬",
+        "仮想番号", "非仮想", "가상번호",
     )
     return any(marker in raw for marker in exact_markers) or any(
         marker in compact for marker in compact_markers
@@ -743,6 +756,44 @@ async def _goto_add_phone(
     return False
 
 
+def _abandon_phone(pkey, acquired_at, country_blacklist=()):
+    """放弃当前号码（被拒/收不到码/回退 WhatsApp）。
+    liye 卡密式：已收过码的卡已消耗直接结束；否则优先同卡 replace 换号
+    （不耗卡密次数，换出的号命中黑名单就继续换，最多 3 次），新号返回给
+    调用方下一轮直接填号，无需重新取号；replace 不可用再立即同步取消
+    （次数退回、卡回 available，严格模式下一轮可立即复用同一张卡）。
+    liye 不能用 defer_release 延迟取消——延迟期内卡一直 in_use，严格模式下
+    后续取号会全部报「勾选的卡密均不可用」把剩余尝试烧光。
+    其余平台（hero/sms-man 有最小持有期规则）：维持 defer_release 延迟取消。
+    返回 liye 同卡换号结果 (phone, dial, pkey) 或 None。"""
+    from common import sms as _sms
+    if not str(pkey or "").startswith("liye_"):
+        _sms.defer_release(pkey, acquired_at)
+        return None
+    from common import liye_sms
+    if liye_sms.order_consumed(pkey):
+        return None
+    blacklist = [str(b) for b in (country_blacklist or ()) if str(b).strip()]
+    cur = pkey
+    for _ in range(3):
+        try:
+            res = liye_sms.replace(cur)
+        except Exception:
+            res = None
+        if not res:
+            break
+        new_phone, _dial, new_pkey = res
+        if not any(new_phone.startswith(b) for b in blacklist):
+            return new_phone, "", new_pkey
+        print(f"  [liye] 换出的号 +{new_phone} 命中黑名单，继续换号")
+        cur = new_pkey
+    try:
+        _sms.release(cur)
+    except Exception as e:
+        print(f"  [liye] 取消退回失败: {str(e)[:80]}")
+    return None
+
+
 async def handle_add_phone(
     page, auth_url="", account_email="", attempts=None, sms_timeout=None,
     sms_provider="auto", email_code_provider=None, totp_secret="",
@@ -755,6 +806,8 @@ async def handle_add_phone(
     自动填号→输码路径) → firefox.fun → hero-sms → liye(卡密式，配 LIYE_CARDS 或
     runtime/state/liye_cards.txt 即启用)。未配 sms-man 时仅走后几者，OpenAI 对普通
     虚拟号风控严，命中率低，可改用 --codex-manual-phone 手动填号收码。
+    liye 换号：被拒/收不到码优先同卡 replace 换号(不耗卡密次数)直接填新号；
+    replace 不可用立即取消退回(见 _abandon_phone)。
     换号次数/单号等码超时可经环境变量调：CODEX_ADDPHONE_ATTEMPTS(默认2)、CODEX_SMS_TIMEOUT(默认150)。
     OpenAI 对虚拟号拒收率高，但接码花钱，默认只换 2 次(够碰运气、不烧号)。
     """
@@ -768,6 +821,7 @@ async def handle_add_phone(
                         SMS_MAXPRICE_OPENAI, SMS_COUNTRY_BLACKLIST_OPENAI,
                         SMSMAN_APP_ID_OPENAI, SMSMAN_COUNTRY_ID_OPENAI, SMSMAN_MAXPRICE_OPENAI)
     print(f"  [add-phone] 接码模式：最多换号 {attempts} 次，单号等码 {sms_timeout}s")
+    pending = None  # liye 同卡换号(replace)结果 (phone, cc, pkey)：下一轮直接填号，不重新取号
     for i in range(attempts):
         pkey = None
         try:
@@ -798,27 +852,42 @@ async def handle_add_phone(
                     print("  [add-phone] 回退后仍找不到 #tel，跳过本次")
                     continue
 
-            # 任意国家(库存动态，指定具体国家常无货) + 拉黑垃圾号段 + 给够价格上限。
-            # max_retries 经 SMS_GETPHONE_RETRIES 可调：OpenAI WhatsApp 项目(1096/1008)库存
-            # 常成分钟级干涸，默认 4 次(~32s)轮询太短，调大让本步骤耐心等补货。
-            import os as _os
-            _retries = int(_os.environ.get("SMS_GETPHONE_RETRIES", "4") or "4")
-            # provider=auto rotates configured SMS vendors between phone attempts;
-            # it does not spend every attempt on SMS-Man.
-            phone, cc, pkey = sms.get_phone(SMS_PROJECT_ID_OPENAI, HERO_SMS_SERVICE_OPENAI,
-                                            country_prefer=[""], country_blacklist=SMS_COUNTRY_BLACKLIST_OPENAI,
-                                            max_retries=_retries, max_price=SMS_MAXPRICE_OPENAI,
-                                            smsman_app=SMSMAN_APP_ID_OPENAI,
-                                            smsman_country=SMSMAN_COUNTRY_ID_OPENAI,
-                                            smsman_maxprice=SMSMAN_MAXPRICE_OPENAI,
-                                            provider=sms_provider)
-            print(f"  [add-phone] 尝试 {i+1}/{attempts}: +{cc}{phone}")
-            _acquired_at = time.monotonic()  # 取号时刻：延迟取消按「取号+最小持有期」计时
+            if pending is not None:
+                # liye 同卡换号：replace 已拿到新号，直接进入填号
+                phone, cc, pkey = pending
+                pending = None
+                _acquired_at = time.monotonic()
+                print(f"  [add-phone] 尝试 {i+1}/{attempts}: +{cc}{phone}（同卡换号）")
+            else:
+                # 任意国家(库存动态，指定具体国家常无货) + 拉黑垃圾号段 + 给够价格上限。
+                # max_retries 经 SMS_GETPHONE_RETRIES 可调：OpenAI WhatsApp 项目(1096/1008)库存
+                # 常成分钟级干涸，默认 4 次(~32s)轮询太短，调大让本步骤耐心等补货。
+                import os as _os
+                _retries = int(_os.environ.get("SMS_GETPHONE_RETRIES", "4") or "4")
+                # provider=auto rotates configured SMS vendors between phone attempts;
+                # it does not spend every attempt on SMS-Man.
+                try:
+                    phone, cc, pkey = sms.get_phone(SMS_PROJECT_ID_OPENAI, HERO_SMS_SERVICE_OPENAI,
+                                                    country_prefer=[""], country_blacklist=SMS_COUNTRY_BLACKLIST_OPENAI,
+                                                    max_retries=_retries, max_price=SMS_MAXPRICE_OPENAI,
+                                                    smsman_app=SMSMAN_APP_ID_OPENAI,
+                                                    smsman_country=SMSMAN_COUNTRY_ID_OPENAI,
+                                                    smsman_maxprice=SMSMAN_MAXPRICE_OPENAI,
+                                                    provider=sms_provider)
+                except RuntimeError as e:
+                    if "仅用勾选卡密" in str(e):
+                        # 严格模式卡池整体不可用：继续循环只会逐条重复同一错误烧掉剩余尝试
+                        print(f"  [add-phone] {str(e)[:120]}")
+                        print("  [add-phone] 勾选卡密均不可用且不回落，停止换号重试")
+                        return False
+                    raise
+                print(f"  [add-phone] 尝试 {i+1}/{attempts}: +{cc}{phone}")
+                _acquired_at = time.monotonic()  # 取号时刻：延迟取消按「取号+最小持有期」计时
             await _fill_phone_continue(page, cc, phone)
             await asyncio.sleep(4)
             if _is_phone_flow_url(page.url) and await _has_phone_error(page):
                 print("  [add-phone] 号码被拒，换号重试")
-                sms.defer_release(pkey, _acquired_at)
+                pending = _abandon_phone(pkey, _acquired_at, SMS_COUNTRY_BLACKLIST_OPENAI)
                 continue
             code_task = asyncio.create_task(
                 asyncio.to_thread(sms.get_code, pkey, max_wait=sms_timeout)
@@ -831,7 +900,7 @@ async def handle_add_phone(
                 if _is_phone_flow_url(page.url) and await _has_phone_error(page):
                     print("  [add-phone] SMS 发送失败或已切换 WhatsApp，立即换号")
                     delivery_failed = True
-                    sms.defer_release(pkey, _acquired_at)
+                    pending = _abandon_phone(pkey, _acquired_at, SMS_COUNTRY_BLACKLIST_OPENAI)
                     break
             # 旧号等码任务不再 await：to_thread 线程 cancel 不掉，await 反而白等到超时；
             # 直接跳过——孤儿线程无害(号码已进延迟取消队列，get-sms 对其报错提前结束)。
@@ -842,22 +911,29 @@ async def handle_add_phone(
                 continue
             if not code:
                 print("  [add-phone] 未收到验证码，换号重试")
-                sms.defer_release(pkey, _acquired_at)
+                pending = _abandon_phone(pkey, _acquired_at, SMS_COUNTRY_BLACKLIST_OPENAI)
                 continue
             if not await _enter_otp(page, code):
                 print("  [add-phone] 验证码未写入输入框，换号重试")
-                sms.defer_release(pkey, _acquired_at)
+                pending = _abandon_phone(pkey, _acquired_at, SMS_COUNTRY_BLACKLIST_OPENAI)
                 continue
             if await _wait_for_phone_flow_exit(page):
                 print("  [add-phone] 手机验证通过")
                 return True
             print(f"  [add-phone] 验证码提交后仍在手机验证页: {page.url[:80]}")
-            sms.defer_release(pkey, _acquired_at)
+            pending = _abandon_phone(pkey, _acquired_at, SMS_COUNTRY_BLACKLIST_OPENAI)
         except Exception as e:
             print(f"  [add-phone] err: {str(e)[:80]}")
             if pkey:
                 try:
-                    sms.defer_release(pkey, _acquired_at)
+                    # liye：立即同步取消退回（严格模式下延迟取消会让卡一直占用）；
+                    # 已收码的卡已消耗，跳过无意义的取消等待。
+                    if str(pkey).startswith("liye_"):
+                        from common import liye_sms
+                        if not liye_sms.order_consumed(pkey):
+                            sms.release(pkey)
+                    else:
+                        sms.defer_release(pkey, _acquired_at)
                 except Exception:
                     pass
     return False

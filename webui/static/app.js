@@ -2506,13 +2506,13 @@ function renderLiyeCardList(pool){
   const selectedCount = cards.filter(c=>c.selected).length;
   const allChecked = selectedCount > 0 && selectedCount === cards.length;
   box.innerHTML = `<table class="gopay-table liye-card-table"><thead>
-      <tr><th class="liye-sel-col"><input type="checkbox" data-liye-check-all title="全选/取消全选（勾选的卡优先接码）" ${allChecked ? 'checked' : ''}></th>
+      <tr><th class="liye-sel-col"><input type="checkbox" data-liye-check-all title="全选/取消全选（勾选的卡优先接码；「仅使用勾选的卡密」开启后只用这些卡）" ${allChecked ? 'checked' : ''}></th>
           <th>卡密</th><th>状态</th><th>号码</th><th></th></tr>
     </thead><tbody>${cards.map(card=>{
       const full = String(card.full_code || '');
       const encoded = encodeURIComponent(full);
       return `<tr>
-        <td class="liye-sel-col"><input type="checkbox" data-liye-check="${encoded}" title="勾选后该卡优先用于接码" ${card.selected ? 'checked' : ''}></td>
+        <td class="liye-sel-col"><input type="checkbox" data-liye-check="${encoded}" title="勾选后该卡优先用于接码；「仅使用勾选的卡密」开启时只用勾选卡" ${card.selected ? 'checked' : ''}></td>
         <td><code class="liye-code" title="点击复制卡密" data-liye-copy="${encoded}">${escapeHtml(full || card.code || '-')}</code></td>
         <td>${escapeHtml(liyeStatusLabel(card))}</td>
         <td>${escapeHtml(card.phone || '-')}</td>
@@ -2527,6 +2527,10 @@ function renderLiyeCardList(pool){
 
 function renderLiyeCardsSummary(pool, summaryId='oauth-liye-summary'){
   const summary = $(`#${summaryId}`);
+  const strictBox = $('#oauth-liye-strict');
+  if(strictBox && typeof pool.strict_selected === 'boolean'){
+    strictBox.checked = pool.strict_selected;   // 以服务端状态为准
+  }
   if(!summary) return;
   const total = pool.total || 0;
   if(!total){
@@ -2593,9 +2597,11 @@ async function saveLiyeSelection(summaryId='oauth-liye-summary', messageId='oaut
     renderLiyeCardsSummary(result.summary || {}, summaryId);
     renderLiyeCardList(result.summary || {});   // 以服务端状态为准，刷新表头全选框
     if(message){
+      const strictOn = !!($('#oauth-liye-strict') && $('#oauth-liye-strict').checked);
       message.textContent = codes.length
-        ? `已勾选 ${codes.length} 张优先接码；未勾选时按列表顺序取用`
-        : '已取消全部勾选，按列表顺序取用';
+        ? `已勾选 ${codes.length} 张${strictOn ? '；「仅使用勾选的卡密」开启中，只用这些卡接码' : '优先接码；未勾选时按列表顺序取用'}`
+        : (strictOn ? '已取消全部勾选；「仅使用勾选的卡密」开启中将无法取号，请关闭开关或勾选卡密'
+                    : '已取消全部勾选，按列表顺序取用');
       message.className = '';
     }
   }catch(error){
@@ -2604,6 +2610,35 @@ async function saveLiyeSelection(summaryId='oauth-liye-summary', messageId='oaut
       message.className = 'bad';
     }
     await loadLiyeCardsPool(summaryId);   // 失败时按服务端状态回滚显示
+  }
+}
+
+async function toggleLiyeStrict(summaryId='oauth-liye-summary', messageId='oauth-liye-message'){
+  const box = $('#oauth-liye-strict');
+  const message = $(`#${messageId}`);
+  const enabled = !!(box && box.checked);
+  try{
+    const response = await fetch('/api/sms/liye/strict', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled}),
+    });
+    const result = await readJsonResponse(response);
+    if(!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    renderLiyeCardsSummary(result.summary || {}, summaryId);
+    renderLiyeCardList(result.summary || {});
+    if(message){
+      message.textContent = enabled
+        ? '已开启：只用勾选的卡密接码（勾选卡全部不可用时取号失败，不回落未勾选卡）'
+        : '已关闭：按默认规则接码（勾选卡优先，不足回落全池）';
+      message.className = '';
+    }
+  }catch(error){
+    if(box) box.checked = !enabled;   // 失败回滚到原状态
+    if(message){
+      message.textContent = `切换失败：${error.message || error}`;
+      message.className = 'bad';
+    }
   }
 }
 
@@ -2881,6 +2916,9 @@ function renderForm(s){
     liye.id = 'oauth-liye-import';
     liye.hidden = true;
     liye.innerHTML = `<summary>LIYE 卡密池 <span id="oauth-liye-summary">尚未读取</span></summary>
+      <label class="liye-strict-toggle" title="开启后接码只从勾选的卡密取号，勾选卡全部不可用时直接失败，不回落未勾选卡；关闭时勾选卡仅优先，不足回落全池。">
+        <input type="checkbox" id="oauth-liye-strict"> 仅使用勾选的卡密
+      </label>
       <label class="plus-field plus-field-wide">
         <span>卡密（每行一张，支持多张，自动去重；GPT-/CZ-=ChatGPT，GOO-=Gmail）</span>
         <textarea id="oauth-liye-input" spellcheck="false" autocomplete="off" placeholder="GPT-JSE5-D62M-3Q7D-CVQ2&#10;CZ-XXXX-XXXX-XXXX-XXXX"></textarea>
@@ -2909,6 +2947,9 @@ function renderForm(s){
     );
     liye.querySelector('#btn-oauth-liye-recover').onclick = ()=>recoverLiyeCards(
       'oauth-liye-summary', 'oauth-liye-message', 'btn-oauth-liye-recover'
+    );
+    liye.querySelector('#oauth-liye-strict').onchange = ()=>toggleLiyeStrict(
+      'oauth-liye-summary', 'oauth-liye-message'
     );
     liye.querySelector('#btn-oauth-liye-list').onclick = async ()=>{
       const box = liye.querySelector('#oauth-liye-list');
@@ -3864,6 +3905,7 @@ function renderMailpoolStats(d){
 // ---------------------------------------------------------------- 账号健康（401 处置）
 const HEALTH_LABELS = {
   ok:'正常', suspect:'待探测', fixable:'可修复', suspicious_banned:'封禁嫌疑',
+  auth401:'已 401',
   sub2api_active:'SUB2API 正常',
   no_refresh:'无 refresh_token', no_local:'本地无凭据', network_error:'网络异常', refresh_error:'刷新异常',
   reauth:'可重新授权', probe_error:'探测异常',
@@ -3885,21 +3927,23 @@ function healthSub2apiAction(){
 // 行内操作按钮按「平台 + 分类」决定：openai 走修复/浏览器确认隔离，grok 走 sso 探测/直接隔离/重导入。
 function healthRowActions(row){
   if(row.platform === 'grok'){
-    if(row.category === 'suspect') return [{label:'探测', kind:'scan-one'}];
+    if(row.category === 'suspect') return [{label:'校验', kind:'scan-one'}];
     if(row.category === 'suspicious_banned') return [{label:'直接隔离', kind:'grok-quarantine'}];
     if(row.category === 'reauth' || row.category === 'no_local') return [{label:'重新授权导入', kind:'grok-reimport'}];
-    if(row.category === 'probe_error' || row.category === 'network_error') return [{label:'重扫', kind:'scan-one'}];
+    if(row.category === 'probe_error' || row.category === 'network_error' || row.category === 'refresh_error') return [{label:'重扫', kind:'scan-one'}];
     return [];
   }
   const openaiActions = {
-    suspect:[{label:'探测', kind:'scan-one'}],
+    suspect:[{label:'校验', kind:'scan-one'}],
     fixable:[{label:'修复', kind:'fix'}],
     suspicious_banned:[{label:'封禁确认', kind:'quarantine'}],
-    sub2api_active:[{label:'重新授权', kind:'reauth'}],
+    auth401:[{label:'修复', kind:'fix'},{label:'重扫', kind:'scan-one'}],
+    sub2api_active:[],
     no_refresh:[{label:'重新授权', kind:'reauth'}],
     no_local:[{label:'重新授权', kind:'reauth'}],
     refresh_error:[{label:'重扫', kind:'scan-one'}],
     network_error:[{label:'重扫', kind:'scan-one'}],
+    probe_error:[{label:'重扫', kind:'scan-one'}],
   };
   return openaiActions[row.category] || [];
 }
@@ -4212,7 +4256,9 @@ async function healthFix(emails){
   const counts = data.summary || {};
   const failed = (counts.failed || 0) + (counts.skipped || 0);
   setHealthMessage(`修复完成：成功 ${counts.fixed || 0}，未修复 ${failed}（详情见日志）`, counts.fixed ? 'ok' : 'bad');
-  healthScan($('#health-probe').value, {silent:true});
+  // 修复后只定向重扫这批账号并合并回列表：秒级完成、状态立即刷新；
+  // 严禁全量扫描（255 账号真实校验约 17 分钟，界面长时间无变化）。
+  healthScan('suspects', {emails, merge:true, silent:true});
 }
 
 async function healthQuarantine(emails, platform='openai', {rescan=true}={}){
@@ -4242,7 +4288,7 @@ async function healthQuarantine(emails, platform='openai', {rescan=true}={}){
       quarantined ? '' : 'ok',
     );
   }
-  if(rescan) healthScan($('#health-probe').value, {silent:true});
+  if(rescan) healthScan('suspects', {emails, merge:true, silent:true});
 }
 
 async function healthReauth(emails){

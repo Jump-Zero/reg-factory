@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <title>reg-factory 控制面板</title>
-<link rel="stylesheet" href="/static/style.css?v=20260901-merged-1">
+<link rel="stylesheet" href="/static/style.css?v=20260908-fix-refresh-1">
 </head>
 <body>
 <header class="topbar">
@@ -687,13 +687,13 @@
           <h2>账号健康（多平台 401 处置）</h2>
           <span id="health-msg" class="env-msg"></span>
         </div>
-        <p class="hint">按平台扫描 SUB2API 账号：GPT 掉授权可免浏览器一键修复，封禁嫌疑需浏览器确认后隔离（新 token 自动回写本地）；Grok 支持本地 sso 探测、重新授权导入与直接隔离（xAI 已判定风控，无需浏览器确认）；Claude 未接入 SUB2API，仅做本地凭据清点，不发起任何网络请求。</p>
+        <p class="hint">按平台扫描 SUB2API 账号，校验走 SUB2API 服务端刷新（与实际使用同路径，结果即真实可用性，不会造成本地/服务端凭据不同步）：GPT 凭据被拒但本地有副本时可免浏览器一键修复（刷新后回写本地并同步回 SUB2API）；封禁嫌疑需浏览器确认后隔离；Grok oauth 被拒时回退本地 sso 判定，sso 仍活可重新授权导入；Claude 未接入 SUB2API，仅做本地凭据清点。</p>
         <div class="health-toolbar">
-          <label class="health-field"><span>探测模式</span>
+          <label class="health-field"><span>校验模式</span>
             <select id="health-probe">
-              <option value="suspects">只探测嫌疑账号（推荐）</option>
-              <option value="all">探测全部账号</option>
-              <option value="none">不探测（仅列出）</option>
+              <option value="all">真实校验全部账号（推荐）</option>
+              <option value="suspects">只校验嫌疑账号（较快）</option>
+              <option value="none">不校验（仅列出状态）</option>
             </select>
           </label>
           <button id="btn-health-scan" class="btn-run" type="button">扫描账号状态</button>
@@ -815,6 +815,6 @@
 
 <div id="rf-toast-stack" class="rf-toast-stack" aria-live="polite"></div>
 
-<script src="/static/app.js?v=20260901-merged-1"></script>
+<script src="/static/app.js?v=20260908-fix-refresh-1"></script>
 </body>
 </html>

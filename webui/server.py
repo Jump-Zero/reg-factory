@@ -3707,6 +3707,21 @@ async def api_liye_cards_select(request: Request):
             "summary": await asyncio.to_thread(liye_sms.summary)}
 
 
+@app.post("/api/sms/liye/strict")
+async def api_liye_cards_strict(request: Request):
+    data = await request.json()
+    enabled = (data or {}).get("enabled")
+    if not isinstance(enabled, bool):
+        return JSONResponse({"error": "enabled 必须是布尔值"}, status_code=400)
+    from common import liye_sms
+
+    ok, message = await asyncio.to_thread(liye_sms.set_strict_selected, enabled)
+    if not ok:
+        return JSONResponse({"error": message}, status_code=409)
+    return {"enabled": enabled,
+            "summary": await asyncio.to_thread(liye_sms.summary)}
+
+
 def _gopay_error(exc: Exception):
     from common.gopay_service import GoPayUnavailable
 
