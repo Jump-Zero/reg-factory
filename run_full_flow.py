@@ -112,6 +112,10 @@ try:
 except Exception:
     pass
 
+DEFAULT_CLAUDE_PROTOCOL_VERSION = str(
+    getattr(globals().get("config"), "CLAUDE_PROTOCOL_VERSION", "1.0.0") or "1.0.0"
+).strip() or "1.0.0"
+
 # 默认基建端点（密钥走环境变量，端点可被环境变量覆盖）。
 CLASH_API_DEFAULT = os.environ.get("CLASH_API", "http://127.0.0.1:9097")
 CLASH_SECRET_DEFAULT = os.environ.get("CLASH_SECRET", "")
@@ -295,6 +299,11 @@ def stage_platforms(args, env, email, password, token="", client_id=""):
         "--claude-challenge-node-retries", str(max(0, getattr(args, "claude_challenge_node_retries", 3))),
         "--claude-captcha-manual-timeout", str(max(0, getattr(args, "claude_captcha_manual_timeout", 0))),
         "--claude-auth-mode", getattr(args, "claude_auth_mode", "magic"),
+        "--claude-protocol", getattr(args, "claude_protocol", "browser"),
+        "--claude-protocol-mailbox-wait", str(max(1, getattr(args, "claude_protocol_mailbox_wait", 120))),
+        "--claude-protocol-version", getattr(
+            args, "claude_protocol_version", DEFAULT_CLAUDE_PROTOCOL_VERSION
+        ) or DEFAULT_CLAUDE_PROTOCOL_VERSION,
         "--claude-google-manual-timeout", str(max(0, getattr(args, "claude_google_manual_timeout", 0))),
         "--codex-sms-provider", getattr(args, "codex_sms_provider", "auto"),
         "--codex-timeout", str(max(1, getattr(args, "codex_timeout", 120))),
@@ -533,6 +542,12 @@ def main():
                     help="Claude 提交邮箱前的节点轮换次数")
     ap.add_argument("--claude-captcha-manual-timeout", type=int, default=0,
                     help="Claude 等待人工验证秒数；0 表示关闭")
+    ap.add_argument("--claude-protocol", choices=("browser", "http"), default="browser",
+                    help="Claude registration protocol")
+    ap.add_argument("--claude-protocol-mailbox-wait", type=int, default=120,
+                    help="Claude HTTP protocol magic-link wait timeout")
+    ap.add_argument("--claude-protocol-version", default=DEFAULT_CLAUDE_PROTOCOL_VERSION,
+                    help="Claude HTTP protocol anthropic-client-version")
     ap.add_argument("--claude-auth-mode", choices=("magic", "google"), default="magic",
                     help="Claude 登录方式：magic 邮箱链接或 Google OAuth")
     ap.add_argument("--claude-google-manual-timeout", type=int, default=0,

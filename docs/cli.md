@@ -60,6 +60,9 @@ python register_grok.py --count 1
 # Claude 使用最新 Outlook refresh token
 python register.py --count 1 --node auto --latest-rt
 
+# ClaudeX HTTP protocol（无需创建 Chromium/CDP Profile）
+python register.py --count 1 --protocol http --provider yyds
+
 # Claude 使用 YYDS 临时邮箱
 python register.py --count 1 --node auto --provider yyds
 
@@ -116,6 +119,11 @@ python unlock_outlook.py --input accounts.txt --concurrency 2
 # 解锁 Outlook 并提取 Graph refresh token
 python unlock_outlook.py --input outlook_accounts/accounts.txt
 python unlock_outlook.py
+
+# Graph 授权方式分开执行：HTTP 失败账号写入 outlook_no_graph.txt
+python tools/authorize_outlook.py --input accounts.txt --method http --concurrency 3
+# 后续显式使用 Cloak 浏览器授权
+python tools/authorize_outlook.py --input outlook_no_graph.txt --method browser --concurrency 2
 ```
 
 邮箱池格式为：

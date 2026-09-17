@@ -1,5 +1,16 @@
 ﻿# 更新日志
 
+## 2026-09-15 - 2.1.1（Claude 协议注册优化）
+
+**Claude 注册协议**
+- 新增 ClaudeX 风格 HTTP 注册协议，可通过 `CLAUDE_REGISTRATION_PROTOCOL=http` 或 `--protocol http` 使用。
+- Claude 协议头默认保持 ClaudeX 当前实现的 `anthropic-client-version=1.0.0`，并支持 `.env`、CLI、全流程和 WebUI 统一覆盖。
+- 按账号稳定生成协议身份标识和浏览器资料，减少同一账号跨请求身份漂移。
+- Magic link 提取兼容 HTML 转义和 URL 编码邮件内容。
+
+**验证与打包**
+- 新增 Claude HTTP 协议回归测试及打包入口依赖。
+- 完善 Outlook Graph 授权专用 HTTP/浏览器切换流程。
 ## 2026-08-31 - 2.1.0（K12 独立服务完善）
 
 **Codex K12 新实现**
@@ -10,6 +21,8 @@
 - 修复主面板 K12 状态长期显示"检测中"：K12 状态与主服务状态独立轮询，并刷新静态资源版本，避免旧缓存阻塞状态更新。
 - 补齐运行摘要、主邮箱池同步、邮箱删除/拆分、数据导入导出、AT 测活、任务重试、取消、删除和失败清理。
 - 完善配置持久化、Sub2API 凭据透传、任务结果回填、并发控制和便携包独立启动入口。
+- Outlook 入口改为仅执行 Microsoft Graph OAuth 授权：支持批量 `email----password`（兼容连续短横线），不再调用账号解锁/按住验证流程。
+- WebUI 支持直接粘贴批量账号，密码只写入受保护的临时文件，任务结束后自动删除。
 
 **验证**
 - Python 全量测试：641 passed。

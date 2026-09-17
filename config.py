@@ -136,6 +136,10 @@ CUSTOM_BROWSER_API_FORWARD_FIELDS = _env("CUSTOM_BROWSER_API_FORWARD_FIELDS", "f
 
 # Claude.ai 注册相关 URL
 CLAUDE_LOGIN_URL = "https://claude.ai/login"
+# Registration implementation: browser uses Chromium/CDP (default); http
+# uses the ClaudeX-style first-party HTTP protocol.
+CLAUDE_REGISTRATION_PROTOCOL = _env("CLAUDE_REGISTRATION_PROTOCOL", "browser").strip().lower() or "browser"
+CLAUDE_PROTOCOL_VERSION = _env("CLAUDE_PROTOCOL_VERSION", "1.0.0").strip() or "1.0.0"
 CLAUDE_CHALLENGE_WAIT_SECONDS = _env_int("CLAUDE_CHALLENGE_WAIT_SECONDS", 45)
 CLAUDE_CHALLENGE_NODE_RETRIES = _env_int("CLAUDE_CHALLENGE_NODE_RETRIES", 3)
 CLAUDE_CAPTCHA_MANUAL_TIMEOUT = _env_int("CLAUDE_CAPTCHA_MANUAL_TIMEOUT", 0)

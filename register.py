@@ -55,6 +55,7 @@ from config import (
     CLAUDE_LOGIN_URL,
     CLAUDE_NODE_PROBE_LIMIT,
     CLAUDE_NODE_PROBE_TIMEOUT_SECONDS,
+    CLAUDE_REGISTRATION_PROTOCOL,
     CLAUDE_USE_TEMP_EMAIL,
     COOKIE_OUTPUT_DIR,
     SMS_API_BASE,
@@ -5910,9 +5911,22 @@ async def register(
                 if google_traffic_bypassed:
                     print("  [traffic] bypass enabled for Google OAuth bootstrap")
             try:
-                await context.set_extra_http_headers({
-                    "Accept-Language": "en-US,en;q=0.9"
-                })
+                extra_headers = {"Accept-Language": "en-US,en;q=0.9"}
+                # Keep browser registration requests aligned with ClaudeX's
+                # first-party protocol metadata.  The browser remains the
+                # default implementation; this only adds stable identity
+                # headers and does not alter the CDP flow.
+                try:
+                    from register_claude_http import build_headers as _claude_protocol_headers
+
+                    extra_headers.update({
+                        key: value
+                        for key, value in _claude_protocol_headers(email or None).items()
+                        if key.startswith("anthropic-")
+                    })
+                except Exception:
+                    pass
+                await context.set_extra_http_headers(extra_headers)
             except Exception as error:
                 print(f"  set Accept-Language failed: {str(error)[:100]}")
             startup_pages = list(context.pages)
@@ -6779,6 +6793,20 @@ async def main():
     parser.add_argument("--token", type=str, default="", help="refresh token for --email")
     parser.add_argument("--client-id", type=str, default="", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--protocol",
+        choices=("browser", "http"),
+        default=CLAUDE_REGISTRATION_PROTOCOL if CLAUDE_REGISTRATION_PROTOCOL in {"browser", "http"} else "browser",
+        help="Claude 注册协议：browser 使用 Chromium/CDP；http 使用 ClaudeX 风格 HTTP 协议",
+    )
+    parser.add_argument(
+        "--protocol-mailbox-wait", type=int, default=120,
+        help="HTTP 协议模式等待 magic link 的秒数",
+    )
+    parser.add_argument(
+        "--protocol-version", default=None,
+        help="HTTP 协议 anthropic-client-version；默认读取 CLAUDE_PROTOCOL_VERSION",
+    )
+    parser.add_argument(
         "--auth-mode",
         choices=("magic", "google"),
         default="magic",
@@ -6835,6 +6863,47 @@ async def main():
         help="skip the post-batch validation scan of all saved Claude session keys",
     )
     args = parser.parse_args()
+
+    if args.protocol == "http":
+        if args.google_auth or args.auth_mode == "google" or args.provider == "google":
+            raise SystemExit("HTTP 协议模式仅支持 Claude magic link，不支持 Google OAuth")
+        # Honour the same Clash node selection as the browser protocol before
+        # handing the request session to register_claude_http.
+        CLAUDE_PROXY_PORT = args.proxy_port
+        CLAUDE_PROXY_AUTO = bool(args.node and args.node.lower() == "auto")
+        if args.node and args.node.lower() != "none" and proxy_switch is not None:
+            try:
+                if args.node.lower() == "auto":
+                    node = _pick_claude_node()
+                    if node:
+                        CLAUDE_PROXY_NODE = node
+                        _record_claude_node(node)
+                        print(f"  [proxy] HTTP protocol node: {node}")
+                else:
+                    proxy_switch.pin_fixed_node(args.node, "claude")
+                    CLAUDE_PROXY_NODE = args.node
+                    print(f"  [proxy] HTTP protocol node: {proxy_switch.current_node()}")
+            except Exception as error:
+                print(f"  [proxy] HTTP protocol node selection warning: {str(error)[:120]}")
+        from register_claude_http import run_batch as run_claude_http_batch
+
+        results = await asyncio.to_thread(
+            run_claude_http_batch,
+            count=max(1, args.count),
+            concurrency=max(1, args.concurrency),
+            email=args.email or "",
+            password=args.password or "",
+            token=args.token or "",
+            client_id=args.client_id or "",
+            emails_file=args.emails or None,
+            latest_rt=bool(args.latest_rt),
+            provider=args.provider,
+            domain=args.domain or None,
+            mailbox_wait=max(1, args.protocol_mailbox_wait),
+            protocol_version=args.protocol_version,
+        )
+        print(f"[claude-http] completed: {len(results)}/{max(1, args.count)}")
+        return 0 if results else 1
 
     auth_mode = (
         "google"

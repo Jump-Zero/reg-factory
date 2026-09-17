@@ -23,6 +23,12 @@ if sys.platform == "win32":
 
 from common import emails as email_pool
 
+try:
+    # Apply the same .env-backed default as register.py in this wrapper.
+    from config import CLAUDE_PROTOCOL_VERSION as DEFAULT_CLAUDE_PROTOCOL_VERSION
+except Exception:
+    DEFAULT_CLAUDE_PROTOCOL_VERSION = "1.0.0"
+
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_ROOT = os.environ.get("REG_FACTORY_DATA_DIR", "").strip() or ROOT
@@ -77,6 +83,13 @@ def build_command(platform, args, account):
             cmd += ["--token", token]
         if client_id:
             cmd += ["--client-id", client_id]
+        cmd += ["--protocol", getattr(args, "claude_protocol", "browser")]
+        cmd += ["--protocol-mailbox-wait", str(max(1, getattr(args, "claude_protocol_mailbox_wait", 120)))]
+        protocol_version = str(
+            getattr(args, "claude_protocol_version", DEFAULT_CLAUDE_PROTOCOL_VERSION) or ""
+        ).strip()
+        if protocol_version:
+            cmd += ["--protocol-version", protocol_version]
         auth_mode = getattr(args, "claude_auth_mode", "magic")
         if auth_mode:
             cmd += ["--auth-mode", auth_mode]
@@ -420,6 +433,18 @@ async def main():
     parser.add_argument("--claude-challenge-wait", type=int, default=45)
     parser.add_argument("--claude-challenge-node-retries", type=int, default=3)
     parser.add_argument("--claude-captcha-manual-timeout", type=int, default=0)
+    parser.add_argument(
+        "--claude-protocol", choices=("browser", "http"), default="browser",
+        help="Claude registration protocol",
+    )
+    parser.add_argument(
+        "--claude-protocol-mailbox-wait", type=int, default=120,
+        help="Claude HTTP protocol magic-link wait timeout",
+    )
+    parser.add_argument(
+        "--claude-protocol-version", default=DEFAULT_CLAUDE_PROTOCOL_VERSION,
+        help="Claude HTTP protocol anthropic-client-version",
+    )
     parser.add_argument(
         "--claude-auth-mode", choices=("magic", "google"), default="magic",
         help="Claude 登录方式：magic 邮箱链接或 Google OAuth",

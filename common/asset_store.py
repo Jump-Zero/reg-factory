@@ -1027,14 +1027,29 @@ def _cookie_directories(platform: str) -> list[Path]:
 
 
 def _account_map(directory: Path) -> dict[str, str]:
+    return {
+        cookie: details["email"]
+        for cookie, details in _account_details_map(directory).items()
+    }
+
+
+def _account_details_map(directory: Path) -> dict[str, dict[str, str]]:
+    """Map an exported cookie value to the registration mailbox details."""
     path = directory / "accounts.txt"
     result = {}
     if not path.is_file():
         return result
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        parts = raw.strip().split("|")
+        parts = raw.strip().split("|", 2)
         if len(parts) >= 3 and parts[0] and parts[2]:
-            result[parts[2]] = parts[0]
+            email = parts[0].strip()
+            password = parts[1].strip()
+            cookie = parts[2].strip()
+            result[cookie] = {
+                "email": email,
+                **({"password": password} if password else {}),
+                "email_provider": classify_email_provider(email),
+            }
     return result
 
 
@@ -1081,7 +1096,7 @@ def _cookie_records(platform: str) -> list[dict]:
         records = []
         seen_paths = set()
         for directory in _cookie_directories(platform):
-            accounts = _account_map(directory)
+            accounts = _account_details_map(directory)
             paths = directory.glob("full_*.json") if directory.is_dir() else ()
             for path in paths:
                 resolved = str(path.resolve()).lower()
@@ -1101,11 +1116,14 @@ def _cookie_records(platform: str) -> list[dict]:
                 candidates = _key_cookie_values(cookies, config["key_names"])
                 if not candidates:
                     continue
-                email = next((accounts[value] for value in candidates if value in accounts), "")
+                account = next((accounts[value] for value in candidates if value in accounts), {})
                 records.append({
                     "path": path,
-                    "email": email,
-                    "email_provider": classify_email_provider(email),
+                    "email": account.get("email", ""),
+                    "email_provider": account.get("email_provider") or classify_email_provider(account.get("email", "")),
+                    # Keep the registration password attached to the cookie so
+                    # downstream inventory delivery can include login details.
+                    "mailbox": account,
                     "cookies": cookies,
                 })
         return sorted(records, key=lambda item: (item["path"].stat().st_mtime, str(item["path"]).lower()))
@@ -1330,6 +1348,7 @@ def get_platform_asset(
     should_claim = (verified_only or bool(status_filter) or claim_once) and not _defer_claim
     mailbox_records = {}
     if output_format in {"raw", "cookies", "header"}:
+        mailbox_records = _mailbox_map()
         records = _cookie_records(platform)
         if provider_filter:
             records = [record for record in records if record.get("email_provider") == provider_filter]
@@ -1359,6 +1378,12 @@ def get_platform_asset(
         email = record["email"]
         source = record["path"].name
         extra = {}
+        if email and record.get("mailbox"):
+            normalized_email = email.strip().lower()
+            mailbox_records[normalized_email] = {
+                **mailbox_records.get(normalized_email, {}),
+                **record["mailbox"],
+            }
     elif output_format in token_formats:
         if platform == "claude":
             raise AssetError("Claude 不支持 session、sub2api、cpa 或 chatgpt2api 格式，请使用 cookies/raw/header")

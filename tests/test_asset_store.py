@@ -236,6 +236,11 @@ class AssetStoreTests(unittest.TestCase):
         chatgpt2api = asset_store.get_platform_asset("chatgpt", "chatgpt2api", index=0)
 
         self.assertEqual(raw["email"], "user@example.com")
+        self.assertEqual(raw["mailbox"], {
+            "email": "user@example.com",
+            "password": "password",
+            "email_provider": "other",
+        })
         self.assertEqual(len(raw["data"]), 1)
         self.assertEqual(cookies["format"], "cookies")
         self.assertEqual(cookies["data"][0]["sameSite"], "no_restriction")

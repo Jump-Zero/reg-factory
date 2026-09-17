@@ -11,6 +11,7 @@ TASK_FILES = [
     "oauth_codex.py",
     "register_chatgpt.py",
     "register_grok_http.py",
+    "register_claude_http.py",
     "register_grok.py",
     "register_kiro.py",
     "register.py",
@@ -21,6 +22,7 @@ TASK_FILES = [
     "register_outlook_standalone.py",
     "tools/extract_graph_tokens.py",
     "tools/import_plus_codex.py",
+    "tools/authorize_outlook.py",
     "tools/run_protocol_payment_batch.py",
     "tools/upload_tokens.py",
     "tools/export_chatgpt2api.py",
@@ -53,6 +55,8 @@ tls_datas = [
 ]
 tls_binaries = [item for item in tls_binaries if Path(item[0]).name == tls_runtime_name]
 datas.extend(tls_datas)
+cloak_datas, cloak_binaries, cloak_hidden = collect_all("cloakbrowser")
+datas.extend(cloak_datas)
 
 hiddenimports = playwright_hidden + tls_hidden + [
     "sqlite3",
@@ -62,8 +66,10 @@ hiddenimports = playwright_hidden + tls_hidden + [
     "register_three_platforms",
     "oauth_codex",
     "tools.import_plus_codex",
+    "tools.authorize_outlook",
     "register_chatgpt",
     "register_grok_http",
+    "register_claude_http",
     "register_grok",
     "register_kiro",
     "register",
@@ -72,16 +78,18 @@ hiddenimports = playwright_hidden + tls_hidden + [
     "unlock_outlook",
     "mailbox_broker",
     "register_outlook_standalone",
+    "common.cloak_browser",
     "k12.server",
     "k12.workspace",
 ]
+hiddenimports.extend(cloak_hidden)
 for package in ("common", "vision_solver", "xconsole_client"):
     hiddenimports.extend(collect_submodules(package))
 
 a = Analysis(
     [str(ROOT / "scripts" / "reg-factory-server.py")],
     pathex=[str(ROOT)],
-    binaries=playwright_binaries + tls_binaries,
+    binaries=playwright_binaries + tls_binaries + cloak_binaries,
     datas=datas,
     hiddenimports=sorted(set(hiddenimports)),
     hookspath=[],

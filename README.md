@@ -52,7 +52,7 @@
 
 > **本仓库定制：** 在上游基础上叠加了 LIYE 卡密接码、封禁账号自动检测隔离、资产账号查询导入 SUB2API、邮箱池管理增强等本地功能，详见 [CUSTOMIZATIONS.md](CUSTOMIZATIONS.md)。
 
-当前主版本为 `2.0.0`，重点是低成本并发和极致省流：任务按槽位隔离浏览器与住宅出口，代理池不足时自动降并发；住宅流量模式支持 `extreme`，会抑制后台联网并跳过非关键资源。详见 [2.0.0 更新日志](CHANGELOG.md)。
+当前主版本为 `2.1.1`，重点是低成本并发、极致省流和 Claude 协议注册兼容：任务按槽位隔离浏览器与住宅出口，代理池不足时自动降并发；住宅流量模式支持 `extreme`，并新增 ClaudeX 风格 HTTP 注册协议。详见 [2.1.1 更新日志](CHANGELOG.md)。
 
 > 仅用于学习、开发和经授权的测试。密钥、账号、Cookie、Token 和运行日志均应保留在本机，不要提交到仓库。
 
@@ -165,12 +165,19 @@ python outlook_reg_loop.py
 # [重要] Graph RT 提取必须配置可接收验证码的辅助邮箱，否则 proofs/Add 安全信息页无法完成授权
 # 默认使用 YYDS 辅助邮箱并自动接码
 python tools/extract_graph_tokens.py --email user@outlook.com --password 'password'
+# 仅做 Outlook Graph 授权：批量粘贴/准备 email----password（也兼容五个短横线），不执行账号解锁
+python tools/authorize_outlook.py --input accounts.txt --concurrency 3 --method http
+# HTTP 失败账号会记录到 outlook_no_graph.txt，之后显式改用 Cloak 浏览器授权
+python tools/authorize_outlook.py --input outlook_no_graph.txt --method browser --concurrency 2
 # 自定义临时邮箱：.env 设置 OUTLOOK_GRAPH_RECOVERY_PROVIDER=custom，并填好 CUSTOM_MAIL_*
 # 自有 Outlook 辅助邮箱：设置 provider=outlook，并填
 # OUTLOOK_GRAPH_RECOVERY_OUTLOOK_MAILBOX=email@outlook.com----password----refresh_token----client_id
 
 # Claude 使用最新 Outlook refresh token
 python register.py --count 1 --node auto --latest-rt
+
+# ClaudeX HTTP 协议版（无需创建 Chromium/CDP Profile）
+python register.py --count 1 --protocol http --provider yyds
 
 # Claude 使用 YYDS 临时邮箱
 python register.py --count 1 --node auto --provider yyds
